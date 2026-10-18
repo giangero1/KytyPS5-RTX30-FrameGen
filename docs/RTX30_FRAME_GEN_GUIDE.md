@@ -67,6 +67,7 @@ This guide demonstrates how to enable **NVIDIA DLSS Frame Generation** on **NVID
    SpoofCallers=sl.common.dll,_nvngx.dll,nvngx_dlssg.dll
    ```
 3. **Launch via `launcher.cmd`:**
+   ![Launcher Settings Configuration](rtx3070_launcher_settings.png)
    - **Resolution:** `2560x1440`
    - **Render height:** `1440 (PS5)`
    - **Frame generation:** `2x`

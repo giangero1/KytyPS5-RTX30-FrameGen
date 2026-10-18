@@ -4,7 +4,11 @@
 > **Native 1440p (2560x1440) 60 FPS verified on NVIDIA GeForce RTX 3070 (Ampere) & AMD Ryzen 7 5800X3D!**
 > This community fork enables **NVIDIA DLSS Frame Generation** on **RTX 30-series graphics cards** using the non-invasive [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler) proxy without degrading resolution or adding input latency.
 
-![Demon's Souls PS5 Native 1440p 60 FPS on RTX 3070](docs/rtx3070_demonsouls_60fps_benchmark.jpg)
+### In-Game Proof & Launcher Configuration
+
+| Real-World Gameplay Proof (60 FPS Solid) | Verified Launcher Settings (Native 1440p + 2x DLSS-G) |
+| :---: | :---: |
+| ![Demon's Souls PS5 Native 1440p 60 FPS on RTX 3070](docs/rtx3070_demonsouls_60fps_benchmark.jpg) | ![KytyPS5 Launcher Settings for RTX 30 Series Frame Generation](docs/rtx3070_launcher_settings.png) |
 
 ### Real-World In-Game Benchmark (Boletaria Castle Bridge)
 - **Output & Render Resolution:** Native **2560 × 1440** (PS5 Native 1440 Render Height)
