@@ -18,6 +18,7 @@
 #include "vulkan-recording.h"
 #endif
 #include "frame-gen.h"
+#include "frame-gen-hudless.h"
 #include "local-platform.h"
 #include "perf-overlay.h"
 #if defined(_WIN32)
@@ -78,6 +79,7 @@ public:
 			}
 			FrameGen::DestroyInputs(m_window.graphic_ctx, frame->fg);
 		}
+		FrameGen::DestroyHudless(m_window.graphic_ctx);
 	}
 	KYTY_CLASS_NO_COPY(FramePool);
 
@@ -539,15 +541,19 @@ struct Presenter::Impl {
 		// The graph: the last 300 frames (5 seconds at 60 fps).
 		PerfOverlay::RecentFrames(300, &hud.perf.frame_ms, level >= 2 ? &hud.perf.busy_ms : nullptr);
 		const double seconds = std::chrono::duration<double>(now - hud_window).count();
-		if (seconds >= 1.0) {
+		// (Switched on with F8: the panel at once, from the last second's flips, then refreshed each second. It had
+		// waited a second empty, which looked like a level without a panel, the user 10-19.)
+		const bool first = hud.title.empty();
+		if (seconds >= 1.0 || first) {
 			// The emulator's own frame rate (the game's flips) is the number; with frame generation, the frames DLSS-G
 			// presents (those it got, each with its generated ones) are, and the game's rate is below it.
-			const double   game     = PerfOverlay::Summarize(seconds).fps;
+			const double   game     = PerfOverlay::Summarize(std::max(seconds, 1.0)).fps;
 			const uint32_t presents = FrameGen::Enabled() ? FrameGen::PresentedFrames() : 1u;
 			std::array<char, 32>  title {};
 			std::array<char, 128> detail {};
 			if (presents > 1) {
-				std::snprintf(title.data(), title.size(), "%.0f FPS", hud_frames / seconds * presents);
+				std::snprintf(title.data(), title.size(), "%.0f FPS",
+				              (seconds >= 1.0 ? hud_frames / seconds : game) * presents);
 				std::snprintf(detail.data(), detail.size(), "DLSS Frame Generation %ux  |  game %.0f fps", presents, game);
 			} else {
 				std::snprintf(title.data(), title.size(), "%.0f FPS", game);
@@ -954,11 +960,11 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 		const char* value = std::getenv("KYTY_PRESENT_ASPECT");
 		return value != nullptr && std::string_view(value) == "fit";
 	}();
-	// KYTY_RENDER_ASPECT: the game's 3D was rendered wider and squeezed into its 16:9 output; a frame showing it is
-	// shown at that aspect, the others (movies, menus, loading screens) at their own 16:9, both fitted to the window
-	// (within 2% of the window's aspect: filling it).
+	// KYTY_RENDER_ASPECT: the game's 3D was rendered wider and squeezed into its 16:9 output; every frame is shown at that
+	// aspect, fitted to the window (within 2% of the window's aspect: filling it): the 3D as it was rendered, the others
+	// (movies, menus, loading screens) stretched from their 16:9 (the user, 10-19: the opening movie filling the screen).
 	// With the wide output (DemonsSoulsRenderSize::WideOutputWidth) the game's frames are as wide as the 3D; one without
-	// it (movies, menus, loading screens) holds its 16:9 picture at the left: that part is shown.
+	// it (movies, menus, loading screens) holds its 16:9 picture at the left: that part is shown, stretched.
 	int          dst_x = 0, dst_y = 0;
 	int          dst_w = static_cast<int>(m_extent.width), dst_h = static_cast<int>(m_extent.height);
 	uint32_t     src_w = source.extent.width;
@@ -966,7 +972,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 		src_w = std::min(src_w, (source.extent.height * 16u + 8u) / 9u);
 	const double frame_aspect = source.extent.height != 0 ? static_cast<double>(src_w) / source.extent.height : 0.0;
 	const double wide         = Loader::DemonsSoulsRenderSize::WideAspect();
-	double       aspect       = wide > 0.0 ? (scene ? wide : frame_aspect) : aspect_fit ? frame_aspect : 0.0;
+	double       aspect       = wide > 0.0 ? wide : aspect_fit ? frame_aspect : 0.0;
 	if (const double window = static_cast<double>(m_extent.width) / std::max(1u, m_extent.height);
 	    wide > 0.0 && std::fabs(aspect / window - 1.0) < 0.02) {
 		aspect = 0.0;
@@ -1129,6 +1135,9 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	if (FrameGen::Enabled()) {
 		FrameGen::PrepareInputs(m_impl->window.graphic_ctx, m_impl->renderer.GetTextureCache(),
 		                        buffer, frame->fg);
+		if (FrameGen::HudlessOn()) {
+			FrameGen::PrepareHudless(frame->fg, image);
+		}
 	}
 	return *frame;
 }
@@ -1334,6 +1343,11 @@ void Presenter::Present(Frame& frame, bool reuse) {
 				    (static_cast<float>(hud->drawn.offset.y - region.offset.y) + static_cast<float>(hud->drawn.extent.height) + margin) / h);
 			}
 			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay, frame.scene);
+			if (FrameGen::HudlessOn() && !frame.reusing_last) {
+				// DLSS-G's HUD-less image, where the frame image went.
+				FrameGen::ScaleHudless(m_impl->window.graphic_ctx, command.Handle(), frame.fg, swapchain.Extent(),
+				                       swapchain.PresentRegion(), swapchain.Format());
+			}
 			frame.present_tick = swapchain.Submit(m_impl->present_scheduler);
 		}
 #if defined(_WIN32)
