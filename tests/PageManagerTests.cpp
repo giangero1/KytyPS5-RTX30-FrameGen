@@ -22,6 +22,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+namespace Libs::LibKernel::Memory {
+bool RestoreGuestWritable(uint64_t /*vaddr*/, uint64_t /*size*/) {
+  return true;
+}
+} // namespace Libs::LibKernel::Memory
 
 namespace {
 
