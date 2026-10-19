@@ -21,7 +21,7 @@ Frame generation **2×**. For native select Render height **1440 (PS5)** and Ups
 Each upscaler remembers its own render height. DLSS signature validation was tested with v1.07;
 unsupported layouts fall back to TAA with a diagnostic.
 
-User bridge snapshots show **34 real / 68 displayed FPS** for DLSS and **29 / 58** for native.
+User bridge snapshots show **43 real / 85 displayed FPS** for DLSS and **30 / 60** for native.
 These are observations, not controlled averages or guaranteed frame rates. FG uses GPU time and
 memory and can lower base FPS; frame times do not measure end-to-end input latency.
 Eight-gigabyte cards can still exceed the Windows video-memory budget, and long-session memory

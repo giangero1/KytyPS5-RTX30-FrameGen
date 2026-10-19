@@ -31,7 +31,7 @@ The DLSS route uses **1920×1080 scene inputs → 2560×1440 SR output**, while 
 
 | Scene | 1080p DLSS + 2× FG (base / displayed) | Native 1440p + 2× FG (base / displayed) |
 | --- | --- | --- |
-| Bridge | 34 / 68 FPS | 29 / 58 FPS |
+| Bridge | 43 / 85 FPS | 30 / 60 FPS |
 | Interior | 42 / 83 FPS | 27 / 54 FPS |
 
 | DLSS bridge | Native bridge |

@@ -4,7 +4,7 @@
 - Share the SR/FG frame token, retain separate viewport IDs, and log actual SR success/fallback counts. Valid SR output is retained when Streamline returns its budget warning.
 - Add DXGI-first memory-pressure sampling, staged safe cache collection, completed-pool trimming and bounded resource diagnostics. Texture quality is unchanged; memory pressure remains possible on 8 GB cards.
 - Resolve one launcher executable for both native and DLSS modes, with an explicit developer override.
-- Include setup instructions and six user screenshots in the ZIP's `docs` folder. Bridge observations: **34 real / 68 displayed FPS** with 1080p DLSS versus **29 / 58** with native 1440p, both 2× FG. Views/builds were not controlled; no performance guarantee is implied.
+- Include setup instructions and six user screenshots in the ZIP's `docs` folder. Bridge observations: **43 real / 85 displayed FPS** with 1080p DLSS versus **30 / 60** with native 1440p, both 2× FG. Views/builds were not controlled; no performance guarantee is implied.
 
 **Required:** enable Windows hardware-accelerated GPU scheduling (HAGS), restart, and install the separate NVIDIA-signed Streamline runtime plus OpenDLSSG Enabler for RTX 30 FG. Runtime/proxy DLLs are not included. FG consumes GPU time and memory; displayed FPS is distinct from simulation/base FPS and input latency.
 

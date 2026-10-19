@@ -9,11 +9,15 @@ The DLSS PS5 Pro path now sizes its scene reconstruction to the selected launche
 
 ### RTX 3070 observations
 
-| Bridge: 1080p DLSS + 2× FG | Bridge: native 1440p + 2× FG |
+| 1080p DLSS (PS5 Pro path) Settings | 1080p DLSS → 1440p + 2× FG (85 FPS) |
 | :---: | :---: |
-| ![1080p DLSS: 34 base, 68 displayed FPS](docs/images/rtx3070-dlss1080-fg2x-bridge.png) | ![Native 1440p: 29 base, 58 displayed FPS](docs/images/rtx3070-native1440-fg2x-bridge.png) |
+| ![1080p DLSS Settings](docs/images/rtx3070-dlss1080-fg2x-settings.png) | ![1080p DLSS: 43 base, 85 displayed FPS](docs/images/rtx3070-dlss1080-fg2x-bridge.png) |
 
-These user screenshots show **34 real / 68 displayed FPS** with DLSS and **29 / 58** with native rendering. They are observations, not controlled benchmark averages: camera framing and earlier executable differences limit direct comparison. Performance varies by scene, settings and hardware; no fixed frame rate is guaranteed. [Settings, additional images and validation limits](docs/RTX30_FRAME_GEN_GUIDE.md).
+| Native 1440p (Game PS5) Settings | Native 1440p + 2× FG (60 FPS) |
+| :---: | :---: |
+| ![Native 1440p Settings](docs/images/rtx3070-native1440-fg2x-settings.png) | ![Native 1440p: 30 base, 60 displayed FPS](docs/images/rtx3070-native1440-fg2x-bridge.png) |
+
+These user screenshots show **43 real / 85 displayed FPS** with 1080p DLSS and **30 real / 60 displayed FPS** with native 1440p rendering (both with 2× frame generation on an RTX 3070 8 GB + Ryzen 7 5800X3D). They are observations, not controlled benchmark averages: camera framing and earlier executable differences limit direct comparison. Performance varies by scene, settings and hardware; no fixed frame rate is guaranteed. [Settings, additional images and validation limits](docs/RTX30_FRAME_GEN_GUIDE.md).
 
 Frame generation consumes GPU time and memory, so it can reduce **base FPS** while increasing **displayed FPS**. Generated frames do not double simulation or input-update speed. Frame time is not a measurement of end-to-end input latency. Similar FPS at 1080p DLSS and native 1440p with FG disabled does not establish a CPU bottleneck; fixed rendering/emulation work and reconstruction overhead also affect scaling.
 
