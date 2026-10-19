@@ -1,12 +1,14 @@
 # RTX 30 frame generation: native 1440p and 1080p DLSS
 
+**19 October 2026 update:** `v2026.10.19-upstream-merge` combines [chenxiao07's v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019) save/crash fixes with the integrations described below. The exact `aa4d4177` binaries were gameplay-verified by the user, with 85–95+ displayed FPS reported in Boletaria; existing screenshots retain their earlier measurements. For future upstream releases, use the [update playbook](UPSTREAM_UPDATE_PLAYBOOK.md).
+
 This experimental fork uses NVIDIA Streamline with the OpenDLSSG compatibility path on RTX 30 cards. It is distinct from NVIDIA's officially supported native RTX 40+ frame-generation path. The configuration below was tested on an **RTX 3070 8 GB, Ryzen 7 5800X3D, 32 GB RAM, Windows, 1440p 240 Hz display**, Demon's Souls PPSA01341 v01.007.000. Other RTX 30 models and runtime versions need their own validation.
 
 ## Requirements and setup
 
 1. Enable **hardware-accelerated GPU scheduling (HAGS)** under Windows Settings → System → Display → Graphics → Change default graphics settings, then **restart Windows**. NVIDIA lists HAGS as a DLSS-G requirement in its [Streamline integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md).
 2. Use a compatible NVIDIA driver, NVIDIA-signed Streamline runtime, and [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler). Follow the proxy's instructions for the version you install; this PR does not replace the runtime DLLs or change proxy configuration.
-3. Keep the proxy files alongside the emulator as required by its installation instructions. Select the Streamline folder in the launcher. Availability detection alone does not prove successful SR or FG execution: check the logs and in-game overlay.
+3. Keep `version.dll` and the installed proxy files beside the actual emulator executable. For the local installation this is `D:\Games\demon souls port pc\`, including candidate EXEs; setting that working directory while running an EXE elsewhere is insufficient. Select the Streamline folder in the launcher. Availability detection alone does not prove successful SR or FG execution: check the logs and in-game overlay.
 4. Run `launcher.cmd` from the package containing the rebuilt emulator. Native and DLSS use the **same executable**. Developers can select it explicitly with `powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher.ps1 -EmulatorExe "C:\path\kyty_emulator.exe"`. Add `-DryRun` to inspect the command without launching.
 
 ## Two tested configurations

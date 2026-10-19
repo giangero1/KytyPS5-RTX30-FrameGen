@@ -1,4 +1,32 @@
-# RTX 30: 1080p DLSS → 1440p + 2× FG (experimental)
+# v2026.10.19-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and gameplay-verified `aa4d4177` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`) and Streamline headers. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019)** (`d062b42d`) and its contributors. Merged in `636a6cf4`, with the subsequent compile/test corrections retained:
+
+- **Save corruption protection ([#73](https://github.com/chenxiao07/KytyPS5/issues/73)):** flush completed saves, maintain four rotating backup generations under `_SaveData/.kyty-backup/PPSA01341/<slot>/` with five-minute spacing, and recover detected zero-filled saves from a good backup while retaining damaged files.
+- **PageManager invalid-range fix ([#70](https://github.com/chenxiao07/KytyPS5/issues/70)):** address the `vaddr=0x0` fatal error during long DLSS sessions.
+- **Memory-management crash/BSOD mitigations:** stronger synchronization of page-protection changes with memory map/unmap operations, plus host-allocation safeguards. These reduce known failure paths; they do not guarantee that all driver/system crashes are eliminated.
+- **Optional HUD-less frame generation:** `KYTY_FG_HUDLESS=1`, contributed through upstream [PR #72](https://github.com/chenxiao07/KytyPS5/pull/72), remains off by default.
+- **F9 debug snapshots/pause:** snapshots under `_DebugSnapshots/`; press F9 again to resume.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas**, shared SR/FG frame tokens with distinct viewport IDs, and DXGI VRAM-pressure sampling/cache trimming are retained. The unified launcher selects the same executable for native and DLSS modes.
+
+The user validated gameplay, DLSS, UI, saves and 2× FG with no observed regressions on RTX 3070, reporting **85–95+ displayed FPS in Boletaria**. This is user-reported performance, not a controlled average or a guarantee. Existing reference screenshots show **43 base / 85 displayed FPS** for DLSS and **30 / 60** for native 1440p. FG does not raise the simulation rate to the displayed rate.
+
+**Automated validation:** all seven focused tests pass: `demons_souls_output`, `launcher_commands`, `save_data_backup`, `page_manager`, `command_scheduler_timeline`, `host_image_allocation`, `texture_cache_depth_readback`. The binary pair is hash-identical to the verified build output. The broader historical BC3 atlas overlap failure and untested resolution/long-session cases remain documented in [validation limits](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/DLSS_UI_CANVAS_VALIDATION.md); seven focused passes do not establish a fully passing suite.
+
+**Installation:** extract the portable ZIP and use `launcher.cmd`. Standard app/VC runtime DLLs, six screenshots and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
+# Historical notes: RTX 30 1080p DLSS → 1440p + 2× FG (experimental)
 
 - Size the PS5 Pro SR/processing output to the launcher resolution while preserving the original 3840×2160 UI canvas. Menus, inventory and HUD keep their layout.
 - Share the SR/FG frame token, retain separate viewport IDs, and log actual SR success/fallback counts. Valid SR output is retained when Streamline returns its budget warning.

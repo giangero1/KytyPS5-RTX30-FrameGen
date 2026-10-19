@@ -3,9 +3,11 @@ name: Build KytyPS5 (Windows)
 # This fork's Windows build (Demon's Souls, see README.md): a manual run (Actions > Build KytyPS5 (Windows) >
 # Run workflow) or a pushed v* tag builds the release package and publishes it as a GitHub release, marked
 # latest (README.md links to the latest one). Pushes build nothing.
+# *-upstream-merge tags publish exact locally verified binaries with the documented
+# packaging script and gh release; do not rebuild or publish those tags here.
 on:
   push:
-    tags: [ 'v*' ]
+    tags: [ 'v*', '!v*-upstream-merge' ]
   workflow_dispatch:
 
 concurrency:

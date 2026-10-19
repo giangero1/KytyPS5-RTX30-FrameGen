@@ -1,3 +1,7 @@
+# Promoted upstream v20261019 baseline (19 October 2026)
+
+The current fork release is `v2026.10.19-upstream-merge`, built locally from `aa4d4177` and retaining the RTX 3070 DLSS/output/UI/token/VRAM integrations. The exact promoted binary hashes and safe future-update procedure are in [UPSTREAM_UPDATE_PLAYBOOK.md](UPSTREAM_UPDATE_PLAYBOOK.md); packaging records the final release commit separately. Earlier build fingerprints and measurements below are historical.
+
 # 当前可玩版本
 
 更新：2026-09-20。正式运行版本没有因 PBR 实验改变，重场景约 22～23 FPS。

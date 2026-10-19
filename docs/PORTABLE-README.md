@@ -1,8 +1,12 @@
 # KytyPS5 portable test build (Windows)
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
-**Demon's Souls (the PS5 remake)**. It is built by GitHub Actions from the source at
-https://github.com/giangero1/KytyPS5-RTX30-FrameGen, where newer builds are under Releases.
+**Demon's Souls (the PS5 remake)**. This `v2026.10.19-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `aa4d4177` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
+https://github.com/giangero1/KytyPS5-RTX30-FrameGen. `BUILD-INFO.txt` identifies both the binary source and final release commit; verify the external ZIP checksum and internal `SHA256-MANIFEST.txt`.
+
+Thanks to [chenxiao07/KytyPS5 v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019) and its contributors for save flushing, four rotating backup generations (five-minute spacing), recovery of detected zero-filled saves, PageManager fixes, memory-management crash/BSOD mitigations, optional `KYTY_FG_HUDLESS=1` and F9 debug snapshot/pause. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
+
+The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. The user reports 85–95+ displayed FPS in Boletaria; the earlier screenshot observations below remain unchanged. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
 ## RTX 3070: 1080p DLSS to 1440p with 2× frame generation
 
@@ -112,20 +116,18 @@ and the shadows of torches and other lamps. Each thing drawn costs the emulator 
 help where the processor limits the frame rate (a laptop Ryzen 9 5900HX standing at the Gates of
 Boletaria: 21.9 fps at Standard, 25.6 at Lowest).
 "Upscaler" (Game by default, as on the PS5) with "DLSS (PS5 Pro path)" runs the game's own PS5 Pro mode:
-its 3D at the render height (1080 at least) is made a real 3840x2160 image by NVIDIA DLSS in place of Sony's
-PS5 Pro upscaler, and the game finishes it at 4K (bloom, depth of field, the HUD), instead of anti-aliasing
-at the render height and stretching to 4K. The launcher keeps a render height for each upscaler: DLSS starts
-at 1080, DLSS's Performance (on an RTX 5090 about the frame rate of the game's own TAA at 1440, with a
-sharper picture); 1440 is its Quality, 1512 the PS5 Pro's own 2688x1512, 2160 DLAA. NVIDIA RTX only, with
+its 3D at the render height (1080 at least) is reconstructed by NVIDIA DLSS to the selected output size,
+while retaining the original 3840x2160 UI/HUD canvas. At the validated RTX 3070 profile, this is
+1920x1080 scene input -> 2560x1440 SR output. The launcher keeps a render height for each upscaler;
+DLSS starts at 1080. Upstream's original Performance/Quality descriptions assumed a 4K SR target and
+do not describe the scale ratio of this fork's 1440p output. NVIDIA RTX only, with
 NVIDIA's Streamline runtime as for frame generation below: on a PC without an NVIDIA RTX graphics card (AMD,
 Intel, GeForce GTX) the launcher keeps this row and frame generation off, and the game's own TAA makes the
 picture at its own render height. The in-game "Cinematic" mode stays native 4K without DLSS.
-With an "Aspect ratio" wider than 16:9, DLSS makes the picture at its full width: 5120x2160 at 21:9 (from
-2560x1080 at render height 1080), and the game finishes it at that size, with the HUD at the screen's edges,
-instead of a 3840x2160 picture widened on the screen. On an RTX 5090 at Boletaria's start that ran at 64.5 fps,
-the game's TAA at 21:9 at 59.3. Screens without the 3D (movies, the title, loading) are stretched to the
-width, as without DLSS.
-"Frame generation" (DLSS, 2x to 6x; NVIDIA RTX 40 or newer, 3x and up RTX 50) uses NVIDIA's Streamline
+Wider aspect-ratio paths are inherited from upstream, but full ultrawide/4K runtime acceptance for this
+RTX 3070 integration is still pending; do not treat upstream RTX 5090 results as this build's validation.
+"Frame generation" (DLSS; official native support on RTX 40 or newer, 3x and up RTX 50;
+this fork's RTX 30 compatibility setup is validated at 2x) uses NVIDIA's Streamline
 runtime, which this package does not include: download the Streamline SDK (a release zip from
 https://github.com/NVIDIA-RTX/Streamline/releases), unpack it and choose its folder with the launcher's
 "Streamline..." button (only files signed by NVIDIA are loaded). The frames shown are the game's times the

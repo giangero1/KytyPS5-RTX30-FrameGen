@@ -1,5 +1,15 @@
 # KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
+## Verified upstream v20261019 merge — RTX 3070 integrations preserved
+
+**[Download v2026.10.19-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.19-upstream-merge)** — portable Windows x64 ZIP and SHA256 checksums, locally built with Clang-CL 19, ThinLTO, AVX2 and Streamline headers. The exact gameplay-verified binaries come from `aa4d4177`; release metadata also identifies the documentation/packaging commit.
+
+Thanks to **[chenxiao07/KytyPS5 v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019)** and its contributors for completed-save flushing, rotating save backups/recovery, the PageManager invalid-range fix, memory-management crash/BSOD mitigations, optional HUD-less FG ([PR #72](https://github.com/chenxiao07/KytyPS5/pull/72)), and F9 debug snapshots/pause.
+
+This fork retains **1920×1080 DLSS → 2560×1440 output + 2× FG**, the original **3840×2160 UI canvas**, shared SR/FG frame tokens and DXGI VRAM-pressure handling. The user reports **85–95+ displayed FPS in Boletaria on RTX 3070** after this merge; this is an observation, not a controlled average or performance guarantee. The six earlier screenshots below remain labeled with their original measurements.
+
+All seven focused core tests pass. Prior broader validation limits remain documented; this does not claim a fully passing regression suite or all-resolution certification. **Streamline/OpenDLSSG DLLs remain separate prerequisites**; keep the proxy beside the emulator and enable HAGS/restart Windows. See the [setup guide](docs/RTX30_FRAME_GEN_GUIDE.md) and [future upstream update playbook, including a reusable request](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
 > [!IMPORTANT]
 > **NEW MILESTONE: 85 FPS verified with 1080p DLSS (PS5 Pro path) + 2× DLSS Frame Generation!**
 > - **1080p DLSS → 1440p Output + 2× FG:** **85 FPS Peak** (`DLSS FG 2x | game 43 fps`) on NVIDIA GeForce RTX 3070 (Ampere) & AMD Ryzen 7 5800X3D!
@@ -10,8 +20,8 @@
 > ⚠️ **Mandatory Prerequisite:** Enable **Hardware-Accelerated GPU Scheduling (HAGS)** in Windows Settings and **restart your PC**.
 
 ### 🚀 Direct Download
-📦 **[Download Latest Release: v2026.10.19-dlss1080-ui4k](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.19-dlss1080-ui4k)**  
-*Pre-compiled portable Windows x64 package (`KytyPS5-v2026.10.19-dlss1080-ui4k-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
+📦 **[Download Latest Release: v2026.10.19-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.19-upstream-merge)**
+*Locally verified portable Windows x64 package (`KytyPS5-v2026.10.19-upstream-merge-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
 
 ---
 
@@ -65,7 +75,7 @@
 > of video memory (the test PC limited to 8 GB: most areas 40–60 fps, the heaviest 10–35).
 >
 > **Download: [the latest release](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)**, a Windows
-> x64 build made by GitHub Actions from this branch. Unzip it, double-click `launcher.cmd` (or
+> x64 build; this upstream-merge release packages the exact locally verified binaries. Unzip it, double-click `launcher.cmd` (or
 > `run.cmd`) and choose the game folder (the one with `eboot.bin`); the `README.md` inside explains
 > the rest. Use only a game dump made from your own copy of the game. To build it yourself, see
 > [Building with build-windows.cmd](#building-with-build-windowscmd-windows).
