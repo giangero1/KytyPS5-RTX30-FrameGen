@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
+#include "local/video-memory-policy.h"
 
 #include <map>
 #include <mutex>
@@ -155,6 +156,8 @@ struct GraphicContext {
 	// The video memory heap's budget less its usage (VMA's figures, the largest device-local heap): what a new
 	// device-local allocation can take without going over the budget; 0 without the driver's figures.
 	[[nodiscard]] uint64_t GetVideoMemoryRoom() const;
+	[[nodiscard]] VideoMemorySnapshot GetVideoMemorySnapshot() const;
+	[[nodiscard]] uint64_t ReleasedImageAllocationBytes() const;
 	// The driver's usage figures read again (VMA otherwise refreshes them every 30 of its own allocations: memory
 	// the driver takes itself, such as pipelines, shows late).
 	void                   RefreshMemoryBudget();

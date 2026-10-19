@@ -26,6 +26,7 @@
 #include <sl_helpers.h>
 #include <sl_pcl.h>
 #include <sl_reflex.h>
+#include "frame-gen-result.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -231,7 +232,8 @@ struct Api {
 };
 Api              g_api;
 sl::FrameToken*  g_token = nullptr; // present thread: the frame being presented
-uint32_t         g_frame_index = 0;
+std::atomic<uint32_t> g_frame_index {0};
+std::atomic<sl::FrameToken*> g_upscale_token {nullptr}; // token from DLSS Super Resolution for the current guest frame
 bool             g_options_set = false;
 vk::Extent2D     g_options_backbuffer {};
 vk::Extent2D     g_options_render {};
@@ -733,14 +735,23 @@ void BeforePresent(const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2
 		g_options_format     = format;
 		if (mode_on != g_mode_on) {
 			LOGF("frame generation: DLSS-G %s\n", mode_on ? "on" : "off (no inputs)");
+			std::printf("Frame generation: DLSS-G %s (render %ux%u -> backbuffer %ux%u)\n",
+			            mode_on ? "active" : "standby (no inputs)",
+			            inputs ? inputs->render_extent.width : 0, inputs ? inputs->render_extent.height : 0,
+			            backbuffer.width, backbuffer.height);
+			std::fflush(stdout);
 			g_mode_on = mode_on;
 		}
 	}
 
-	++g_frame_index;
-	if (g_api.get_new_frame_token(g_token, &g_frame_index) != sl::Result::eOk || g_token == nullptr) {
-		g_token = nullptr;
-		return;
+	if (inputs != nullptr && inputs->token != nullptr) {
+		g_token = static_cast<sl::FrameToken*>(inputs->token);
+	} else {
+		const uint32_t frame_index = g_frame_index.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (g_api.get_new_frame_token(g_token, &frame_index) != sl::Result::eOk || g_token == nullptr) {
+			g_token = nullptr;
+			return;
+		}
 	}
 	auto& token = *g_token;
 	// The frame's Reflex sleep, then its markers (all at its present: the game's frame was made before).
@@ -911,7 +922,9 @@ void AfterPresent() {
 		g_generate    = static_cast<int>(state.numFramesToGenerateMax);
 		g_options_set = false;
 	}
-	if (presents % 600 == 1) {
+	static uint32_t last_actually_presented = 0;
+	if (state.numFramesActuallyPresented != last_actually_presented || presents % 600 == 1) {
+		last_actually_presented = state.numFramesActuallyPresented;
 		LOGF("frame generation: status=0x%x presented=%u max_generated=%u vram=%" PRIu64 " MiB\n",
 		     static_cast<uint32_t>(state.status), state.numFramesActuallyPresented,
 		     state.numFramesToGenerateMax, state.estimatedVRAMUsageInBytes >> 20u);
@@ -1011,6 +1024,10 @@ void OnUpscale(ImageId depth, uint64_t depth_address, ImageId motion, uint64_t m
 void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer& command,
                    FrameInputs& inputs) {
 	inputs.valid = false;
+	inputs.token = nullptr;
+#ifdef KYTY_FRAMEGEN_STREAMLINE
+	inputs.token = g_upscale_token.exchange(nullptr, std::memory_order_acq_rel);
+#endif
 	const bool ready = g_sources.valid && g_camera.valid;
 	const auto sources = g_sources;
 	const auto camera  = g_camera;
@@ -1045,6 +1062,19 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 
 bool UpscalerReady() {
 	return g_upscale_ready;
+}
+
+void PrepareUpscale(UpscaleInputs& inputs) {
+#ifdef KYTY_FRAMEGEN_STREAMLINE
+	if (!g_upscale_ready) return;
+	sl::FrameToken* token = nullptr;
+	const uint32_t frame_index = g_frame_index.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (g_api.get_new_frame_token(token, &frame_index) != sl::Result::eOk || token == nullptr) return;
+	inputs.token = token;
+	if (g_ready) g_upscale_token.store(token, std::memory_order_release);
+#else
+	(void)inputs;
+#endif
 }
 
 bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs) {
@@ -1088,10 +1118,10 @@ bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs) {
 		options_render = inputs.color.extent;
 		options_output = inputs.output.extent;
 	}
-	static uint32_t frame = 0;
-	++frame;
-	sl::FrameToken* token = nullptr;
-	if (g_api.get_new_frame_token(token, &frame) != sl::Result::eOk || token == nullptr) return false;
+	// Recording may run after the producer packaged the frame for presentation. The token
+	// must travel in the record, rather than being published from this delayed callback.
+	auto* token = static_cast<sl::FrameToken*>(inputs.token);
+	if (token == nullptr) return false;
 
 	sl::Constants constants {};
 	Mat4          identity;
@@ -1185,12 +1215,20 @@ bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs) {
 		return false;
 	}
 	const sl::BaseStructure* evaluate_inputs[] {&viewport};
-	if (const auto result = g_api.evaluate_feature(sl::kFeatureDLSS, *token, evaluate_inputs, 1, command_buffer);
-	    result != sl::Result::eOk) {
+	const auto result = g_api.evaluate_feature(sl::kFeatureDLSS, *token, evaluate_inputs, 1, command_buffer);
+	if (!EvaluationSucceeded(result)) {
 		static std::atomic<uint32_t> reports {0};
 		if (reports.fetch_add(1, std::memory_order_relaxed) < 8)
 			std::printf("DLSS super resolution: slEvaluateFeature failed (%s)\n", sl::getResultAsStr(result));
 		return false;
+	}
+	if (result == sl::Result::eWarnOutOfVRAM) {
+		static uint64_t warnings = 0;
+		if (++warnings == 1 || warnings % 300 == 0) {
+			std::printf("DLSS super resolution: evaluation succeeded with VRAM budget warning (warnings=%" PRIu64
+			            "); DLSS output retained\n", warnings);
+			std::fflush(stdout);
+		}
 	}
 	return true;
 #else
@@ -1212,6 +1250,7 @@ void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs) {
 			graphics.DeleteImage(*image);
 		}
 	}
+	inputs.token = nullptr;
 	inputs.valid = false;
 }
 

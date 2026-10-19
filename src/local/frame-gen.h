@@ -52,6 +52,7 @@ struct FrameInputs {
 	Camera        camera;
 	uint64_t      guest_frame = 0;
 	bool          motion_attachment = false; // the motion copy is a color attachment too
+	void*         token = nullptr; // Streamline FrameToken* if generated during DLSS Super Resolution
 	bool          valid       = false;
 };
 
@@ -129,6 +130,7 @@ struct UpscaleImage {
 	vk::ImageUsageFlags usage {};
 };
 struct UpscaleInputs {
+	void* token = nullptr; // Acquired on the producer thread before deferred command recording.
 	UpscaleImage color, depth, motion, output; // color, depth and motion at the render size
 	float        jitter_x = 0.0f, jitter_y = 0.0f;       // the projection's offset, in render pixels
 	float        motion_scale_x = 0.0f, motion_scale_y = 0.0f; // motion vector * scale = render pixels to the previous
@@ -138,6 +140,8 @@ struct UpscaleInputs {
 };
 // Streamline offers DLSS super resolution on this device.
 [[nodiscard]] bool UpscalerReady();
+// Producer thread: reserve the token before PrepareInputs can package this guest frame.
+void PrepareUpscale(UpscaleInputs& inputs);
 // Records DLSS into `command` (outside a render pass; the images in their `layout`s): false when it could not.
 [[nodiscard]] bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs);
 

@@ -239,25 +239,47 @@ uint64_t GraphicContext::GetDeviceMemoryUsage() const {
 	return usage - std::min(usage, simulation_ballast_bytes);
 }
 
+VideoMemorySnapshot GraphicContext::GetVideoMemorySnapshot() const {
+	uint64_t usage = 0, budget = 0;
+	if (QueryLocalVideoMemory(&usage, &budget) && budget != 0)
+		return {true, VideoMemorySource::Dxgi, usage, budget};
+	if (allocator == nullptr || !CanReportMemoryUsage()) return {};
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+	vmaGetHeapBudgets(allocator, budgets);
+	for (uint32_t heap = 0; heap < physical_device_memory_properties.memoryHeapCount; ++heap) {
+		if ((physical_device_memory_properties.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) && budgets[heap].budget != 0) {
+			usage += budgets[heap].usage;
+			budget += budgets[heap].budget;
+		}
+	}
+	if (budget == 0) return {};
+	return {true, VideoMemorySource::Vulkan, usage - std::min(usage, simulation_ballast_bytes),
+	        budget - std::min(budget, simulation_ballast_bytes)};
+}
+
 uint64_t GraphicContext::GetVideoMemoryRoom() const {
 	// (Without VK_EXT_memory_budget VMA counts only its own blocks against a guessed budget: no figure to go by.)
 	if (allocator == nullptr || !CanReportMemoryUsage()) {
 		return 0;
 	}
+	uint64_t video = 0, budget = 0;
+	if (QueryLocalVideoMemory(&video, &budget)) {
+		return budget > video ? budget - video : 0;
+	}
 	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
 	vmaGetHeapBudgets(allocator, budgets);
 	const auto& heaps = physical_device_memory_properties.memoryHeaps;
-	uint32_t    video = UINT32_MAX;
+	uint32_t    video_heap = UINT32_MAX;
 	for (uint32_t heap = 0; heap < physical_device_memory_properties.memoryHeapCount; heap++) {
-		const bool larger = video == UINT32_MAX || heaps[heap].size > heaps[video].size;
-		if ((heaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) && larger) video = heap;
+		const bool larger = video_heap == UINT32_MAX || heaps[heap].size > heaps[video_heap].size;
+		if ((heaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) && larger) video_heap = heap;
 	}
-	if (video == UINT32_MAX) {
+	if (video_heap == UINT32_MAX) {
 		return 0;
 	}
 	// (The driver's usage holds KYTY_SIMULATE_VRAM_MB's ballast: the room left is the same.)
-	const auto& budget = budgets[video];
-	return budget.budget > budget.usage ? budget.budget - budget.usage : 0;
+	const auto& vma_budget = budgets[video_heap];
+	return vma_budget.budget > vma_budget.usage ? vma_budget.budget - vma_budget.usage : 0;
 }
 
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
@@ -313,6 +335,7 @@ struct PooledImage {
 std::mutex               g_image_pool_mutex;
 std::vector<PooledImage> g_image_pool;
 uint64_t                 g_image_pool_bytes = 0;
+std::atomic<uint64_t> g_released_image_bytes {0};
 
 std::array<uint32_t, 10> ImagePoolKey(const vk::ImageCreateInfo& info) {
 	return {static_cast<uint32_t>(static_cast<VkImageCreateFlags>(info.flags)), static_cast<uint32_t>(info.imageType),
@@ -340,6 +363,7 @@ static void DestroyImagePool(VmaAllocator allocator) {
 	std::scoped_lock lock(g_image_pool_mutex);
 	for (const auto& pooled: g_image_pool) {
 		vmaDestroyImage(allocator, pooled.image, pooled.allocation);
+		g_released_image_bytes.fetch_add(pooled.bytes, std::memory_order_relaxed);
 	}
 	g_image_pool.clear();
 	g_image_pool_bytes = 0;
@@ -347,6 +371,10 @@ static void DestroyImagePool(VmaAllocator allocator) {
 
 void GraphicContext::TrimImagePool() {
 	if (allocator != nullptr) DestroyImagePool(allocator);
+}
+
+uint64_t GraphicContext::ReleasedImageAllocationBytes() const {
+	return g_released_image_bytes.load(std::memory_order_relaxed);
 }
 
 // Out of video memory: the first few times say so in the log, with the heaps' budgets.
@@ -465,6 +493,7 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 		while (g_image_pool_bytes > g_image_pool_limit && !g_image_pool.empty()) {
 			auto& oldest = g_image_pool.front();
 			vmaDestroyImage(allocator, oldest.image, oldest.allocation);
+			g_released_image_bytes.fetch_add(oldest.bytes, std::memory_order_relaxed);
 			g_image_pool_bytes -= oldest.bytes;
 			g_image_pool.erase(g_image_pool.begin());
 		}
@@ -472,7 +501,10 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 		image.allocation = nullptr;
 		return;
 	}
+	VmaAllocationInfo released {};
+	vmaGetAllocationInfo(allocator, image.allocation, &released);
 	vmaDestroyImage(allocator, image.image, image.allocation);
+	g_released_image_bytes.fetch_add(released.size, std::memory_order_relaxed);
 	image.image      = nullptr;
 	image.allocation = nullptr;
 }

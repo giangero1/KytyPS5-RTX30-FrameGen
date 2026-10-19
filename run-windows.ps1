@@ -18,7 +18,7 @@
 #                                            NVIDIA's Streamline runtime (-StreamlineDir)
 #   .\run-windows.ps1 -Upscaler dlss         DLSS super resolution: Demon's Souls' own PS5 Pro path (its 3D at
 #                                            2688x1512 or -RenderHeight, 1080 at least), DLSS in place of Sony's
-#                                            upscaler making the 3840x2160 image; NVIDIA's Streamline runtime
+#                                            upscaler at the selected output size; the UI retains its 4K canvas
 #   .\run-windows.ps1 -StreamlineDir <dir>   where NVIDIA's Streamline runtime is (the Streamline SDK
 #                                            or its bin\x64; default: a "streamline" folder next to
 #                                            the emulator)

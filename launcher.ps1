@@ -1,9 +1,15 @@
-param([switch]$DryRun)
+param([switch]$DryRun, [string]$EmulatorExe = "")
 # A small settings window in front of run-windows.ps1 and precompile-windows.ps1 (launcher.cmd opens it). The
 # settings and the console language names follow the KytyPS5 launcher (src/launcher, by the KytyPS5 developers);
 # they are kept in launcher-settings.json next to this script. -DryRun prints the commands without a window.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+# Resolve once for both native and DLSS; never choose a binary based on the upscaler.
+if (!$EmulatorExe) {
+    $EmulatorExe = if (Test-Path -LiteralPath "$root\kyty_emulator.exe") { "$root\kyty_emulator.exe" } else { "$root\_Build\windows\kyty_emulator.exe" }
+}
+$EmulatorExe = [IO.Path]::GetFullPath($EmulatorExe)
+if (!(Test-Path -LiteralPath $EmulatorExe -PathType Leaf)) { throw "Emulator executable not found: $EmulatorExe" }
 # cmd.exe by its full path: Start-Process with a bare "cmd" opens whatever "cmd" it finds first, and a file of that
 # name without an extension (in the working folder or on the PATH) made Windows ask which app should open it (issue #47).
 $cmd = if ($env:ComSpec -and (Test-Path -LiteralPath $env:ComSpec)) { $env:ComSpec } else { Join-Path ([Environment]::SystemDirectory) 'cmd.exe' }
@@ -17,9 +23,9 @@ $languages = 'Japanese', 'English (United States)', 'French (France)', 'Spanish 
 	'Arabic', 'French (Canada)', 'Czech', 'Hungarian', 'Greek', 'Romanian', 'Thai', 'Vietnamese', 'Indonesian'
 $resolutions = '1280x720', '1920x1080', '2560x1440', '3840x2160', '2560x1080', '3440x1440', '3840x1600', '5120x2160',
 	'3840x1080', '5120x1440'
-# The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
+# Scene render height; DLSS processing follows the selected output while the UI retains its 4K canvas.
 $renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900'
-# What makes the 3840x2160 image of the 3D (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
+# What reconstructs the scene (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
 # place of Sony's PS5 Pro upscaler on the game's PS5 Pro path (NVIDIA's Streamline runtime, as frame generation).
 $upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)'
 # The aspect ratio of Demon's Souls' 3D (run-windows.ps1 -Aspect): wider sees more to the sides.
@@ -90,7 +96,7 @@ $efficiencyMask = Get-EfficiencyMask
 # (github.com/NVIDIA-RTX/Streamline/releases) chosen with "Streamline..." (settings: streamline), else a "streamline"
 # folder next to the emulator, else the SDK beside a local build (_Build\deps\streamline\sdk). The emulator loads
 # only NVIDIA's own sl.interposer.dll (run-windows -StreamlineDir).
-$exe = if (Test-Path "$root\kyty_emulator.exe") { "$root\kyty_emulator.exe" } else { "$root\_Build\windows\kyty_emulator.exe" }
+$exe = $EmulatorExe
 $streamlineSdkUrl = 'https://github.com/NVIDIA-RTX/Streamline/releases'
 # The runtime's folder in $dir (the folder itself or its bin\x64) when its sl.interposer.dll is signed by NVIDIA;
 # $null otherwise.
@@ -126,7 +132,7 @@ $frameGenAvailable = [bool]$streamline -and $rtxGpu
 function Get-PlayCommand {
 	$size = $settings.resolution -split 'x'
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\run-windows.ps1`"", '-Prompt', '-Follow',
-		'-Width', $size[0], '-Height', $size[1], '-Language', $settings.language)
+		'-Exe', "`"$EmulatorExe`"", '-Width', $size[0], '-Height', $size[1], '-Language', $settings.language)
 	if ($settings.fullscreen) { $arguments += '-Fullscreen'; if ($settings.aspect) { $arguments += '-AspectFit' } }
 	if (!$settings.redzone) { $arguments += '-NoRedZone' }
 	if ($settings.fps120) { $arguments += '-Fps120' }

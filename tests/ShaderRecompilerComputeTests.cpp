@@ -2153,6 +2153,45 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  void CheckDeferredImageRetirement() {
+    constexpr const char *name = "DeferredImageRetirement";
+    auto &graphics = RuntimeContext();
+    CommandScheduler scheduler(Renderer(), graphics);
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    VulkanImage image;
+    vk::ImageCreateInfo create{};
+    create.imageType = vk::ImageType::e2D;
+    create.format = vk::Format::eR8G8B8A8Unorm;
+    create.extent = {16, 16, 1};
+    create.mipLevels = create.arrayLayers = 1;
+    create.samples = vk::SampleCountFlagBits::e1;
+    create.tiling = vk::ImageTiling::eOptimal;
+    create.usage = vk::ImageUsageFlagBits::eTransferDst;
+    Require(name, "create", graphics.CreateImage(create, image), "allocation failed");
+    auto command = scheduler.Current().Handle();
+    vk::ImageMemoryBarrier barrier{};
+    barrier.oldLayout = vk::ImageLayout::eUndefined;
+    barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+    barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image.image;
+    barrier.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    command.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer,
+                            {}, 0, nullptr, 0, nullptr, 1, &barrier);
+    vk::ClearColorValue color(std::array<float, 4>{1, 0, 0, 1});
+    command.clearColorImage(image.image, vk::ImageLayout::eTransferDstOptimal, &color, 1, &barrier.subresourceRange);
+    bool retired = false;
+    scheduler.DeferOperation([&] { graphics.DeleteImage(image); retired = true; });
+    Require(name, "pending", !retired && image.image != nullptr, "allocation freed before recorded work completed");
+    scheduler.Finish();
+    Require(name, "completed", retired && image.image == nullptr && image.allocation == nullptr,
+            "allocation was not retired after GPU completion");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckDescriptorHeapLargeSet() {
     EnsureRuntimeContext();
     std::array<vk::DescriptorSetLayoutBinding, 3> bindings{};
@@ -32234,6 +32273,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--host-image-allocation-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckHostImageAllocation();
+    vulkan.CheckDeferredImageRetirement();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--occlusion-dump-only") == 0) {

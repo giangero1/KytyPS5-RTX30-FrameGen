@@ -280,6 +280,17 @@ void RunUpscale(const UpscaleRecord& record, const vk::detail::DispatchLoaderDyn
 	};
 	stamp(0);
 	const bool upscaled = FrameGen::Upscale(record.command, record.inputs);
+	// Count actual evaluations, including the stretch fallback; availability alone is not success.
+	static uint64_t attempts = 0, successes = 0, failures = 0;
+	++attempts;
+	upscaled ? ++successes : ++failures;
+	if (attempts == 1 || attempts % 300 == 0) {
+		std::printf("Super resolution evaluations: attempts=%" PRIu64 " successful=%" PRIu64
+		            " failed=%" PRIu64 " stretch_fallbacks=%" PRIu64 " (%ux%u -> %ux%u)\n",
+		            attempts, successes, failures, failures, record.inputs.color.extent.width,
+		            record.inputs.color.extent.height, record.inputs.output.extent.width, record.inputs.output.extent.height);
+		std::fflush(stdout);
+	}
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 	LocalVulkanRecording::InvalidateReplayState(); // (what DLSS bound)
 #endif
@@ -308,6 +319,16 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 	if (Spec::Current() != nullptr) return Report("a speculative translation reached a dispatch: skipped");
 	m_context.GetCommandScheduler().PopPendingOperations();
 	RenderLockGuard lock(m_context.GetMutex());
+	// Give the DLSS runtimes room before they record work. These images were already
+	// retired after GPU completion and are held only for reuse; no texture mip is dropped.
+	static uint64_t memory_checks = 0;
+	auto& graphics = m_context.GetGraphics();
+	if (graphics.small_video_memory && FrameGen::Enabled() && (++memory_checks % 300 == 1)) {
+		graphics.RefreshMemoryBudget();
+		if (graphics.CanReportMemoryUsage() && graphics.GetVideoMemoryRoom() < (256ull << 20u)) {
+			graphics.TrimImagePool();
+		}
+	}
 	FrameGen::NoteScene(); // (the game's 3D view, as its TAA pass notes it)
 	auto&                             cache = m_context.GetTextureCache();
 	constexpr std::array<uint32_t, 4> slots {SlotColor, SlotMotion, SlotDepth, SlotOutput};
@@ -443,6 +464,7 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		record.timing_entry = static_cast<uint32_t>(timing->written++ % Timing::Entries);
 	}
 	if (dlss) {
+		FrameGen::PrepareUpscale(inputs);
 		color.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, range(bindings[0]), vk_buffer);
 		motion.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, range(bindings[1]), vk_buffer);
 		depth.Transit(depth_layout, vk::AccessFlagBits2::eShaderRead, range(bindings[2]), vk_buffer);

@@ -57,6 +57,31 @@ namespace Libs::Graphics {
 
 namespace {
 
+// Optional bounded evidence for allocation churn; never retain unbounded resource history.
+void TraceResource(const Image& image, const char* event, const char* reason, uint64_t tick) {
+	static const bool enabled = [] { const auto* v = std::getenv("KYTY_RESOURCE_LOG"); return v && *v == '1'; }();
+	if (!enabled) return;
+	static std::mutex mutex;
+	std::scoped_lock guard(mutex);
+	static std::unordered_map<uint64_t, uint32_t> creations;
+	static uint32_t lines = 0;
+	static auto window = std::chrono::steady_clock::now();
+	const auto address = image.info.data.address;
+	if (std::strcmp(event, "allocate") == 0 && (creations.size() < 4096 || creations.contains(address))) ++creations[address];
+	const auto now = std::chrono::steady_clock::now();
+	if (now - window >= std::chrono::seconds(2)) { window = now; lines = 0; }
+	// Keep evidence available after startup: at most 32 large-resource events per
+	// two seconds, rather than exhausting a process-wide quota before a menu opens.
+	if (image.info.data.size < (1ull << 20) || lines++ >= 32) return;
+	const auto found = creations.find(address);
+	std::printf("RESOURCE event=%s reason=%s serial=%llu addr=0x%llx bytes=%llu extent=%ux%u last_use=%llu tick=%llu creations=%u target=%d depth=%d storage=%d gpu_modified=%d\n",
+	    event, reason, static_cast<unsigned long long>(image.serial), static_cast<unsigned long long>(address),
+	    static_cast<unsigned long long>(image.info.data.size), image.info.extent.width, image.info.extent.height,
+	    static_cast<unsigned long long>(image.frame_accessed_last), static_cast<unsigned long long>(tick),
+	    found == creations.end() ? 0 : found->second, image.usage.render_target, image.usage.depth_target,
+	    image.usage.storage, image.IsGpuModified());
+}
+
 // Guest frames an overlapping image must stay unused before a lookup of another image may delete
 // it. (Compared with scheduler ticks before, dozens a frame: a 4K target and a 2560x1440 one the
 // game renders into the same transient memory every frame deleted and re-created each other,
@@ -426,6 +451,7 @@ ImageId TextureCache::InsertImage(const ImageInfo& info, bool may_fail) {
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
+	TraceResource(m_slot_images[id], "allocate", "cache-insert", m_gc_tick);
 	return id;
 }
 
@@ -456,7 +482,10 @@ size_t TextureCache::ReclaimImageMemory(uint64_t bytes, bool all) {
 		m_scheduler.Wait(m_scheduler.CurrentTick());
 		// (Destroyed now, not after RetireImage's operation: the GPU is done with them.)
 		const auto packet = Spec::PacketNow();
-		for (const auto id: victims) m_retired.emplace_back(id, packet);
+		for (const auto id: victims) {
+			m_retirement_bytes += m_slot_images[id].info.data.size;
+			m_retired.emplace_back(id, packet);
+		}
 		EraseRetired();
 		LiveCounters::Add(LiveCounters::GcImageDeletes, victims.size());
 	}
@@ -626,6 +655,9 @@ bool TextureCache::DetachImage(ImageId id) {
 }
 
 void TextureCache::RetireImage(ImageId id) {
+	const auto bytes = m_slot_images[id].info.data.size;
+	m_retirement_bytes += bytes;
+	TraceResource(m_slot_images[id], "retire", "detached-await-completion", m_gc_tick);
 	// (A speculation's packet may still read it: Spec::PacketNow.)
 	const auto packet = Spec::PacketNow();
 	if (m_scheduler.Active()) {
@@ -2087,6 +2119,7 @@ void TextureCache::InitializeImage(ImageId id) {
 			}
 			LiveCounters::Add(LiveCounters::FullUploads);
 			LiveCounters::Add(LiveCounters::FullUploadBytes, image.info.data.size);
+			TraceResource(image, "upload", kind, m_gc_tick);
 			static const bool log_uploads = std::getenv("KYTY_UPLOAD_LOG") != nullptr;
 			if (log_uploads) {
 				std::printf("[tsc %llu] UPLOAD %s addr=0x%llx size=0x%llx fmt=%u %ux%u layers=%u levels=%u tile=%u "
@@ -2499,6 +2532,7 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 	}
 	LiveCounters::Add(LiveCounters::FullUploads);
 	LiveCounters::Add(LiveCounters::FullUploadBytes, info.data.size);
+	TraceResource(image, "upload", "whole-chunked", m_gc_tick);
 	static std::atomic<uint32_t> reports {0};
 	if (reports.fetch_add(1, std::memory_order_relaxed) < 64) {
 		std::printf("TextureCache: chunked upload addr=0x%llx size=0x%llx layers=%u levels=%u: %llu pieces (%llu with "
@@ -4359,6 +4393,8 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 void TextureCache::EraseRetired() {
 	std::erase_if(m_retired, [&](const auto& retired) {
 		if (!Spec::PacketsPassed(retired.second)) return false;
+		m_completed_retirement_bytes += m_slot_images[retired.first].info.data.size;
+		TraceResource(m_slot_images[retired.first], "retired", "completion-passed", m_gc_tick);
 		m_slot_images.erase(retired.first);
 		m_erase_epoch.fetch_add(1, std::memory_order_release);
 		return true;
@@ -4420,6 +4456,27 @@ void TextureCache::RunGarbageCollector() {
 	EraseRetired();
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
+	const auto now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	    std::chrono::steady_clock::now().time_since_epoch()).count());
+	if (m_video_pressure.Due(now_ms)) {
+		m_graphics.RefreshMemoryBudget();
+		const bool was_active = m_video_pressure.active;
+		m_video_pressure.Update(now_ms, m_graphics.GetVideoMemorySnapshot());
+		if (m_video_pressure.active) m_graphics.TrimImagePool();
+		if (was_active != m_video_pressure.active ||
+		    (m_video_pressure.active && now_ms - m_pressure_report_ms >= 2000)) {
+			m_pressure_report_ms = now_ms;
+			const auto& s = m_video_pressure.snapshot;
+			std::printf("Video pressure: active=%d valid=%d source=%u usage=%llu MiB budget=%llu MiB headroom=%llu MiB scheduled=%llu MiB retired_after_completion=%llu MiB pending=%llu MiB (retired allocations may enter reuse pool)\n",
+			    m_video_pressure.active, s.valid, static_cast<unsigned>(s.source),
+			    static_cast<unsigned long long>(s.usage >> 20), static_cast<unsigned long long>(s.budget >> 20),
+			    static_cast<unsigned long long>(s.Headroom() >> 20), static_cast<unsigned long long>(m_retirement_bytes >> 20),
+			    static_cast<unsigned long long>(m_completed_retirement_bytes >> 20),
+			    static_cast<unsigned long long>((m_retirement_bytes - std::min(m_retirement_bytes, m_completed_retirement_bytes)) >> 20));
+			std::printf("Video pressure allocations: actually_released=%llu MiB (VMA image allocation frees, not guaranteed returned heap blocks)\n",
+			    static_cast<unsigned long long>(m_graphics.ReleasedImageAllocationBytes() >> 20));
+		}
+	}
 	// Parked images not taken back since the flip before: the game left that use of the memory.
 	std::erase_if(m_parked, [&](const auto& item) {
 		if (item.second.tick + 1 >= tick) return false;
@@ -4493,11 +4550,15 @@ void TextureCache::RunGarbageCollector() {
 	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
 	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
 	const bool     failing     = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;
-	const uint64_t stale_ticks = failing ? FailedRetryTicks : StaleTicks;
+	const bool under_pressure = m_video_pressure.active;
+	const uint64_t stale_ticks = m_video_pressure.Escalated(now_ms) ? 120ull : failing ? FailedRetryTicks : StaleTicks;
 	// Less the room game buffers in use that got system memory need back (BufferCache::MoveSpilledBufferBack).
 	const uint64_t collect_above = m_trigger_gc_memory - std::min(m_trigger_gc_memory, m_buffer_cache.SpilledRoom());
-	if (m_total_used_memory < collect_above || tick < stale_ticks) {
+	if ((!under_pressure && m_total_used_memory < collect_above) || tick < stale_ticks) {
 		return;
+	}
+	if (under_pressure) {
+		m_graphics.TrimImagePool();
 	}
 	// An image the collector keeps (a depth image with its stencil association; one the GPU wrote, tiled: no download
 	// for its data) is passed over, not counted: never used again, kept images stay at the front of the list, and the
@@ -4508,27 +4569,34 @@ void TextureCache::RunGarbageCollector() {
 	// nothing, and kept they left no room for the new mode's (issue #53: a 16 GB RX 7800 XT switching to the cinematic
 	// mode, its images unable to go to system memory).
 	const uint64_t       download_max = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download).Size() / 2;
+	const bool pressure_download = m_video_pressure.Escalated(now_ms);
+	uint64_t planned_download_bytes = 0;
 	std::vector<ImageId> candidates;
 	candidates.reserve(MaxDeletions);
 	m_lru_cache.ForEachItemBelow(tick - stale_ticks, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
-		if (owner == nullptr || !owner->registered || owner->depth_id ||
-		    (owner->IsGpuModified() && owner->info.IsTiled() && SafeToDownload(*owner) &&
-		     !(failing && owner->info.data.size <= download_max))) {
+		if (owner == nullptr || !owner->registered || owner->depth_id) {
 			return false;
+		}
+		if (owner->IsGpuModified() && owner->info.IsTiled() && SafeToDownload(*owner)) {
+			const auto bytes = owner->info.data.size;
+			if (!(failing && bytes <= download_max) &&
+			    !(pressure_download && PressureDownloadFits(bytes, download_max, planned_download_bytes))) return false;
+			planned_download_bytes += bytes;
 		}
 		candidates.push_back(id);
 		return candidates.size() == MaxDeletions;
 	});
 	for (const auto id: candidates) {
 		auto owner = m_slot_images.try_get(id);
-		if (m_total_used_memory < collect_above) {
+		if (!under_pressure && m_total_used_memory < collect_above) {
 			break;
 		}
 		if (owner == nullptr || !owner->registered) {
 			continue;
 		}
 		if (owner->IsGpuModified()) {
+			TraceResource(*owner, "preserve", under_pressure ? "pressure-readback-before-retire" : "gc-readback-before-retire", tick);
 			if (SafeToDownload(*owner) && !TryDownloadImage(id)) {
 				continue;
 			}

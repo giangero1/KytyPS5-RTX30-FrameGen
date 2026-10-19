@@ -564,6 +564,16 @@ add_executable(demons_souls_idle_tests EXCLUDE_FROM_ALL
 target_link_libraries(demons_souls_idle_tests xbyak::xbyak)
 target_include_directories(demons_souls_idle_tests PRIVATE ${inc_headers})
 
+add_executable(demons_souls_output_tests EXCLUDE_FROM_ALL tests/DemonsSoulsOutputTests.cpp)
+target_include_directories(demons_souls_output_tests PRIVATE ${inc_headers})
+if (WIN32)
+	add_executable(demons_souls_output_integration_tests EXCLUDE_FROM_ALL
+		tests/DemonsSoulsOutputIntegrationTests.cpp src/loader/demonsSoulsRenderSize.cpp
+		src/loader/guestCode.cpp src/loader/elf.cpp)
+	target_include_directories(demons_souls_output_integration_tests PRIVATE ${inc_headers})
+	target_link_libraries(demons_souls_output_integration_tests common)
+endif()
+
 add_executable(page_protection_table_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageProtectionTableTests.cpp")
 target_link_libraries(page_protection_table_tests fmt::fmt common)
@@ -721,6 +731,12 @@ if(BUILD_TESTING)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME demons_souls_copy COMMAND $<TARGET_FILE:demons_souls_copy_tests>)
 	add_test(NAME demons_souls_idle COMMAND $<TARGET_FILE:demons_souls_idle_tests>)
+	add_test(NAME demons_souls_output COMMAND $<TARGET_FILE:demons_souls_output_tests>)
+	if (WIN32)
+		add_test(NAME launcher_commands COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+			-File "${CMAKE_CURRENT_SOURCE_DIR}/tests/LauncherCommandTests.ps1"
+			-EmulatorExe $<TARGET_FILE:kyty_emulator>)
+	endif()
 	add_test(NAME page_protection_table COMMAND $<TARGET_FILE:page_protection_table_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
@@ -863,6 +879,8 @@ if (WIN32)
 	set(KYTY_STREAMLINE_SDK "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/streamline/sdk" CACHE PATH
 	    "NVIDIA Streamline SDK for KYTY_FRAMEGEN (local only)")
 	if (EXISTS "${KYTY_STREAMLINE_SDK}/include/sl.h")
+		target_include_directories(demons_souls_output_tests PRIVATE "${KYTY_STREAMLINE_SDK}/include")
+		target_compile_definitions(demons_souls_output_tests PRIVATE KYTY_TEST_STREAMLINE=1)
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             INCLUDE_DIRECTORIES "${KYTY_STREAMLINE_SDK}/include")
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY

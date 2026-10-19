@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "speculation-state.h"
+#include "local/video-memory-policy.h"
 
 #include <array>
 #include <atomic>
@@ -404,6 +405,9 @@ private:
 	uint64_t                                          m_logged_private       = 0;
 	bool                                              m_logged_short_of_ram  = false;
 	uint64_t         m_gc_tick                = 0;
+	VideoMemoryPressure m_video_pressure {};
+	uint64_t m_pressure_report_ms = 0;
+	uint64_t m_retirement_bytes = 0, m_completed_retirement_bytes = 0;
 	std::atomic<uint64_t> m_frame {0};
 	struct PendingDownload {
 		uint64_t address = 0, size = 0, tick = 0;

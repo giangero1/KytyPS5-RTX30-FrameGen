@@ -12,7 +12,8 @@ struct Program;
 // libs/libPsml.cpp hands the dispatch to the emulator's upscaler (graphics/guest_gpu/superResolution.h). Only where
 // DLSS is ready on the device (frame-gen.h UpscalerReady, made before the game is loaded); elsewhere the game's TAA.
 // KYTY_RENDER_HEIGHT then sizes mode 5 (loader/demonsSoulsRenderSize.h), at least 1080: the game's super resolution
-// is off below (SuperResolution::IsEnabled).
+// is off below (SuperResolution::IsEnabled). Render/output settings are validated and installed
+// before this path is enabled; DLSS output follows the selected launcher resolution.
 namespace DemonsSoulsSuperResolution {
 void Install(Program* program);
 // Install turned the game's super resolution path on.

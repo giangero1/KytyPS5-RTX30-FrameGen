@@ -2315,9 +2315,10 @@ bool CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		// (The wide output's: widened as the canvas's other draws, the rectangles with them.)
 		const bool wide = HudAnchor::Stretched(m_ctx);
 		for (uint32_t r = 0; r < count; ++r) {
+			const auto clip_rect = wide ? HudAnchor::Widened(m_ctx, rects[r]) : rects[r];
 			std::optional<HudAnchor::StretchScope> widen;
 			if (wide) widen.emplace(m_ctx, m_sh_ctx.GetPs());
-			HudAnchor::ClipScope clip(m_ctx, wide ? HudAnchor::Widened(rects[r]) : rects[r]);
+			HudAnchor::ClipScope clip(m_ctx, clip_rect);
 			drawn = m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args) && drawn;
 		}
 	}

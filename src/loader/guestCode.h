@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <span>
@@ -12,6 +13,39 @@
 namespace Loader {
 struct Program;
 namespace GuestCode {
+
+// Loader-time transaction: validate every original byte before changing any guest memory.
+// Callers must discover the complete set of sites first, while guest threads are stopped.
+class PatchBatch {
+public:
+	void Add(uint64_t address, std::span<const uint8_t> replacement) {
+		Entry       entry {address, {}, {replacement.begin(), replacement.end()}};
+		const auto* bytes = reinterpret_cast<const uint8_t*>(address);
+		entry.original.assign(bytes, bytes + replacement.size());
+		m_entries.push_back(std::move(entry));
+	}
+	template <typename T>
+	void Value(uint64_t address, const T& value) {
+		Add(address, {reinterpret_cast<const uint8_t*>(&value), sizeof(value)});
+	}
+	[[nodiscard]] bool Apply() const {
+		for (const auto& entry: m_entries)
+			if (std::memcmp(reinterpret_cast<const void*>(entry.address), entry.original.data(),
+			                entry.original.size()) != 0)
+				return false;
+		for (const auto& entry: m_entries)
+			std::memcpy(reinterpret_cast<void*>(entry.address), entry.replacement.data(),
+			            entry.replacement.size());
+		return true;
+	}
+
+private:
+	struct Entry {
+		uint64_t             address;
+		std::vector<uint8_t> original, replacement;
+	};
+	std::vector<Entry> m_entries;
+};
 
 // Code as every build of a game seen has it: hex bytes, "??" for a byte a build may change (call and jump
 // displacements, RIP-relative addresses, stack frame sizes), e.g. "55 48 89 e5 48 81 ec ?? ?? ?? ??".
