@@ -52,13 +52,8 @@ constexpr uint32_t                MaxVertices = 8192;
 struct Area {
 	float x0, x1, y0, y1, side;
 };
-<<<<<<< HEAD
-constexpr std::array<Area, 4> Areas {{
-    {-1.1f, 0.3f, 0.6f, 1.1f, -1.0f},      // health, magic, stamina, their buffs
-=======
 constexpr std::array<Area, 5> Areas {{
     {-1.1f, 0.3f, 0.6f, 1.1f, -1.0f},     // health, magic, stamina, their buffs
->>>>>>> v20261019
     {-1.1f, -0.55f, -1.1f, -0.25f, -1.0f}, // equipment, item counts and names
     {0.4f, 1.1f, 0.7f, 1.1f, 1.0f},        // souls
     {-0.55f, 0.55f, -0.95f, -0.35f, 0.0f}, // boss health, prompts
