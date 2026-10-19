@@ -6,7 +6,8 @@ name: Build KytyPS5 (Linux)
 # release, the Windows package's). Pushes build nothing.
 on:
   push:
-    tags: [ 'v*' ]
+    # Locally verified Windows releases are packaged/published explicitly.
+    tags: [ 'v*', '!v*-upstream-merge' ]
   workflow_dispatch:
 
 concurrency:
