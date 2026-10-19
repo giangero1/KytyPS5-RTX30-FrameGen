@@ -196,6 +196,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 				            requested, clamped, output.width, output.height);
 			requested = clamped;
 		}
+	}
 	if (!trinity && requested == game_height && aspect == 0.0) return true;
 	auto size = RenderSizeFor(requested, aspect != 0.0 ? aspect : GameAspect);
 	if (const auto most = MaxRenderHeight(aspect != 0.0 ? aspect : GameAspect); size.height > most) {
