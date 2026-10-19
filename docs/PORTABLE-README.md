@@ -2,7 +2,30 @@
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
 **Demon's Souls (the PS5 remake)**. It is built by GitHub Actions from the source at
-https://github.com/chenxiao07/KytyPS5, where newer builds are under Releases.
+https://github.com/giangero1/KytyPS5-RTX30-FrameGen, where newer builds are under Releases.
+
+## RTX 3070: 1080p DLSS to 1440p with 2× frame generation
+
+This experimental build supports **1920×1080 rendering → 2560×1440 DLSS → 2× FG**
+while retaining the original 4K menu/HUD canvas. Native 1440p + 2× FG is also available.
+Use the same packaged `launcher.cmd` and emulator for either configuration.
+
+**Enable hardware-accelerated GPU scheduling (HAGS) in Windows Settings → System →
+Display → Graphics → Change default graphics settings, then restart Windows.**
+RTX 30 FG requires the separate OpenDLSSG compatibility setup and NVIDIA-signed Streamline runtime;
+these runtime/proxy DLLs are not bundled. The feature is not ready to use until they are installed.
+Follow [the setup guide and screenshot comparison](docs/RTX30_FRAME_GEN_GUIDE.md).
+
+For DLSS select Resolution **2560×1440**, Render height **1080**, Upscaler **DLSS (PS5 Pro path)**,
+Frame generation **2×**. For native select Render height **1440 (PS5)** and Upscaler **Game (PS5)**.
+Each upscaler remembers its own render height. DLSS signature validation was tested with v1.07;
+unsupported layouts fall back to TAA with a diagnostic.
+
+User bridge snapshots show **34 real / 68 displayed FPS** for DLSS and **29 / 58** for native.
+These are observations, not controlled averages or guaranteed frame rates. FG uses GPU time and
+memory and can lower base FPS; frame times do not measure end-to-end input latency.
+Eight-gigabyte cards can still exceed the Windows video-memory budget, and long-session memory
+stability is not certified. See [validation limits](docs/DLSS_UI_CANVAS_VALIDATION.md).
 
 ## Supported game versions
 

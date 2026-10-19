@@ -1,25 +1,27 @@
-# KytyPS5: Demon's Souls PC — RTX 30 Series DLSS Frame Generation Edition
+# KytyPS5: Demon's Souls PC — RTX 30 Frame Generation Edition
 
 > [!IMPORTANT]
-> **Native 1440p (2560x1440) 60 FPS verified on NVIDIA GeForce RTX 3070 (Ampere) & AMD Ryzen 7 5800X3D!**
-> This community fork enables **NVIDIA DLSS Frame Generation** on **RTX 30-series graphics cards** using the non-invasive [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler) proxy without degrading resolution or adding input latency.
+> Experimental RTX 30 frame generation through [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler).
+> Tested on an RTX 3070 8 GB and Ryzen 7 5800X3D with **1080p rendering → 1440p DLSS → 2× frame generation**, and native 1440p + 2× FG.
+> **Enable hardware-accelerated GPU scheduling in Windows and restart the PC.** See [setup and requirements](docs/RTX30_FRAME_GEN_GUIDE.md).
 
-### In-Game Proof & Launcher Configuration
+The DLSS PS5 Pro path now sizes its scene reconstruction to the selected launcher output, while preserving the game's original **3840×2160 interface canvas**. Menus, inventory and HUD retain their original layout; the game composites the interface before presentation. A shared SR/FG frame token keeps reconstruction and frame generation associated with the same frame.
 
-| Real-World Gameplay Proof (60 FPS Solid) | Verified Launcher Settings (Native 1440p + 2x DLSS-G) |
+### RTX 3070 observations
+
+| Bridge: 1080p DLSS + 2× FG | Bridge: native 1440p + 2× FG |
 | :---: | :---: |
-| ![Demon's Souls PS5 Native 1440p 60 FPS on RTX 3070](docs/rtx3070_demonsouls_60fps_benchmark.jpg) | ![KytyPS5 Launcher Settings for RTX 30 Series Frame Generation](docs/rtx3070_launcher_settings.png) |
+| ![1080p DLSS: 34 base, 68 displayed FPS](docs/images/rtx3070-dlss1080-fg2x-bridge.png) | ![Native 1440p: 29 base, 58 displayed FPS](docs/images/rtx3070-native1440-fg2x-bridge.png) |
 
-### Real-World In-Game Benchmark (Boletaria Castle Bridge)
-- **Output & Render Resolution:** Native **2560 × 1440** (PS5 Native 1440 Render Height)
-- **Display Frame Rate:** **60 FPS Solid** (`DLSS Frame Generation 2x | game 30 fps`)
-- **System Latency:** **33.0 ms** (via NVIDIA Reflex integration)
-- **GPU & VRAM:** RTX 3070 @ 94%, 68°C | 7.1 GB emulator VRAM (stays safely within 8 GB VRAM)
-- **CPU:** AMD Ryzen 7 5800X3D @ 18%
-- **Input Feel:** Crisp 1:1 controller responsiveness with zero perceptible lag.
+These user screenshots show **34 real / 68 displayed FPS** with DLSS and **29 / 58** with native rendering. They are observations, not controlled benchmark averages: camera framing and earlier executable differences limit direct comparison. Performance varies by scene, settings and hardware; no fixed frame rate is guaranteed. [Settings, additional images and validation limits](docs/RTX30_FRAME_GEN_GUIDE.md).
 
-📖 **Detailed Setup & Tuning Guide:** See [docs/RTX30_FRAME_GEN_GUIDE.md](docs/RTX30_FRAME_GEN_GUIDE.md)  
-🔗 **Upstream Pull Request:** Submitted to `chenxiao07/KytyPS5` as [PR #67](https://github.com/chenxiao07/KytyPS5/pull/67)
+Frame generation consumes GPU time and memory, so it can reduce **base FPS** while increasing **displayed FPS**. Generated frames do not double simulation or input-update speed. Frame time is not a measurement of end-to-end input latency. Similar FPS at 1080p DLSS and native 1440p with FG disabled does not establish a CPU bottleneck; fixed rendering/emulation work and reconstruction overhead also affect scaling.
+
+Eight-gigabyte cards can still experience Windows video-memory budget pressure. The cache improvements preserve existing texture settings and resource lifetime checks; they do not guarantee that every scene fits the available budget.
+
+📖 [RTX 30 setup and tuning guide](docs/RTX30_FRAME_GEN_GUIDE.md)
+
+🔗 [Separate upstream PR #67](https://github.com/chenxiao07/KytyPS5/pull/67) covers earlier frame-generation work; it is not the delivery PR for these changes.
 
 ---
 
@@ -32,7 +34,7 @@
 > GPU with 12 GB of video memory are recommended; it also runs with 16 GB of RAM (slower loading) and 8 GB
 > of video memory (the test PC limited to 8 GB: most areas 40–60 fps, the heaviest 10–35).
 >
-> **Download: [the latest release](https://github.com/chenxiao07/KytyPS5/releases/latest)**, a Windows
+> **Download: [the latest release](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)**, a Windows
 > x64 build made by GitHub Actions from this branch. Unzip it, double-click `launcher.cmd` (or
 > `run.cmd`) and choose the game folder (the one with `eboot.bin`); the `README.md` inside explains
 > the rest. Use only a game dump made from your own copy of the game. To build it yourself, see

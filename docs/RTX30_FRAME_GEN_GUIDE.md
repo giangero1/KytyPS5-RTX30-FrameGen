@@ -1,76 +1,62 @@
-# KytyPS5 Demon's Souls: Native 1440p RTX 30 Series DLSS Frame Generation Guide
+# RTX 30 frame generation: native 1440p and 1080p DLSS
 
-This guide demonstrates how to enable **NVIDIA DLSS Frame Generation** on **NVIDIA GeForce RTX 30-Series (Ampere)** graphics cards for Demon's Souls PS5 on the KytyPS5 emulator at **native 1440p (2560x1440)**, doubling frame throughput from ~30 FPS to **60 FPS** with zero noticeable input latency.
+This experimental fork uses NVIDIA Streamline with the OpenDLSSG compatibility path on RTX 30 cards. It is distinct from NVIDIA's officially supported native RTX 40+ frame-generation path. The configuration below was tested on an **RTX 3070 8 GB, Ryzen 7 5800X3D, 32 GB RAM, Windows, 1440p 240 Hz display**, Demon's Souls PPSA01341 v01.007.000. Other RTX 30 models and runtime versions need their own validation.
 
----
+## Requirements and setup
 
-## Benchmark & Proof of Performance
+1. Enable **hardware-accelerated GPU scheduling (HAGS)** under Windows Settings → System → Display → Graphics → Change default graphics settings, then **restart Windows**. NVIDIA lists HAGS as a DLSS-G requirement in its [Streamline integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md).
+2. Use a compatible NVIDIA driver, NVIDIA-signed Streamline runtime, and [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler). Follow the proxy's instructions for the version you install; this PR does not replace the runtime DLLs or change proxy configuration.
+3. Keep the proxy files alongside the emulator as required by its installation instructions. Select the Streamline folder in the launcher. Availability detection alone does not prove successful SR or FG execution: check the logs and in-game overlay.
+4. Run `launcher.cmd` from the package containing the rebuilt emulator. Native and DLSS use the **same executable**. Developers can select it explicitly with `powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher.ps1 -EmulatorExe "C:\path\kyty_emulator.exe"`. Add `-DryRun` to inspect the command without launching.
 
-![RTX 3070 60 FPS Native 1440p Benchmark](rtx3070_demonsouls_60fps_benchmark.jpg)
+## Two tested configurations
 
-### Test Rig Specifications
-- **CPU:** AMD Ryzen 7 5800X3D (8 Cores, 16 Threads, 3D V-Cache)
-- **GPU:** NVIDIA GeForce RTX 3070 (8 GB GDDR6, Ampere SM 8.6)
-- **RAM:** 32 GB DDR4
-- **Display:** 240Hz High Refresh Rate Gaming Monitor
-- **Game:** Demon's Souls PS5 (PPSA01341 v01.007.000)
-- **Target Resolution:** Native 2560 × 1440 (Render Height: 1440 PS5 Native)
+| Launcher option | DLSS scene reconstruction | Native scene rendering |
+| --- | --- | --- |
+| Resolution | 2560×1440 | 2560×1440 |
+| Render height | 1080 | 1440 (PS5) |
+| Upscaler | DLSS (PS5 Pro path) | Game (PS5) |
+| Frame generation | 2× | 2× |
+| Graphics / aspect | Standard (PS5) / 16:9 | Standard (PS5) / 16:9 |
 
-### Real-World In-Game Metrics (Boletaria Castle Bridge)
-- **Presented Frame Rate:** **60 FPS Solid** (Green HUD)
-- **Internal Engine Frame Rate:** **30 FPS Native**
-- **Frame Multiplier:** `2x` (1 generated frame per real frame)
-- **Frame Times:** `33.8 ms` total present | `15.6 ms` render thread
-- **Total System Latency:** **33.0 ms** (via NVIDIA Reflex integration)
-- **GPU Utilization:** 94% @ 1905 MHz, 68°C, 191 W
-- **VRAM Footprint:** 7.1 GB emulator allocation / 7.7 GB total GPU VRAM (comfortably within the 8 GB limit)
-- **Controller Responsiveness:** Immediate 1:1 feel, no floaty or sluggish input delay.
+Keep quality, texture settings, pacing and runtime configuration identical when comparing. Each upscaler remembers its own render height; check the displayed height after switching. Restart for output-size changes: resizing the window changes presentation, not the startup SR dimensions. Outputs below the Pro path's 1080-line minimum retain the game's TAA path with a diagnostic.
 
----
+| DLSS settings | Native settings |
+| :---: | :---: |
+| ![1080p DLSS, 1440p output, 2x FG](images/rtx3070-dlss1080-fg2x-settings.png) | ![Native 1440p, 2x FG](images/rtx3070-native1440-fg2x-settings.png) |
 
-## Why FSR 3.1 Failed vs. Why DLSS-G Works
+The DLSS route uses **1920×1080 scene inputs → 2560×1440 SR output**, while retaining the original **3840×2160 display/interface canvas** and layout constants. The game's existing composition consumes the full interface; presentation scales the completed image. Depth/motion remain at render resolution; FG color matches the backbuffer. The 4K UI attachment measured 63.75 MiB in a local capture; that is one allocation, not the total incremental pipeline cost.
 
-| Metric / Feature | In-Engine AMD FSR 3.1.4 (Abandoned) | OpenDLSSG Enabler + Streamline (Active) |
-| :--- | :--- | :--- |
-| **Optical Flow Cost** | ~10 ms software compute cost on GPU/CPU | Executed via hardware Tensor & Optical Flow engines |
-| **Base Engine Impact** | Dragged base FPS from 32 down to 16 FPS | Zero drag: Base engine stays locked at 29–30 FPS |
-| **VRAM Consumption** | Saturated 8GB VRAM (7.5+ GB spike) | Steady 7.1 GB (safe headroom on 8GB cards) |
-| **Visual Stability** | Camera panning warping & HUD ghosting | Crystal-clear native 1440p, sharp HUD, clean aura |
-| **Input Latency** | High perceptible lag | ~33 ms (NVIDIA Reflex pacing) |
+## Observed screenshots, not benchmark averages
 
----
+| Scene | 1080p DLSS + 2× FG (base / displayed) | Native 1440p + 2× FG (base / displayed) |
+| --- | --- | --- |
+| Bridge | 34 / 68 FPS | 29 / 58 FPS |
+| Interior | 42 / 83 FPS | 27 / 54 FPS |
 
-## Hardware & System Requirements
+| DLSS bridge | Native bridge |
+| :---: | :---: |
+| ![DLSS bridge](images/rtx3070-dlss1080-fg2x-bridge.png) | ![Native bridge](images/rtx3070-native1440-fg2x-bridge.png) |
 
-1. **GPU:** NVIDIA GeForce RTX 30-Series (RTX 3060, 3060 Ti, 3070, 3070 Ti, 3080, 3080 Ti, 3090).
-2. **NVIDIA Driver:** 530.xx or newer (560+ recommended).
-3. **Windows HAGS:** **Hardware-Accelerated GPU Scheduling must be ON**:
-   - Open **Windows Settings** $\to$ **System** $\to$ **Display** $\to$ **Graphics** $\to$ **Default graphics settings**.
-   - Toggle **Hardware-accelerated GPU scheduling** to **ON**.
-   - Restart your PC.
+| DLSS interior | Native interior |
+| :---: | :---: |
+| ![DLSS interior](images/rtx3070-dlss1080-fg2x-interior.png) | ![Native interior](images/rtx3070-native1440-fg2x-interior.png) |
 
----
+These are user-supplied instantaneous readings. Views differ, especially indoors, and earlier launcher runs could use different executables. Do not infer percentage gains or minimum performance from them. The displayed/base values are independently rounded. The older native 30/60 screenshot remains a historical example, not a fixed frame-rate promise.
 
-## Quick-Start Setup
+FG performs additional GPU work and uses memory; **base FPS can fall when FG is enabled even while displayed FPS rises**. NVIDIA documents variable execution and memory costs in its [integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md); its native-GPU cost figures are not measurements of this RTX 30 compatibility path. Generated frames do not increase simulation or input-update frequency. Overlay frame times do not measure end-to-end system latency.
 
-1. **Deploy OpenDLSSG Enabler:**
-   - Place `version.dll` and `opendlssg.ini` in the root emulator directory alongside `kyty_emulator.exe`.
-   - `kyty_emulator.exe` statically links against `VERSION.dll`, allowing the proxy to initialize before the engine boots.
-2. **Configure `opendlssg.ini`:**
-   ```ini
-   [DLSSG]
-   MultiFrame=0
-   TargetSM=0
-   PatchFlipMetering=1
-   VulkanHooks=1
-   SpoofArchToGame=1
-   SpoofCallers=sl.common.dll,_nvngx.dll,nvngx_dlssg.dll
-   ```
-3. **Launch via `launcher.cmd`:**
-   ![Launcher Settings Configuration](rtx3070_launcher_settings.png)
-   - **Resolution:** `2560x1440`
-   - **Render height:** `1440 (PS5)`
-   - **Frame generation:** `2x`
-   - **Frame gen note:** Shows `DLSS; RTX 40+ native, RTX 30 with OpenDLSSG Enabler`
-   - **Overlay:** `Frame rate` (Press **F8** in-game to toggle detailed stats)
-4. Click **Play**!
+Similar FG-off FPS at 1080p DLSS and native 1440p is inconclusive: CPU/emulator work, fixed GPU passes, DLSS execution overhead, pacing and scene differences can limit the benefit. Alt-tab also changes focus/presentation behavior, so use an explicit FG-off run to compare. A CPU bottleneck requires CPU/GPU timing evidence, not only total CPU utilization or two FPS snapshots.
+
+For a controlled comparison, use the same executable, camera, warmed scene and settings. Repeat native1440+FG, DLSS1080 without FG, and DLSS1080+FG; record base/displayed FPS, frame times, usage/budget and SR/FG status. Include movement and repeated inventory transitions, not only stationary views.
+
+## Logs and memory limitations
+
+- Confirm SR logs report `1920x1080 -> 2560x1440`, rising successful evaluation counts, and no recurring errors/stretch fallbacks. A feature being available is insufficient.
+- Confirm gameplay FG reports `presented=2` and the overlay identifies 2× FG. It can be inactive in menus, loading, or when valid inputs are unavailable.
+- Enable `KYTY_SR_LOG=1` for evaluation counters and `KYTY_RESOURCE_LOG=1` for bounded resource-lifetime diagnostics.
+- Memory policy samples DXGI adapter-matched usage/budget first, with Vulkan reporting as fallback; it trims completed image-pool entries before eligible LRU resources. Pressure enters below 512 MiB headroom, escalates after two seconds, and clears only above 768 MiB for two seconds. GPU completion, aliasing and data-preservation checks still apply.
+- Retirement scheduled, retirement completed and allocation bytes freed are distinct. Freeing a suballocation does not necessarily return a whole heap block or immediately reduce measured process usage.
+- Windows budget is not physical VRAM capacity. Texture upload counters do not measure driver paging. Tight budgets and persistent pressure remain possible on 8 GB cards; quality is not silently reduced by this change.
+
+See [validation and remaining checks](DLSS_UI_CANVAS_VALIDATION.md). Ten-cycle inventory retention measurements and complete 1080p/4K/ultrawide runtime acceptance are still pending. Correct menus and short successful runs do not certify long-session memory stability.

@@ -1,3 +1,19 @@
+# RTX 30: 1080p DLSS → 1440p + 2× FG (experimental)
+
+- Size the PS5 Pro SR/processing output to the launcher resolution while preserving the original 3840×2160 UI canvas. Menus, inventory and HUD keep their layout.
+- Share the SR/FG frame token, retain separate viewport IDs, and log actual SR success/fallback counts. Valid SR output is retained when Streamline returns its budget warning.
+- Add DXGI-first memory-pressure sampling, staged safe cache collection, completed-pool trimming and bounded resource diagnostics. Texture quality is unchanged; memory pressure remains possible on 8 GB cards.
+- Resolve one launcher executable for both native and DLSS modes, with an explicit developer override.
+- Include setup instructions and six user screenshots in the ZIP's `docs` folder. Bridge observations: **34 real / 68 displayed FPS** with 1080p DLSS versus **29 / 58** with native 1440p, both 2× FG. Views/builds were not controlled; no performance guarantee is implied.
+
+**Required:** enable Windows hardware-accelerated GPU scheduling (HAGS), restart, and install the separate NVIDIA-signed Streamline runtime plus OpenDLSSG Enabler for RTX 30 FG. Runtime/proxy DLLs are not included. FG consumes GPU time and memory; displayed FPS is distinct from simulation/base FPS and input latency.
+
+**Validation:** Release build, focused policy/GPU tests, 11 local v1.07 loader scenarios and capture metadata checks passed. The broader BC3 atlas overlap test fails at the same assertion with the existing branch texture cache. Ten-cycle inventory retention tests, matched-build benchmark averages and full runtime 1080p/4K/ultrawide coverage remain pending. Treat this as an experimental build.
+
+Full guide and screenshots: https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/fix/dlss-output-ui-canvas/docs/RTX30_FRAME_GEN_GUIDE.md
+
+---
+
 ## New in this build
 
 - **Faster shaders: run the precompile once more.** Two changes give many of the game's shaders new pipelines:
