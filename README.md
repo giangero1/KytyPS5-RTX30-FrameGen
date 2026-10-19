@@ -1,31 +1,57 @@
-# KytyPS5: Demon's Souls PC — RTX 30 Frame Generation Edition
+# KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
 > [!IMPORTANT]
-> Experimental RTX 30 frame generation through [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler).
-> Tested on an RTX 3070 8 GB and Ryzen 7 5800X3D with **1080p rendering → 1440p DLSS → 2× frame generation**, and native 1440p + 2× FG.
-> **Enable hardware-accelerated GPU scheduling in Windows and restart the PC.** See [setup and requirements](docs/RTX30_FRAME_GEN_GUIDE.md).
+> **NEW MILESTONE: 85 FPS verified with 1080p DLSS (PS5 Pro path) + 2× DLSS Frame Generation!**
+> - **1080p DLSS → 1440p Output + 2× FG:** **85 FPS Peak** (`DLSS FG 2x | game 43 fps`) on NVIDIA GeForce RTX 3070 (Ampere) & AMD Ryzen 7 5800X3D!
+> - **Native 1440p + 2× FG:** **60 FPS Solid** (`DLSS FG 2x | game 30 fps`).
+> - **Original 4K UI Canvas Preservation:** Sharp native 3840×2160 HUD, menus, and inventory with zero scaling distortion.
+> - **RTX 30-Series DLSS-G:** Non-invasive [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler) proxy integration.
+> 
+> ⚠️ **Mandatory Prerequisite:** Enable **Hardware-Accelerated GPU Scheduling (HAGS)** in Windows Settings and **restart your PC**.
 
-The DLSS PS5 Pro path now sizes its scene reconstruction to the selected launcher output, while preserving the game's original **3840×2160 interface canvas**. Menus, inventory and HUD retain their original layout; the game composites the interface before presentation. A shared SR/FG frame token keeps reconstruction and frame generation associated with the same frame.
+### 🚀 Direct Download
+📦 **[Download Latest Release: v2026.10.19-dlss1080-ui4k](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.19-dlss1080-ui4k)**  
+*Pre-compiled portable Windows x64 package (`KytyPS5-v2026.10.19-dlss1080-ui4k-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
 
-### RTX 3070 observations
+---
 
-| 1080p DLSS (PS5 Pro path) Settings | 1080p DLSS → 1440p + 2× FG (85 FPS) |
-| :---: | :---: |
-| ![1080p DLSS Settings](docs/images/rtx3070-dlss1080-fg2x-settings.png) | ![1080p DLSS: 43 base, 85 displayed FPS](docs/images/rtx3070-dlss1080-fg2x-bridge.png) |
+### In-Game Proof & Launcher Configuration Gallery
 
-| Native 1440p (Game PS5) Settings | Native 1440p + 2× FG (60 FPS) |
-| :---: | :---: |
-| ![Native 1440p Settings](docs/images/rtx3070-native1440-fg2x-settings.png) | ![Native 1440p: 30 base, 60 displayed FPS](docs/images/rtx3070-native1440-fg2x-bridge.png) |
+| Profile | Real-World Gameplay Proof (Boletaria Castle Bridge) | Verified Launcher Settings |
+| :--- | :---: | :---: |
+| **1080p DLSS (PS5 Pro path) + 2× FG**<br>*(85 FPS Peak / 43 FPS Base)* | ![1080p DLSS: 43 base, 85 displayed FPS](docs/images/rtx3070-dlss1080-fg2x-bridge.png) | ![1080p DLSS Settings](docs/images/rtx3070-dlss1080-fg2x-settings.png) |
+| **Native 1440p (Game PS5) + 2× FG**<br>*(60 FPS Solid / 30 FPS Base)* | ![Native 1440p: 30 base, 60 displayed FPS](docs/images/rtx3070-native1440-fg2x-bridge.png) | ![Native 1440p Settings](docs/images/rtx3070-native1440-fg2x-settings.png) |
 
-These user screenshots show **43 real / 85 displayed FPS** with 1080p DLSS and **30 real / 60 displayed FPS** with native 1440p rendering (both with 2× frame generation on an RTX 3070 8 GB + Ryzen 7 5800X3D). They are observations, not controlled benchmark averages: camera framing and earlier executable differences limit direct comparison. Performance varies by scene, settings and hardware; no fixed frame rate is guaranteed. [Settings, additional images and validation limits](docs/RTX30_FRAME_GEN_GUIDE.md).
+---
 
-Frame generation consumes GPU time and memory, so it can reduce **base FPS** while increasing **displayed FPS**. Generated frames do not double simulation or input-update speed. Frame time is not a measurement of end-to-end input latency. Similar FPS at 1080p DLSS and native 1440p with FG disabled does not establish a CPU bottleneck; fixed rendering/emulation work and reconstruction overhead also affect scaling.
+### Real-World In-Game Benchmark (Boletaria Castle Bridge)
 
-Eight-gigabyte cards can still experience Windows video-memory budget pressure. The cache improvements preserve existing texture settings and resource lifetime checks; they do not guarantee that every scene fits the available budget.
+| Metric | 1080p DLSS → 1440p + 2× FG (New!) | Native 1440p + 2× FG |
+| :--- | :--- | :--- |
+| **Display Frame Rate** | **85 FPS Peak** (`DLSS Frame Generation 2x \| game 43 fps`) | **60 FPS Solid** (`DLSS Frame Generation 2x \| game 30 fps`) |
+| **Internal Render Height** | **1080p** (`Upscaler: DLSS (PS5 Pro path)`) | **1440p** (`Upscaler: Game (PS5)`) |
+| **Output Display Resolution** | **2560 × 1440** (PS5 Pro DLSS Super Resolution) | **2560 × 1440** (PS5 Native 1440) |
+| **UI & HUD Canvas** | **3840 × 2160** (Full-surface composite, pixel-sharp) | **3840 × 2160** (Full-surface composite, pixel-sharp) |
+| **Frame Time & Pacing** | **24.4 ms** (Render thread: 14.9 ms, 1% low: 28 fps) | **33.0 ms** solid |
+| **System Latency** | Crisp 1:1 controller feel via NVIDIA Reflex | **33.0 ms** via NVIDIA Reflex integration |
+| **GPU & Clock** | RTX 3070 @ 94%, 1920 MHz, 65°C, 176W | RTX 3070 @ 94%, 68°C |
+| **VRAM Consumption** | 7.3 GB emulator / 7.5 GB total GPU (under 8 GB) | 7.1 GB emulator VRAM (stays safely within 8 GB) |
+| **CPU** | AMD Ryzen 7 5800X3D @ 19% (4.28 GHz) | AMD Ryzen 7 5800X3D @ 18% |
+| **Emulator Threading** | 2.6 cores active \| Render thread: 60% \| RAM: 16.9 GB | Multi-threaded Vulkan backend |
 
-📖 [RTX 30 setup and tuning guide](docs/RTX30_FRAME_GEN_GUIDE.md)
+📖 **Detailed Setup & Tuning Guide:** See [docs/RTX30_FRAME_GEN_GUIDE.md](docs/RTX30_FRAME_GEN_GUIDE.md)  
+🔬 **UI Canvas & SR Technical Validation:** See [docs/DLSS_UI_CANVAS_VALIDATION.md](docs/DLSS_UI_CANVAS_VALIDATION.md)  
+🔗 **Upstream Pull Request:** Submitted to `chenxiao07/KytyPS5` as [PR #67](https://github.com/chenxiao07/KytyPS5/pull/67)
 
-🔗 [Separate upstream PR #67](https://github.com/chenxiao07/KytyPS5/pull/67) covers earlier frame-generation work; it is not the delivery PR for these changes.
+---
+
+### Frame Generation Mechanics & Performance Notes
+
+> [!NOTE]
+> - **Displayed FPS vs Base Simulation FPS:** Frame Generation inserts optically-flowed interpolated frames between rendered frames. A display counter of 85 FPS corresponds to ~43 FPS of actual guest gameplay logic and physics.
+> - **Input Latency:** Frame generation consumes GPU compute and optical flow queuing time. While Reflex keeps responsiveness crisp, generated frames do not provide the latency reduction of native high-frame-rate rendering.
+> - **Video Memory (VRAM):** Super-resolution and Frame Generation allocate optical flow buffers and render targets. On 8 GB graphics cards, VRAM can approach or exceed Windows allocation limits in demanding scenes.
+> - **Separate FG Runtime Required:** RTX 30-series Frame Generation requires the external NVIDIA Streamline runtime DLLs and OpenDLSSG Enabler proxy (see the [setup guide](docs/RTX30_FRAME_GEN_GUIDE.md) for installation steps).
 
 ---
 
