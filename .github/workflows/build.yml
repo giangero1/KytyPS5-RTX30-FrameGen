@@ -66,7 +66,6 @@ jobs:
       # has no frame generation.
       - name: Streamline headers
         shell: pwsh
-        continue-on-error: true
         run: |
           git clone --quiet --depth 1 --branch v2.14.1 --filter=blob:none --sparse https://github.com/NVIDIA-RTX/Streamline.git _Build\streamline-src
           git -C _Build\streamline-src sparse-checkout set include
@@ -82,6 +81,9 @@ jobs:
         run: |
           call build-windows.cmd kyty_emulator || exit /b 1
           call build-windows.cmd kyty_shader_precompile || exit /b 1
+          call build-windows.cmd demons_souls_output_tests || exit /b 1
+          _Build\windows\demons_souls_output_tests.exe || exit /b 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\LauncherCommandTests.ps1 || exit /b 1
 
       - name: Package
         shell: pwsh
@@ -96,6 +98,9 @@ jobs:
           Copy-Item LICENSES $out -Recurse
           Copy-Item run-windows.json "$out\launch.json"
           Copy-Item docs\PORTABLE-README.md "$out\README.md"
+          New-Item -ItemType Directory -Force "$out\docs\images" | Out-Null
+          Copy-Item docs\RTX30_FRAME_GEN_GUIDE.md, docs\DLSS_UI_CANVAS_VALIDATION.md "$out\docs"
+          Copy-Item docs\images\rtx3070-*.png "$out\docs\images"
           # The render-pass states the precompile program makes the seed file with: the first launch lists the
           # game's shaders from its files (kyty_shader_precompile --make-seeds; a release cannot hold that list: it
           # contains the game's shader code). The Python tools that made it before are not needed. With them, each
