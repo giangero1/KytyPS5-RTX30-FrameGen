@@ -1,16 +1,17 @@
-# v2026.10.19-upstream-merge — verified RTX 3070 build
+# v2026.10.20b-upstream-merge — verified RTX 3070 build
 
-This release packages the **exact locally built and gameplay-verified `aa4d4177` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`) and Streamline headers. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+This release packages the **exact locally built and gameplay-verified `c01f9217` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`) and Streamline headers. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
 
 ## Upstream fixes and credits
 
-Thanks to **[chenxiao07/KytyPS5 v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019)** (`d062b42d`) and its contributors. Merged in `636a6cf4`, with the subsequent compile/test corrections retained:
+Thanks to **[chenxiao07/KytyPS5 v20261020b](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261020b)** (`96ccc79e`) and its contributors. Merged in `c01f9217`:
 
-- **Save corruption protection ([#73](https://github.com/chenxiao07/KytyPS5/issues/73)):** flush completed saves, maintain four rotating backup generations under `_SaveData/.kyty-backup/PPSA01341/<slot>/` with five-minute spacing, and recover detected zero-filled saves from a good backup while retaining damaged files.
-- **PageManager invalid-range fix ([#70](https://github.com/chenxiao07/KytyPS5/issues/70)):** address the `vaddr=0x0` fatal error during long DLSS sessions.
-- **Memory-management crash/BSOD mitigations:** stronger synchronization of page-protection changes with memory map/unmap operations, plus host-allocation safeguards. These reduce known failure paths; they do not guarantee that all driver/system crashes are eliminated.
-- **Optional HUD-less frame generation:** `KYTY_FG_HUDLESS=1`, contributed through upstream [PR #72](https://github.com/chenxiao07/KytyPS5/pull/72), remains off by default.
-- **F9 debug snapshots/pause:** snapshots under `_DebugSnapshots/`; press F9 again to resume.
+- **Crash on PCs with 16 GB of RAM (issue #91):** fixes the "PageManager fatal: read-watcher overflow" crash during level loading under texture memory savings.
+- **Four translated pixel shaders:** translates four shaders that previously ended the emulator (including Valley of Defilement tour crash).
+- **Kill-tour precompiled shaders:** adds 153 shader programs and 580 pipelines across all six worlds (including 3 large Shrine of Storms shaders that previously froze for up to 40 s).
+- **8 GB GPU memory defragmentation & sizing:** VMA heap blocks sized to 64 MiB on <13 GB GPUs; compacted game buffer pool (`KYTY_BUFFER_DEFRAG`) saves ~0.6 GB VRAM on 8 GB cards after travelling between worlds.
+- **World shader unloading & fresh memory:** shaders of a departed world unloaded after 60 s; never-written memory taken as zeros (`KYTY_FRESH_MEMORY`).
+- **Centered lock-on reticles & world markers:** enemy health bars and lock-on reticles held centered and unstretched over wide output canvas.
 
 ## Preserved RTX 30 integrations
 

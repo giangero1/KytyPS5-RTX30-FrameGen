@@ -3,13 +3,13 @@
 This is the maintenance guide for [giangero1/KytyPS5-RTX30-FrameGen](https://github.com/giangero1/KytyPS5-RTX30-FrameGen).
 Use a candidate branch and candidate binaries first. A successful merge/build alone does not establish working DLSS or frame generation.
 
-## Known-good baseline: 19 October 2026
+## Known-good baseline: 20 October 2026
 
-- Upstream: [chenxiao07/KytyPS5 v20261019](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019), commit `d062b42d0dfe9efd706cec254a292df578d92591`.
-- Verified binary source: `aa4d4177`; upstream merge: `636a6cf4`; retained test branch: `test/upstream-v20261019-merge`.
-- Promoted release: `v2026.10.19-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
-- Emulator SHA256: `e2a4ed1ee840d8e5d898eae562944d3f2cdb3b2b90c6e07ad57697fa82657452` (23,522,816 bytes).
-- Precompiler SHA256: `472d1b444531b8cbd2c9cd5c4d8cb9fdb8f7c1b4784c5529e4606d96ed368995` (12,108,288 bytes).
+- Upstream: [chenxiao07/KytyPS5 v20261020b](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261020b), commit `96ccc79e85165f62d2f3e7a46a39ba92c5b28f40`.
+- Verified binary source: `c01f9217`; upstream merge: `c01f9217`; retained test branch: `test/upstream-v20261020b-merge`.
+- Promoted release: `v2026.10.20b-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
+- Emulator SHA256: `2d00df6c7430241ef68153e4966627de7cc574cc0a48d75b8f119656feae0203` (23,645,184 bytes).
+- Precompiler SHA256: `ac157925d75c2ea1b542a3d47303a138ac128e89352879469de2b2f89ea20ea3` (12,121,088 bytes).
 - Windows x64, Clang-CL 19, ThinLTO, `KYTY_MARCH=x86-64-v3`, NVIDIA Streamline headers enabled.
 - User validated gameplay, save backups, DLSS and FG on RTX 3070. Boletaria 85–95+ displayed FPS is a user observation, not a controlled benchmark or a guarantee. Existing screenshots show 43 base / 85 displayed FPS.
 
@@ -73,7 +73,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/LauncherCommandTests.p
 `tools/package-windows-release.ps1` requires an unused tag, binary source commit and both independently recorded hashes. Commit docs/packaging first; it rejects compiled-source changes since the binary commit and dirty source trees.
 
 ```powershell
-.\tools\package-windows-release.ps1 -Tag 'v2026.10.19-upstream-merge' -BinarySourceCommit aa4d4177 -EmulatorSha256 e2a4ed1ee840d8e5d898eae562944d3f2cdb3b2b90c6e07ad57697fa82657452 -PrecompileSha256 472d1b444531b8cbd2c9cd5c4d8cb9fdb8f7c1b4784c5529e4606d96ed368995
+.\tools\package-windows-release.ps1 -Tag 'v2026.10.20b-upstream-merge' -BinarySourceCommit c01f9217 -EmulatorSha256 2d00df6c7430241ef68153e4966627de7cc574cc0a48d75b8f119656feae0203 -PrecompileSha256 ac157925d75c2ea1b542a3d47303a138ac128e89352879469de2b2f89ea20ea3
 ```
 
 For a future release, replace the tag, source commit and hashes with the newly verified values. Output is `_Build/package/<tag>/`; it refuses to overwrite that directory. Extract into a fresh folder and verify every manifest entry, ZIP checksum, screenshot/guide links, normal runtime DLLs and launcher commands before uploading.
