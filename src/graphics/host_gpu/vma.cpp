@@ -25,6 +25,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "live-counters.h"
 #include "local-platform.h"
 
@@ -72,6 +73,25 @@ bool GraphicContext::CreateAllocator() {
 	info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+	}
+	// VMA's blocks: 64 MiB on a GPU with less than 13 GiB of video memory (KYTY_SIMULATE_VRAM_MB counts), VMA's 256 MiB
+	// on bigger ones. Such a GPU runs past its budget and the driver keeps part of the game's memory in system memory: 1-1
+	// tours with 8 GB, each order once: walk 70.0 vs 67.4 and 72.2 vs 69.6 fps, spin 68.3 vs 65.9 and 71.4 vs 69.1, the
+	// route's later two thirds 2-6% faster in both (the free space inside the blocks no smaller, 787 vs 545 MiB at the
+	// end: it is where the driver puts the smaller blocks). KYTY_VMA_BLOCK_MB=<n>: n MiB.
+	{
+		uint64_t video = 0;
+		for (uint32_t heap = 0; heap < physical_device_memory_properties.memoryHeapCount; heap++)
+			if (physical_device_memory_properties.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal)
+				video = std::max<uint64_t>(video, physical_device_memory_properties.memoryHeaps[heap].size);
+		if (const char* simulate = std::getenv("KYTY_SIMULATE_VRAM_MB"); simulate != nullptr && *simulate != '\0')
+			video = std::min<uint64_t>(video, std::strtoull(simulate, nullptr, 10) << 20u);
+		const char* text = std::getenv("KYTY_VMA_BLOCK_MB");
+		if (text != nullptr && std::strtoull(text, nullptr, 10) > 0) {
+			info.preferredLargeHeapBlockSize = std::strtoull(text, nullptr, 10) << 20u;
+		} else if (video != 0 && video < (uint64_t {13} << 30u)) {
+			info.preferredLargeHeapBlockSize = uint64_t {64} << 20u;
+		}
 	}
 	// KYTY_VRAM_LIMIT_MB=<n>: video memory as on a GPU with n MiB (VMA's heap size limit): its budget,
 	// and allocations past it failing, for tests of memory pressure on smaller GPUs.
@@ -135,6 +155,24 @@ bool GraphicContext::CreateAllocator() {
 		if (id.deviceLUIDValid) (void)LocalPlatform::OpenVideoMemoryAdapter(id.deviceLUID.data());
 	}
 	small_video_memory = GetTotalMemoryBudget() < (uint64_t {12} << 30u);
+	// The game buffers' pool (graphicContext.h): VMA's device-local type for them, VMA's block sizes (dedicated memory
+	// for big ones, as in the default pools).
+	if (const char* defrag = std::getenv("KYTY_BUFFER_DEFRAG");
+	    defrag == nullptr ? small_video_memory : std::strcmp(defrag, "0") != 0) {
+		VkBufferCreateInfo buffer {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+		buffer.size  = uint64_t {64} << 10u;
+		buffer.usage = static_cast<VkBufferUsageFlags>(AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress);
+		VmaAllocationCreateInfo allocation {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+		uint32_t type    = 0;
+		VmaPoolCreateInfo pool {};
+		if (vmaFindMemoryTypeIndexForBufferInfo(allocator, &buffer, &allocation, &type) == VK_SUCCESS) {
+			pool.memoryTypeIndex = type;
+			if (vmaCreatePool(allocator, &pool, &game_buffer_pool) != VK_SUCCESS) game_buffer_pool = nullptr;
+		}
+		std::printf("Game buffers: %s\n", game_buffer_pool != nullptr ? "own pool, compacted (KYTY_BUFFER_DEFRAG=0 turns it off)"
+		                                                               : "pool failed, default pools");
+	}
 	LogVideoMemory("start");
 	g_report_allocator          = allocator;
 	g_report_context            = this;
@@ -154,6 +192,13 @@ void GraphicContext::DestroyAllocator() {
 	g_report_context           = nullptr;
 	FlushBufferReclaimer();
 	DestroyImagePool(allocator);
+	if (game_buffer_pool != nullptr) {
+		// (Only empty: a buffer still alive frees its memory into it later.)
+		VmaStatistics statistics {};
+		vmaGetPoolStatistics(allocator, game_buffer_pool, &statistics);
+		if (statistics.allocationCount == 0) vmaDestroyPool(allocator, game_buffer_pool);
+		game_buffer_pool = nullptr;
+	}
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;
 	for (const auto memory: simulation_ballast) device.freeMemory(memory);

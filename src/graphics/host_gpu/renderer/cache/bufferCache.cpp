@@ -9,6 +9,7 @@
 #include "async-upload.h"
 #include "parallel-pages.h"
 #include "readback-queue.h"
+#include "fresh-memory.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
@@ -53,6 +54,7 @@ extern volatile std::atomic_uint32_t kyty_local_frame_pipeline_mode;
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
+#include <tuple>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -976,6 +978,10 @@ bool BufferCache::TryGuestReadFromFeedback(uint64_t vaddr, uint64_t size, bool i
 
 void BufferCache::Register(BufferId id) {
 	ChangeRegister<true>(id);
+	// (Its allocation names it: a defragmentation pass's moves are allocations.)
+	if (m_graphics.game_buffer_pool != nullptr && m_slot_buffers[id].Allocation() != nullptr)
+		vmaSetAllocationUserData(m_graphics.allocator, m_slot_buffers[id].Allocation(),
+		                         reinterpret_cast<void*>((uint64_t {id.index} << 32u) | id.generation));
 	// (As before below 12 GiB of budget, where GPU buffers ignore it: one in system memory had no video memory at all;
 	// and without the driver's figures, which give no room to move one into.)
 	if (!m_graphics.small_video_memory && m_graphics.CanReportMemoryUsage() && m_slot_buffers[id].IsInSystemMemory())
@@ -1039,9 +1045,10 @@ void BufferCache::ChangeRegister(BufferId id) {
 		for (uint64_t i = 0; i < size_pages; ++i) {
 			addresses.push_back(buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS));
 		}
-		m_bda_pagetable_buffer.MakeResident(pages.first * sizeof(vk::DeviceAddress), size_pages * sizeof(vk::DeviceAddress));
-		WriteDataBuffer(m_bda_pagetable_buffer, pages.first * sizeof(vk::DeviceAddress),
-		                addresses.data(), addresses.size() * sizeof(vk::DeviceAddress));
+		if (pages.last_exclusive * sizeof(vk::DeviceAddress) > GetBdaPageTableBuffer()->Size()) {
+			GrowBdaTable(pages.last_exclusive);
+		}
+		WriteBdaEntries(pages.first, size_pages, addresses.data());
 	} else {
 		const auto found = m_buffers.find(buffer.CpuAddress());
 		EXIT_IF(found == m_buffers.end() || found->second != id);
@@ -1049,8 +1056,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
 		m_lru_cache.Free(buffer.lru_id);
-		m_bda_pagetable_buffer.Fill(pages.first * sizeof(vk::DeviceAddress),
-		                            size_pages * sizeof(vk::DeviceAddress), 0);
+		WriteBdaEntries(pages.first, size_pages, nullptr);
 		buffer.is_deleted = true;
 	}
 }
@@ -1363,13 +1369,77 @@ static MemoryUsage PageTableUsage(const GraphicContext& graphics) {
 	return wanted && graphics.sparse_residency_buffers ? MemoryUsage::SparseDeviceLocal : MemoryUsage::DeviceLocal;
 }
 
+// The guest addresses the BDA page table covers at first: 128 GiB, 64 MiB of video memory instead of the 512 MiB of
+// the whole 1 TiB. The PS5's kernel places mappings in its system-managed range by default (to 32 GiB); Demon's Souls
+// registers buffers there, by its executable (36 GiB) and at the start of the user range among its PRT pages (66 GiB).
+// 1-1 tours with 8 GB (KYTY_SIMULATE_VRAM_MB=8192) back to back: walk 63.6 -> 68.9 fps, spin 62.1 -> 67.7, points under
+// 60 fps 44 -> 24 of 84 (the route's middle third 54.3 -> 63.8, 27 of 29 points faster; its last third even: the room
+// filled up again). A registration past it grows it (GrowBdaTable; 1-1 starting at 12 GiB grew three times while
+// loading, no error). KYTY_BDA_TABLE_GIB=<n>: n GiB at first (tests of the growth). A sparse table is whole (its pages
+// get memory as entries are written).
+static uint64_t InitialBdaTableBytes(MemoryUsage usage) {
+	constexpr uint64_t Whole = BufferCache::BDA_PAGETABLE_SIZE;
+	if (usage == MemoryUsage::SparseDeviceLocal) return Whole;
+	const char* value   = std::getenv("KYTY_BDA_TABLE_GIB");
+	uint64_t    covered = value != nullptr && value[0] != '\0' ? std::strtoull(value, nullptr, 10) << 30u
+	                                                           : uint64_t {128} << 30u;
+	covered = std::clamp<uint64_t>(covered, uint64_t {1} << 30u, uint64_t {1} << 40u);
+	return std::min(Whole, (covered >> BufferCache::CACHING_PAGEBITS) * sizeof(vk::DeviceAddress));
+}
+
+void BufferCache::WriteBdaEntries(uint64_t first, uint64_t count, const vk::DeviceAddress* entries) {
+	// (The first table's memory may have held other data: zero before its first entry. A sparse one is zeroed as its
+	// pages get memory.)
+	if (!m_bda_zeroed) {
+		m_bda_zeroed = true;
+		auto& table  = *m_bda_tables.front();
+		if (table.Usage() != MemoryUsage::SparseDeviceLocal) table.Fill(0, table.Size(), 0);
+	}
+	if (count == 0) return;
+	for (const auto& table: m_bda_tables) {
+		const uint64_t held = table->Size() / sizeof(vk::DeviceAddress);
+		if (first >= held) continue;
+		const uint64_t part = std::min(count, held - first);
+		table->MakeResident(first * sizeof(vk::DeviceAddress), part * sizeof(vk::DeviceAddress));
+		if (entries != nullptr) {
+			WriteDataBuffer(*table, first * sizeof(vk::DeviceAddress), entries, part * sizeof(vk::DeviceAddress));
+		} else {
+			table->Fill(first * sizeof(vk::DeviceAddress), part * sizeof(vk::DeviceAddress), 0);
+		}
+	}
+}
+
+// A registration past the newest table: a table twice its size at least (to the whole 1 TiB), the old entries copied,
+// the rest zero, takes its place. The old one stays and is written alike (WriteBdaEntries): a set made with it - a
+// native record's, a table set, one written into a command buffer already recorded - reads right entries for what it
+// covers and zero past it, as before, never a freed buffer's; native records and table sets made before are made again
+// before their next use (their generation: NativeXprValidate, NativeXprDraw, TableValidateSet).
+void BufferCache::GrowBdaTable(uint64_t entries) {
+	if (!m_bda_zeroed) WriteBdaEntries(0, 0, nullptr);
+	auto*    old   = GetBdaPageTableBuffer();
+	uint64_t bytes = old->Size();
+	while (bytes < entries * sizeof(vk::DeviceAddress) && bytes < BDA_PAGETABLE_SIZE) bytes *= 2;
+	bytes      = std::min(bytes, BDA_PAGETABLE_SIZE);
+	auto table = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, bytes);
+	SetVulkanObjectNameF(m_graphics.device, table->Handle(), "BDA Page Table Buffer");
+	table->CopyFrom(m_scheduler.Current(), *old, 0, 0, old->Size());
+	table->Fill(old->Size(), bytes - old->Size(), 0);
+	m_bda_table.store(table.get(), std::memory_order_release);
+	m_bda_tables.push_back(std::move(table));
+	s_bda_table_generation.fetch_add(1, std::memory_order_acq_rel);
+	std::printf("BDA page table: %llu MiB for guest addresses up to %llu GiB (a buffer at 0x%llx)\n",
+	            static_cast<unsigned long long>(bytes >> 20u),
+	            static_cast<unsigned long long>((bytes / sizeof(vk::DeviceAddress)) >> (30u - CACHING_PAGEBITS)),
+	            static_cast<unsigned long long>((entries - 1) << CACHING_PAGEBITS));
+	std::fflush(stdout);
+}
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache,
                          GpuResourceManager* resources)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, GdsBufferSize),
       m_lod_stats_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, 256 * 16),
-      m_bda_pagetable_buffer(graphics, scheduler, PageTableUsage(graphics), 0, AllFlags, BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
       m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB,
                        AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress),
@@ -1382,6 +1452,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 32 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache), m_resources(resources) {
+	{
+		const auto usage = PageTableUsage(graphics);
+		m_bda_tables.push_back(
+		    std::make_unique<Buffer>(graphics, scheduler, usage, 0, AllFlags, InitialBdaTableBytes(usage)));
+		m_bda_table.store(m_bda_tables.back().get(), std::memory_order_release);
+	}
 	m_scheduler.SetPrologueHook([this](vk::CommandBuffer command) { FlushPrologueCopies(command); });
 	m_gpu_modified_ranges.AllowFastPath();
 	g_sync_cache = this;
@@ -1398,7 +1474,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		reinterpret_cast<uint32_t*>(m_lod_stats_buffer.Mapped().data())[i * 4] = 15;
 	}
 	m_lod_stats_buffer.Flush(0, 256 * 16);
-	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
+	SetVulkanObjectNameF(m_graphics.device, GetBdaPageTableBuffer()->Handle(),
 	                     "BDA Page Table Buffer");
 	const auto null_id =
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
@@ -1601,8 +1677,10 @@ void BufferCache::SplitUnmappedBuffers(uint64_t vaddr, uint64_t size) {
 		const auto& buffer = m_slot_buffers[it->second];
 		if (buffer.CpuAddress() + buffer.Size() > end) candidates.push_back(it->second);
 	}
-	// Mapped runs closer than a stream leap stay one buffer (a join would make them one again).
-	constexpr uint64_t Gap = CACHING_PAGESIZE * 128;
+	// Mapped runs closer than the game's 64 KiB pages stay one buffer. (A stream leap no longer joins them again over the
+	// gap: ResolveOverlaps. With 2 MiB here a pool mapping 256 KiB of each MiB stayed whole: 1-1 after two world trips,
+	// 349 MiB of video memory held for unmapped bytes.)
+	constexpr uint64_t Gap = CACHING_PAGESIZE * 4;
 	for (const auto id: candidates) {
 		const auto& old = m_slot_buffers[id];
 		if (old.is_deleted) continue;
@@ -1836,6 +1914,29 @@ BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t
 		}
 		return first;
 	};
+	// A leap covers memory the game maps only (its run from the edge): over an unmapped gap it joined the buffers of
+	// pieces mapped apart into one that held the gaps in video memory too (1-1 after two world trips: a pool mapping 256
+	// KiB of each MiB in one buffer of 369 MiB, 236 MiB of it unmapped; 349 MiB in 29 buffers).
+	const auto leap_right = [&](uint64_t from, uint64_t to) {
+		if (m_resources == nullptr) return to;
+		RangeSet mapped;
+		m_resources->MappedRanges(from, to - from, mapped);
+		uint64_t reach = from;
+		mapped.ForEach([&](uint64_t a, uint64_t b) {
+			if (a <= reach) reach = std::max(reach, std::min(b, to));
+		});
+		return reach & ~(CACHING_PAGESIZE - 1);
+	};
+	const auto leap_left = [&](uint64_t from, uint64_t to) {
+		if (m_resources == nullptr) return from;
+		RangeSet mapped;
+		m_resources->MappedRanges(from, to - from, mapped);
+		uint64_t reach = to;
+		std::vector<std::pair<uint64_t, uint64_t>> runs;
+		mapped.ForEach([&](uint64_t a, uint64_t b) { runs.emplace_back(a, b); });
+		for (auto it = runs.rbegin(); it != runs.rend() && it->second >= reach; ++it) reach = std::min(reach, std::max(it->first, from));
+		return (reach + CACHING_PAGESIZE - 1) & ~(CACHING_PAGESIZE - 1);
+	};
 	auto first           = find_first(begin);
 	auto last            = first;
 	int  stream_score    = 0;
@@ -1853,12 +1954,12 @@ BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t
 			// Fix the shadPS4 bug that reserves space opposite to the incoming stream's growth.
 			// The old buffer extending left of the request predicts growth to the right, and vice versa.
 			if (expands_left) {
-				end += std::min(StreamLeapSize, PageTable::kAddressSpaceSize - end);
+				end = std::max(end, leap_right(end, end + std::min(StreamLeapSize, PageTable::kAddressSpaceSize - end)));
 			}
 			if (expands_right) {
 				const auto minimum = CACHING_PAGESIZE * 2;
 				if (begin > minimum) {
-					begin -= std::min(StreamLeapSize, begin - minimum);
+					begin = std::min(begin, leap_left(begin - std::min(StreamLeapSize, begin - minimum), begin));
 				}
 				first = find_first(begin);
 				begin = std::min(begin, first->first);
@@ -2082,6 +2183,32 @@ void BufferCache::FlushPrologueCopies(vk::CommandBuffer command) {
 // guest view that faulted re-entered the tracker from the callback (another tracker's page protection: the fault
 // handler read GPU data back) and ended the emulator (10-12, Tower of Latria, third visit). Bytes not readable at all (no
 // mapping) are uploaded as zeros, reported.
+// An async upload of `size` backing-view bytes from `source` into staging `target` (guest `vaddr`): the fresh memory
+// in it (src/local/fresh-memory.h, bytes nobody wrote) filled with zeros here instead of read by the worker, whose read
+// made those pages resident.
+static void PushUploadCopy(uint8_t* target, const uint8_t* source, uint64_t size, uint64_t vaddr) {
+	thread_local std::vector<std::tuple<uint64_t, uint64_t, bool>> runs;
+	runs.clear();
+	bool any_fresh = false;
+	if (FreshMemory::ForEachBackingRun(source, size,
+	                                   [&](uint64_t offset, uint64_t bytes, bool fresh) {
+		                                   runs.emplace_back(offset, bytes, fresh);
+		                                   any_fresh = any_fresh || fresh;
+	                                   }) &&
+	    any_fresh) {
+		for (const auto& [offset, bytes, fresh]: runs) {
+			if (fresh) {
+				std::memset(target + offset, 0, bytes);
+				FreshMemory::Get()->zero_upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+			} else {
+				AsyncUpload::Get().Push(target + offset, source + offset, bytes, vaddr + offset);
+			}
+		}
+		return;
+	}
+	AsyncUpload::Get().Push(target, source, size, vaddr);
+}
+
 static void ReadUploadSource(uint8_t* destination, uint64_t address, uint64_t size) {
 	if (Libs::LibKernel::Memory::TryReadBackingToHost(address, destination, size)) return;
 #if defined(_WIN32)
@@ -2148,7 +2275,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
 			const auto* source = async ? LibKernel::Memory::TryGetBackingPointer(address, copy.size) : nullptr;
 			if (source != nullptr) {
-				AsyncUpload::Get().Push(mapped + copy.srcOffset, source, copy.size, address);
+				PushUploadCopy(mapped + copy.srcOffset, source, copy.size, address);
 			} else {
 				ReadUploadSource(mapped + copy.srcOffset, address, copy.size);
 			}
@@ -2434,14 +2561,14 @@ bool BufferCache::PushImageStagingCopies(uint8_t* staging, uint64_t vaddr, uint6
 	const StagingPiece whole {vaddr, size, 0};
 	QueueImageProtects({&whole, 1}, true);
 	if (const auto* source = Libs::LibKernel::Memory::TryGetBackingPointer(vaddr, size)) {
-		AsyncUpload::Get().Push(staging, source, size, vaddr);
+		PushUploadCopy(staging, source, size, vaddr);
 		return true;
 	}
 	if (Libs::LibKernel::Memory::TryGetBackingPieces(vaddr, size, m_backing_pieces)) {
 		// Large images usually span several guest mappings.
 		uint64_t offset = 0;
 		for (const auto& [piece, bytes]: m_backing_pieces) {
-			AsyncUpload::Get().Push(staging + offset, piece, bytes, vaddr + offset);
+			PushUploadCopy(staging + offset, piece, bytes, vaddr + offset);
 			offset += bytes;
 		}
 		return true;
@@ -2513,14 +2640,14 @@ std::pair<Buffer*, uint64_t> BufferCache::StageImagePieces(const std::vector<Sta
 		auto* target = staging + piece.offset;
 		if (async) {
 			if (const auto* source = Libs::LibKernel::Memory::TryGetBackingPointer(piece.vaddr, piece.size)) {
-				AsyncUpload::Get().Push(target, source, piece.size, piece.vaddr);
+				PushUploadCopy(target, source, piece.size, piece.vaddr);
 				queued = true;
 				continue;
 			}
 			if (Libs::LibKernel::Memory::TryGetBackingPieces(piece.vaddr, piece.size, m_backing_pieces)) {
 				uint64_t offset = 0;
 				for (const auto& [source, bytes]: m_backing_pieces) {
-					AsyncUpload::Get().Push(target + offset, source, bytes, piece.vaddr + offset);
+					PushUploadCopy(target + offset, source, bytes, piece.vaddr + offset);
 					offset += bytes;
 				}
 				queued = true;
@@ -2814,6 +2941,14 @@ void BufferCache::RetireStaleBuffers(uint64_t tick) {
 void BufferCache::EraseRetired() {
 	std::erase_if(m_retired, [&](const auto& retired) {
 		if (!Spec::PacketsPassed(retired.second)) return false;
+		// (A defragmentation move's new buffer destroyed before its pass ended: the pass frees the moved allocation, or,
+		// ending on the worker thread, Defragment once it ended. Defragment.)
+		for (const auto& move: m_defrag_moves) {
+			if (move.destination != retired.first) continue;
+			auto& buffer = m_slot_buffers[retired.first];
+			if (m_defrag_ending.valid() && buffer.Allocation() != nullptr) m_defrag_free_later.push_back(buffer.Allocation());
+			buffer.ReleaseAllocation();
+		}
 		m_slot_buffers.erase(retired.first);
 		return true;
 	});
@@ -2875,6 +3010,142 @@ bool BufferCache::MoveSpilledBufferBack() {
 	return true;
 }
 
+// After the game frees memory its buffers go, and the blocks of the game buffers' pool stay as full as the buffers left
+// in them: video memory nobody uses between them (1-1 after two world trips on an 8 GB GPU: 764 of 1,616 MiB free, 13 of
+// 27 blocks 50-90% free). VMA's passes move buffers out of the emptiest blocks: a new buffer at a move's destination
+// (holding the moved allocation, which points there once the pass ends), the bytes copied on the GPU, the old one out and
+// the new one in (MoveSpilledBufferBack's steps). Once every old buffer of a pass is destroyed (the GPU done with it), a
+// worker thread ends the pass: VMA frees their memory then and the blocks left empty (a driver call each, up to 18 ms on
+// the GPU thread).
+void BufferCache::Defragment(uint64_t tick) {
+	constexpr uint64_t MinFree = uint64_t {256} << 20u, PassBytes = uint64_t {32} << 20u;
+	const auto         pool    = m_graphics.game_buffer_pool;
+	auto*              allocator = m_graphics.allocator;
+	if (pool == nullptr || (m_defrag == nullptr && tick < m_defrag_next_check)) return;
+	if (m_defrag_ending.valid()) {
+		if (m_defrag_ending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+		const auto result = m_defrag_ending.get();
+		// (Moved allocations of new buffers destroyed while the pass ended: EraseRetired.)
+		for (auto* allocation: m_defrag_free_later) vmaFreeMemory(allocator, allocation);
+		m_defrag_free_later.clear();
+		m_defrag_moves.clear();
+		if (result != VK_INCOMPLETE) EndDefragmentation();
+		return;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	struct Timed {
+		BufferCache*                          cache;
+		std::chrono::steady_clock::time_point start;
+		bool                                  on    = false;
+		uint32_t                              moves = 0;
+		~Timed() {
+			if (!on) return;
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			cache->m_defrag_ms += ms;
+			cache->m_defrag_max_ms = std::max(cache->m_defrag_max_ms, ms);
+			if (ms >= 4.0) std::printf("Game buffers compacting: a flip's pass took %.2f ms (%u moves)\n", ms, moves);
+		}
+	} timed {this, start};
+	if (m_defrag_pass_open) {
+		for (const auto& move: m_defrag_moves)
+			if (move.source && m_slot_buffers.is_allocated(move.source)) return; // (one the GPU may still read)
+		// (A new buffer destroyed since: its memory and the moved allocation go with the pass. EraseRetired.)
+		for (uint32_t i = 0; i < m_defrag_pass.moveCount; ++i)
+			if (m_defrag_moves[i].destination && !m_slot_buffers.is_allocated(m_defrag_moves[i].destination))
+				m_defrag_pass.pMoves[i].operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_DESTROY;
+		m_defrag_pass_open = false;
+		m_defrag_ending    = std::async(std::launch::async, [allocator, context = m_defrag, pass = &m_defrag_pass] {
+            return vmaEndDefragmentationPass(allocator, context, pass);
+        });
+		return;
+	}
+	if (m_defrag == nullptr) {
+		m_defrag_next_check = tick + 120;
+		VmaStatistics statistics {};
+		vmaGetPoolStatistics(allocator, pool, &statistics);
+		const uint64_t free = statistics.blockBytes - statistics.allocationBytes;
+		// (More than after the last compaction: the rest it could not move.)
+		if (free < MinFree + m_defrag_free_after) return;
+		VmaDefragmentationInfo info {};
+		info.flags                 = VMA_DEFRAGMENTATION_FLAG_ALGORITHM_BALANCED_BIT;
+		info.pool                  = pool;
+		info.maxBytesPerPass       = PassBytes;
+		info.maxAllocationsPerPass = 64;
+		if (vmaBeginDefragmentation(allocator, &info, &m_defrag) != VK_SUCCESS) {
+			m_defrag = nullptr;
+			return;
+		}
+	}
+	// (On the command buffer being recorded, outside a speculation: MoveSpilledBufferBack.)
+	if (!m_scheduler.Active() || m_scheduler.Current().IsInvalid() || Spec::Current() != nullptr) return;
+	timed.on = true;
+	if (vmaBeginDefragmentationPass(allocator, m_defrag, &m_defrag_pass) != VK_INCOMPLETE) {
+		EndDefragmentation();
+		return;
+	}
+	m_defrag_passes++;
+	m_defrag_moves.assign(m_defrag_pass.moveCount, {});
+	for (uint32_t i = 0; i < m_defrag_pass.moveCount; ++i) {
+		auto&             move = m_defrag_pass.pMoves[i];
+		VmaAllocationInfo info {};
+		vmaGetAllocationInfo(allocator, move.srcAllocation, &info);
+		const auto key = reinterpret_cast<uint64_t>(info.pUserData);
+		const auto id  = BufferId {static_cast<uint32_t>(key >> 32u), static_cast<uint32_t>(key)};
+		auto*      old = key != 0 ? m_slot_buffers.try_get(id) : nullptr;
+		if (old == nullptr || old->Allocation() != move.srcAllocation) {
+			move.operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_IGNORE;
+			continue;
+		}
+		if (old->is_deleted) {
+			// (Deleted, waiting for the GPU: the pass frees its memory, after it is destroyed. Destroyed first, it freed an
+			// allocation the pass holds.)
+			move.operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_DESTROY;
+			old->ReleaseAllocation();
+			m_defrag_moves[i] = {id, {}};
+			continue;
+		}
+		const auto begin    = old->CpuAddress();
+		const auto size     = old->Size();
+		const auto moved_id = m_slot_buffers.insert(m_graphics, m_scheduler, begin,
+		                                            AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, size,
+		                                            move.dstTmpAllocation);
+		auto&       moved  = m_slot_buffers[moved_id];
+		auto&       source = m_slot_buffers[id];
+		moved.AdoptAllocation(move.srcAllocation);
+		moved.bda_read = source.bda_read;
+		moved.IncreaseStreamScore(source.StreamScore());
+		SetVulkanObjectNameF(m_graphics.device, moved.Handle(), "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", begin,
+		                     size);
+		moved.CopyFrom(m_scheduler.Current(), source, 0, 0, size);
+		NoteGpuWrite(begin, size);
+		// (Its memory is the pass's now: destroyed, it leaves it.)
+		source.ReleaseAllocation();
+		DeleteBuffer(id);
+		Register(moved_id);
+		m_defrag_moves[i] = {id, moved_id};
+		timed.moves++;
+	}
+	m_defrag_pass_open = true;
+}
+
+void BufferCache::EndDefragmentation() {
+	if (m_defrag == nullptr) return;
+	VmaDefragmentationStats stats {};
+	vmaEndDefragmentation(m_graphics.allocator, m_defrag, &stats);
+	m_defrag = nullptr;
+	VmaStatistics statistics {};
+	vmaGetPoolStatistics(m_graphics.allocator, m_graphics.game_buffer_pool, &statistics);
+	m_defrag_free_after = statistics.blockBytes - statistics.allocationBytes;
+	std::printf("Game buffers compacted: %u moved (%llu MiB), %u blocks freed (%llu MiB); %llu MiB of %llu MiB free; %u "
+	            "passes, %.1f ms (at most %.2f in a flip)\n",
+	            stats.allocationsMoved, static_cast<unsigned long long>(stats.bytesMoved >> 20u),
+	            stats.deviceMemoryBlocksFreed, static_cast<unsigned long long>(stats.bytesFreed >> 20u),
+	            static_cast<unsigned long long>(m_defrag_free_after >> 20u),
+	            static_cast<unsigned long long>(statistics.blockBytes >> 20u), m_defrag_passes, m_defrag_ms, m_defrag_max_ms);
+	m_defrag_passes = 0;
+	m_defrag_ms = m_defrag_max_ms = 0;
+}
+
 void BufferCache::RunGarbageCollector(bool collect) {
 	EraseRetired();
 	const auto tick = m_gc_tick++;
@@ -2883,6 +3154,7 @@ void BufferCache::RunGarbageCollector(bool collect) {
 	// guest memory through device addresses). At the end of a submission its command buffer still records
 	// (EndSubmission, before the flush).
 	if (tick % 60 == 0) (void)MoveSpilledBufferBack();
+	Defragment(tick);
 	if (!collect) {
 		return;
 	}

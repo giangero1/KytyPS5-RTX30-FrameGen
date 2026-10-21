@@ -21,6 +21,7 @@
 
 #include "common/assert.h"
 #include "frame-capture.h"
+#include "kernel/memory.h"
 #include "live-census.h"
 #include "live-counters.h"
 #include "live-trace.h"
@@ -568,6 +569,10 @@ inline void Run(uint64_t id, const std::string& line) {
 		// images <path>: the texture cache's images, one tab-separated row each (what the video memory holds).
 		if (LiveCounters::g_image_report != nullptr) LiveCounters::g_image_report(arg1);
 		std::printf("LIVE_IMAGES id=%" PRIu64 " path=%s written=%d\n", id, arg1, LiveCounters::g_image_report != nullptr ? 1 : 0);
+	} else if (cmd == "ranges" && n >= 2) {
+		// ranges <path>: the guest's virtual ranges with the names the game gave them (Memory::WriteGuestRanges).
+		const bool ok = Libs::LibKernel::Memory::WriteGuestRanges(arg1);
+		std::printf("LIVE_RANGES id=%" PRIu64 " path=%s written=%d\n", id, arg1, ok ? 1 : 0);
 	} else if (cmd == "buffers" && n >= 2) {
 		// buffers <path>: the buffer cache's buffers, one tab-separated row each (what stays registered).
 		if (LiveCounters::g_buffer_report != nullptr) LiveCounters::g_buffer_report(arg1);
@@ -599,6 +604,23 @@ inline void Run(uint64_t id, const std::string& line) {
 		while (!text.empty() && (text.back() == '\r' || text.back() == ' ')) text.pop_back();
 		const bool ok = Loader::DemonsSoulsWarp::QueueCommand(text);
 		std::printf("LIVE_GAMECMD id=%" PRIu64 " queued=%d text=%s\n", id, ok ? 1 : 0, text.c_str());
+	} else if (cmd == "gamekill" && n >= 2) {
+		// gamekill <radius m>: the characters within it of the player die (loader/demonsSoulsWarp.h; log "Game kill: ...").
+		using Mode    = Loader::DemonsSoulsWarp::KillMode;
+		const auto mode = n == 3 && std::string_view(arg2) == "hp"      ? Mode::HpZero
+		                  : n == 3 && std::string_view(arg2) == "death" ? Mode::Death
+		                                                                : Mode::Suicide;
+		const bool ok   = Loader::DemonsSoulsWarp::QueueKill(std::strtof(arg1, nullptr), mode);
+		std::printf("LIVE_GAMEKILL id=%" PRIu64 " queued=%d radius=%s\n", id, ok ? 1 : 0, arg1);
+	} else if (cmd == "gamestrike" && n >= 2) {
+		// gamestrike <radius m>: the characters within it killed by the player's own (deadly) hits, nearest first; blocks
+		// until done (loader/demonsSoulsWarp.h).
+		const auto report = Loader::DemonsSoulsWarp::Strike(std::strtof(arg1, nullptr));
+		std::printf("LIVE_GAMESTRIKE id=%" PRIu64 " %s\n", id, report.c_str());
+	} else if (cmd == "gamesweep" && n >= 2) {
+		// gamesweep <seconds> [radius m]: the nearest living character killed, again and again (loader/demonsSoulsWarp.h).
+		const auto report = Loader::DemonsSoulsWarp::Sweep(std::strtod(arg1, nullptr), n == 3 ? std::strtof(arg2, nullptr) : 1000.0f);
+		std::printf("LIVE_GAMESWEEP id=%" PRIu64 " %s\n", id, report.c_str());
 	} else if (cmd == "warp" && n >= 2) {
 		// warp <map> <spawn> | warp off: the debug warp (loader/demonsSoulsWarp.h).
 		const bool off = std::string_view(arg1) == "off";

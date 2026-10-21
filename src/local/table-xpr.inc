@@ -76,6 +76,8 @@ struct RenderExecutor::TableImageSet {
 	vk::DescriptorSet     set  = nullptr;
 	vk::DescriptorPool    pool = nullptr;
 	std::vector<Image>    images;
+	// BufferCache::BdaTableGeneration when the set got the BDA page table: made again once the table grew.
+	uint64_t              bda_generation = 0;
 	// Proven current in that frame under those registrations, by role (RenderExecutor::Role: [0] also the frame it was
 	// made or refused in); used in that frame (by any executor).
 	std::array<uint64_t, Roles> validated_frame = NoRoles();
@@ -790,6 +792,7 @@ RenderExecutor::TableImageSet* RenderExecutor::TableResolveSet(CommandBuffer& bu
 	std::vector<vk::DescriptorImageInfo>  image_infos;
 	using Kind = ShaderRecompiler::IR::DescriptorBindingKind;
 	const auto fixed = [](const Buffer* value) -> vk::DescriptorBufferInfo { return {value->Handle(), 0, value->Size()}; };
+	set->bda_generation = BufferCache::BdaTableGeneration(); // (read before the table: BufferCache::GrowBdaTable)
 	for (uint32_t st = 0; st < stages; ++st) {
 		const auto& program = set->program != nullptr ? *set->program : *pair.programs[st];
 		std::vector<uint32_t> occurrences(prepared[st].images.size(), 0);
@@ -865,6 +868,7 @@ bool RenderExecutor::TableValidateSet(TableImageSet& set) {
 	auto&      textures   = m_context.GetTextureCache();
 	const auto frame      = m_context.FrameNumber();
 	const auto resolution = textures.ResolutionEpoch();
+	if (set.bda_generation != BufferCache::BdaTableGeneration()) return false; // (the page table grew since)
 	if (set.validated_frame[Role()] == frame && set.resolution_epoch[Role()] == resolution) return true;
 	LiveCensus::Scope census(LiveCensus::DrawPhase, 0x7ab1e, 7);
 	const auto mode  = kyty_local_table_set_proofs.load(std::memory_order_relaxed);

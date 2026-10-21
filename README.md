@@ -70,15 +70,35 @@ All seven focused core tests pass. Prior broader validation limits remain docume
 > **Demon's Souls (PS5, PPSA01341), game versions 1.07 (01.007.000) and 1.05 (01.005.000)**: both are
 > supported, with the same performance patches (each version precompiles its own shader caches); other
 > versions and games are untested here and may not run. Tested on Windows 11 with an Intel i9-14900K and
-> an NVIDIA RTX 5090 (about 45–60 fps at 2560×1440); AMD and Intel GPUs are untested. 32 GB of RAM and a
-> GPU with 12 GB of video memory are recommended; it also runs with 16 GB of RAM (slower loading) and 8 GB
-> of video memory (the test PC limited to 8 GB: most areas 40–60 fps, the heaviest 10–35).
+> an NVIDIA RTX 5090 (60 fps in most places at 2560×1440, the heaviest spots about 57–60); users also run
+> it on AMD Radeon and Intel Arc cards, with problems of their own tracked in the issues. 32 GB of RAM and
+> a GPU with 12 GB of video memory are recommended; it also runs with 16 GB of RAM (slower loading; close
+> browsers while playing, see [#50](https://github.com/chenxiao07/KytyPS5/issues/50)) and 8 GB of video memory (the test PC limited to 8 GB: most areas 40–60
+> fps, the heaviest 10–35).
 >
 > **Download: [the latest release](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)**, a Windows
 > x64 build; this upstream-merge release packages the exact locally verified binaries. Unzip it, double-click `launcher.cmd` (or
 > `run.cmd`) and choose the game folder (the one with `eboot.bin`); the `README.md` inside explains
 > the rest. Use only a game dump made from your own copy of the game. To build it yourself, see
 > [Building with build-windows.cmd](#building-with-build-windowscmd-windows).
+>
+> **Chinese, Japanese, Korean:** the game files hold every language, but the game lists only its
+> release's. Setting `"userDefinedParam1"` in the game's `sce_sys\param.json` from `2` (Europe, as dumped)
+> to `0` lists every language (`4`: the Asian release, `3`: the Japanese one); with saves, move
+> `_SaveData\PPSA01341\SAVEDATA0OptionsProfile0` away so the game asks again. Steps:
+> [Game language](docs/PORTABLE-README.md#game-language-chinese-japanese-korean-and-others).
+>
+> 中文：本分支专为《恶魔之魂》(PS5 版 PPSA01341) 优化，支持游戏版本 1.07 (01.007.000) 和 1.05 (01.005.000)，两者性能补丁相同
+> （着色器缓存按版本分别预编译）；其他版本和游戏未测试。
+> 下载[最新 release](https://github.com/chenxiao07/KytyPS5/releases/latest)，解压后双击 `launcher.cmd`
+> 或 `run.cmd`，选择游戏目录（含 `eboot.bin` 的那一层）。推荐 32 GB 内存、12 GB 以上显存的显卡；16 GB 内存
+> （加载较慢；游戏时请关闭浏览器等大程序，见 [#50](https://github.com/chenxiao07/KytyPS5/issues/50)）和 8 GB 显存（测试机限制到 8 GB 时：多数区域 40–60 帧，最重的场景
+> 10–35 帧）也能运行。
+> **中文/日文：** 游戏文件里包含全部语言，但只列出所属发行区域的语言。把游戏目录 `sce_sys\param.json` 里的
+> `"userDefinedParam1": 2`（欧版，dump 原值）改成 `0` 即可列出全部语言（含简繁中文和日文；`4` 为亚洲版：简繁中文、
+> 英文、韩文、泰文；`3` 为日版）。已有存档时，先备份 `_SaveData`，再把 `_SaveData\PPSA01341\SAVEDATA0OptionsProfile0`
+> 移出存档目录（角色存档不受影响，只有游戏设置恢复默认），下次启动会出现语言选择。详见
+> [Game language](docs/PORTABLE-README.md#game-language-chinese-japanese-korean-and-others)。
 
 ## Fixes worth cherry-picking
 
@@ -518,3 +538,23 @@ licenses included with those components.
   of the original Kyty project.
 - [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) — reference for memory-model
   understanding and the AVPlayer implementation.
+
+## Contributors to this fork
+
+Code from these contributors is part of this branch. Thank you!
+
+- [@nerdjb](https://github.com/nerdjb): the Linux port fixes, the `int 0x41` skip on Linux, Linux packaging
+  (`build-linux.sh`, the Linux workflow), the live-budget texture collector and `run_ds.sh`
+  ([#3](https://github.com/chenxiao07/KytyPS5/pull/3); its commits carry the author name "CachyOS", mapped in `.mailmap`).
+- [@Myoko](https://github.com/Myoko): DualSense haptics and a resizable window ([#18](https://github.com/chenxiao07/KytyPS5/pull/18)),
+  add-on content ([#25](https://github.com/chenxiao07/KytyPS5/pull/25)), CJK text in the save dialogs
+  ([#75](https://github.com/chenxiao07/KytyPS5/pull/75)).
+- [@todojuegos67-bot](https://github.com/todojuegos67-bot): wave OR in pixel shaders, the water in Demon's Souls
+  ([#19](https://github.com/chenxiao07/KytyPS5/pull/19)).
+- [@MikeSee0](https://github.com/MikeSee0): Windows build tool selection ([#39](https://github.com/chenxiao07/KytyPS5/pull/39)).
+- [@iSamigor](https://github.com/iSamigor): AMD pipeline cache keys and unwritten color targets
+  ([#41](https://github.com/chenxiao07/KytyPS5/pull/41)).
+- [@Vorshim92](https://github.com/Vorshim92): GPU buffers back in video memory ([#44](https://github.com/chenxiao07/KytyPS5/pull/44)),
+  HUD-less frame generation ([#72](https://github.com/chenxiao07/KytyPS5/pull/72)), save bookkeeping after a power cut
+  ([#74](https://github.com/chenxiao07/KytyPS5/pull/74)).
+- [@Sandermand](https://github.com/Sandermand): AudioOut2 catch-up ([#68](https://github.com/chenxiao07/KytyPS5/pull/68)).

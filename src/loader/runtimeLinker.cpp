@@ -417,9 +417,7 @@ static KYTY_SYSV_ABI void RunEntry(uint64_t addr, EntryParams* params, atexit_fu
 		             "pushq %%r15\n\t"
 		             "movq %%gs:0x08, %%r14\n\t"
 		             "movq %%gs:0x10, %%r15\n\t"
-		             "xorq %%rcx, %%rcx\n\t"
-		             "movq %%rcx, %%gs:0x08\n\t"
-		             "movq %%rcx, %%gs:0x10\n\t"
+		             KYTY_GUEST_TEB_STACK_RANGE_ASM("10")
 		             "movq %%rsp, %%r12\n\t"
 		             "movq %%rbp, %%r13\n\t"
 		             "movq %[guest_rsp], %%rsp\n\t"

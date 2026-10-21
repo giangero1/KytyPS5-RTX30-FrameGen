@@ -97,12 +97,21 @@ void SetGuardPageHandler(GuardPageHandler handler) {
 	g_guard_page_handler.store(handler, std::memory_order_release);
 }
 
-// RunOnGuestStack (pthread.cpp) runs guest code with the TEB's StackBase and StackLimit zeroed (__chkstk never probes
-// the guest's memory). Windows cannot dispatch an exception to the frames' handlers there: it marks the stack invalid
-// and ends the process with the exception's code, whatever a frame would have done with it.
+static std::atomic<ProbeHandler> g_probe_handler {nullptr};
+
+void SetProbeHandler(ProbeHandler handler) {
+	g_probe_handler.store(handler, std::memory_order_release);
+}
+
+// RunOnGuestStack (pthread.cpp) runs guest code with the TEB's stack range set to the guest stacks' region
+// (KYTY_GUEST_TEB_STACK_RANGE_ASM; zeros where the host stack is not above it). Windows cannot dispatch an exception
+// through the guest frames there (guest code has no unwind data): the process ends with the exception's code, whatever
+// a frame would have done with it.
 static bool OnGuestStack() {
-	const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
-	return tib->StackBase == nullptr && tib->StackLimit == nullptr;
+	const auto* tib   = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+	const auto  base  = reinterpret_cast<uint64_t>(tib->StackBase);
+	const auto  limit = reinterpret_cast<uint64_t>(tib->StackLimit);
+	return (base == 0 && limit == 0) || (base == GuestStacksHigh && limit == GuestStacksLow);
 }
 
 // "module+0xoffset" of a code address (or the bare address).
@@ -224,6 +233,13 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	// A guarded copy reached a page without access: it stops there (never the guest's fault).
 	if (exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && ResumeGuardedCopy(exception->ContextRecord)) {
 		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	if (exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && exception_record->NumberParameters >= 2) {
+		if (const auto probe = g_probe_handler.load(std::memory_order_acquire);
+		    probe != nullptr &&
+		    probe(exception_record->ExceptionInformation[1], exception->ContextRecord->Rip, exception->ContextRecord,
+		          exception_record->ExceptionInformation[0] == 1))
+			return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
 	if (exception_record->ExceptionCode == DBG_PRINTEXCEPTION_C ||
@@ -479,5 +495,9 @@ bool InstallHandler(Handler handler) {
 	g_install_state.store(2, std::memory_order_release);
 	return true;
 }
+
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+void SetProbeHandler(ProbeHandler /*handler*/) {}
+#endif
 
 } // namespace Common::HostException
