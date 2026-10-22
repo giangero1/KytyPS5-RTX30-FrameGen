@@ -300,6 +300,5 @@ bool InstallSuperResolution(Program* program) {
 void Install(Program* program) {
 	if (!DemonsSoulsSuperResolution::Active()) (void)InstallSettings(program, false);
 }
-}
 
 } // namespace Loader::DemonsSoulsRenderSize
