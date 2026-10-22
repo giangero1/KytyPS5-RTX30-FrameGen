@@ -12,5 +12,9 @@ if not defined msbuild (
 	echo MSBuild not found
 	exit /b 1
 )
-"%msbuild%" "%~dp0KytyLauncher.csproj" /nologo /v:minimal /p:Configuration=Release %*
+set "tf_arg="
+if exist "%~dp0..\..\tools\nuget_packages\net472\build" (
+	set "tf_arg=/p:TargetFrameworkRootPath="%~dp0..\..\tools\nuget_packages\net472\build\\""
+)
+"%msbuild%" "%~dp0KytyLauncher.csproj" /nologo /v:minimal /p:Configuration=Release %tf_arg% %*
 exit /b %errorlevel%
