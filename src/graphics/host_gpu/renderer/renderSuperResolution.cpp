@@ -289,8 +289,7 @@ void RunUpscale(const UpscaleRecord& record, const vk::detail::DispatchLoaderDyn
 	upscaled ? ++successes : ++failures;
 	if (attempts == 1 || attempts % 300 == 0) {
 		std::printf("Super resolution evaluations: attempts=%" PRIu64 " successful=%" PRIu64
-		            " failed=%" PRIu64 " stretch_fallbacks=%" PRIu64 " (%ux%u -> %ux%u)
-",
+		            " failed=%" PRIu64 " stretch_fallbacks=%" PRIu64 " (%ux%u -> %ux%u)\n",
 		            attempts, successes, failures, failures, record.inputs.color.extent.width,
 		            record.inputs.color.extent.height, record.inputs.output.extent.width, record.inputs.output.extent.height);
 		std::fflush(stdout);
