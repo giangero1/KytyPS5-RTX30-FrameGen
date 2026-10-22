@@ -1,10 +1,10 @@
 # KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
-## Verified upstream v20261020b merge — RTX 3070 integrations preserved
+## Verified upstream v20261022 merge — RTX 3070 integrations preserved
 
-**[Download v2026.10.20b-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.20b-upstream-merge)** — portable Windows x64 ZIP and SHA256 checksums, locally built with Clang-CL 19, ThinLTO, AVX2 and Streamline headers. The exact gameplay-verified binaries come from `c01f9217`; release metadata also identifies the documentation/packaging commit.
+**[Download v2026.10.22-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.22-upstream-merge)** — portable Windows x64 ZIP and SHA256 checksums, locally built with Clang-CL 19, ThinLTO, AVX2 and Streamline headers. The exact gameplay-verified binaries come from `f075b460`; release metadata also identifies the documentation/packaging commit.
 
-Thanks to **[chenxiao07/KytyPS5 v20261020b](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261020b)** and its contributors for the 16 GB RAM crash fix (#91), four newly translated pixel shaders, kill-tour shader hints for all six worlds, 8 GB GPU buffer defragmentation (`KYTY_BUFFER_DEFRAG`), dynamic 64 MiB VMA block sizing, fresh memory zero-reads, and centered lock-on reticles.
+Thanks to **[chenxiao07/KytyPS5 v20261022](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261022)** and its contributors for the 16 GB RAM crash fix (#91), four newly translated pixel shaders, kill-tour shader hints for all six worlds, 8 GB GPU buffer defragmentation (`KYTY_BUFFER_DEFRAG`), dynamic 64 MiB VMA block sizing, fresh memory zero-reads, and centered lock-on reticles.
 
 This fork retains **1920×1080 DLSS → 2560×1440 output + 2× FG**, the original **3840×2160 UI canvas**, shared SR/FG frame tokens and DXGI VRAM-pressure handling. The user reports **85–95+ displayed FPS in Boletaria on RTX 3070** after this merge; this is an observation, not a controlled average or performance guarantee. The six earlier screenshots below remain labeled with their original measurements.
 
@@ -20,8 +20,8 @@ All seven focused core tests pass. Prior broader validation limits remain docume
 > ⚠️ **Mandatory Prerequisite:** Enable **Hardware-Accelerated GPU Scheduling (HAGS)** in Windows Settings and **restart your PC**.
 
 ### 🚀 Direct Download
-📦 **[Download Latest Release: v2026.10.20b-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.20b-upstream-merge)**
-*Locally verified portable Windows x64 package (`KytyPS5-v2026.10.20b-upstream-merge-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
+📦 **[Download Latest Release: v2026.10.22-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.22-upstream-merge)**
+*Locally verified portable Windows x64 package (`KytyPS5-v2026.10.22-upstream-merge-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
 
 ---
 

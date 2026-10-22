@@ -38,6 +38,10 @@ try {
     foreach ($file in @('kyty_emulator.exe','kyty_shader_precompile.exe','libwinpthread-1.dll')) {
         Copy-Item -LiteralPath (Join-Path $BuildDirectory $file) -Destination $out
     }
+    $launcherExe = Join-Path $repo '_Build/launcher/KytyLauncher.exe'
+    if (Test-Path -LiteralPath $launcherExe) {
+        Copy-Item -LiteralPath $launcherExe -Destination $out
+    }
     Copy-Item run-windows.ps1, precompile-windows.ps1, launcher.ps1, launcher.cmd, LICENSE -Destination $out
     Copy-Item LICENSES -Destination $out -Recurse
     Copy-Item run-windows.json -Destination "$out/launch.json"

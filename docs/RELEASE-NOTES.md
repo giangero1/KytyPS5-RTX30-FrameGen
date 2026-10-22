@@ -1,27 +1,26 @@
-# v2026.10.20b-upstream-merge — verified RTX 3070 build
+# v2026.10.22-upstream-merge — verified RTX 3070 build
 
-This release packages the **exact locally built and gameplay-verified `c01f9217` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`) and Streamline headers. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+This release packages the **exact locally built and gameplay-verified `f075b460` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
 
 ## Upstream fixes and credits
 
-Thanks to **[chenxiao07/KytyPS5 v20261020b](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261020b)** (`96ccc79e`) and its contributors. Merged in `c01f9217`:
+Thanks to **[chenxiao07/KytyPS5 v20261022](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261022)** (`bfa6558f`) and its contributors. Merged in `598219f9`:
 
-- **Crash on PCs with 16 GB of RAM (issue #91):** fixes the "PageManager fatal: read-watcher overflow" crash during level loading under texture memory savings.
-- **Four translated pixel shaders:** translates four shaders that previously ended the emulator (including Valley of Defilement tour crash).
-- **Kill-tour precompiled shaders:** adds 153 shader programs and 580 pipelines across all six worlds (including 3 large Shrine of Storms shaders that previously froze for up to 40 s).
-- **8 GB GPU memory defragmentation & sizing:** VMA heap blocks sized to 64 MiB on <13 GB GPUs; compacted game buffer pool (`KYTY_BUFFER_DEFRAG`) saves ~0.6 GB VRAM on 8 GB cards after travelling between worlds.
-- **World shader unloading & fresh memory:** shaders of a departed world unloaded after 60 s; never-written memory taken as zeros (`KYTY_FRESH_MEMORY`).
-- **Centered lock-on reticles & world markers:** enemy health bars and lock-on reticles held centered and unstretched over wide output canvas.
+- **A new graphical launcher, `KytyLauncher.exe`:** full multi-page interface (Play, Display, Graphics, Game, Shaders, Advanced) in English or Chinese, with hardware, driver, and precompiled shader pre-flight diagnostics.
+- **Low latency mode:** one finished frame waits for the screen instead of two, noticeably reducing input latency.
+- **Dynamic render height:** follows display window when unset (e.g. 1080p rendering on 1080p display).
+- **Shadow and texture fixes:** fixes surfaces past shortened sun-shadow distance looking dark, dark textures after level reload/death on 16 GB PCs, and ultrawide menu tearing.
+- **AMD & Linux optimizations:** native float min/max instruction mapping (+8% GPU bound) and built-in FSR 3 upscaling/frame generation for Linux.
 
 ## Preserved RTX 30 integrations
 
 **1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas**, shared SR/FG frame tokens with distinct viewport IDs, and DXGI VRAM-pressure sampling/cache trimming are retained. The unified launcher selects the same executable for native and DLSS modes.
 
-The user validated gameplay, DLSS, UI, saves and 2× FG with no observed regressions on RTX 3070, reporting **85–95+ displayed FPS in Boletaria**. This is user-reported performance, not a controlled average or a guarantee. Existing reference screenshots show **43 base / 85 displayed FPS** for DLSS and **30 / 60** for native 1440p. FG does not raise the simulation rate to the displayed rate.
+The user validated gameplay, DLSS, UI, saves and 2× FG with no observed regressions on RTX 3070, reporting **85–95+ displayed FPS in Boletaria** and smooth 100–120 FPS performance with driver 617.42 precompiled shaders. This is user-reported performance, not a controlled average or a guarantee. Existing reference screenshots show **43 base / 85 displayed FPS** for DLSS and **30 / 60** for native 1440p. FG does not raise the simulation rate to the displayed rate.
 
 **Automated validation:** all seven focused tests pass: `demons_souls_output`, `launcher_commands`, `save_data_backup`, `page_manager`, `command_scheduler_timeline`, `host_image_allocation`, `texture_cache_depth_readback`. The binary pair is hash-identical to the verified build output. The broader historical BC3 atlas overlap failure and untested resolution/long-session cases remain documented in [validation limits](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/DLSS_UI_CANVAS_VALIDATION.md); seven focused passes do not establish a fully passing suite.
 
-**Installation:** extract the portable ZIP and use `launcher.cmd`. Standard app/VC runtime DLLs, six screenshots and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves and personal settings are excluded.
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs, six screenshots and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves and personal settings are excluded.
 
 See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
