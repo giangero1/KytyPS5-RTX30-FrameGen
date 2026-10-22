@@ -2155,7 +2155,7 @@ public:
   void CheckDeferredImageRetirement() {
     constexpr const char *name = "DeferredImageRetirement";
     auto &graphics = RuntimeContext();
-    CommandScheduler scheduler(Renderer(), graphics);
+    auto &scheduler = Renderer().GetCommandScheduler();
     HW::Context registers{};
     HW::UserConfig user_config{};
     HW::Shader shaders{};
@@ -16087,8 +16087,7 @@ private:
       DestroyBuffer(&m_bda_pagetable_buffer);
       if (m_runtime_context.allocator != nullptr) {
         m_renderer.reset();
-        vmaDestroyAllocator(m_runtime_context.allocator);
-        m_runtime_context.allocator = nullptr;
+        m_runtime_context.DestroyAllocator();
       }
       if (m_command_pool != nullptr) {
         m_device.destroyCommandPool(m_command_pool, nullptr);
