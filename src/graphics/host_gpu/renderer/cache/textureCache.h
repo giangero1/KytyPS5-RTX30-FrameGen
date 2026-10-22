@@ -11,7 +11,6 @@
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
-#include "speculation-state.h"
 #include "local/video-memory-policy.h"
 
 #include <array>
@@ -33,9 +32,6 @@ class CommandScheduler;
 class RenderExecutor;
 struct TextureCacheTestAccess;
 
-void                   KytyTextureGcThresholds(uint64_t total_budget, uint64_t& trigger, uint64_t& pressure,
-                                               uint64_t& critical);
-[[nodiscard]] bool     KytyGcLiveBudget();
 [[nodiscard]] uint64_t KytyGcLiveBudgetValue(const GraphicContext& graphics);
 
 class TextureCache {
@@ -73,13 +69,10 @@ public:
 	// Appends the (epoch, address) entries logged after `epoch`; false when the
 	// log no longer reaches back that far.
 	[[nodiscard]] bool NewImageStartsSince(uint64_t epoch, std::vector<std::pair<uint64_t, uint64_t>>& out);
-	// The image (of `serial`) still registered, and no image registered or unregistered over its pages since `epoch`
-	// (a speculation's work used it: speculation.cpp).
-	[[nodiscard]] bool StillResolved(const Image& image, uint64_t serial, uint64_t epoch) const;
 	[[nodiscard]] uint64_t ResolutionEpoch() const {
 		return m_resolution_epoch.load(std::memory_order_acquire);
 	}
-	// Moves whenever an image's slot is erased (EraseRetired, the only place): an id allocated when it was E is still
+	// Moves whenever an image's slot is erased (EraseSlot, the only place): an id allocated when it was E is still
 	// allocated while it is E.
 	[[nodiscard]] uint64_t EraseEpoch() const { return m_erase_epoch.load(std::memory_order_acquire); }
 	// Only reuses discovery. FindTexture still refreshes contents and selects the current view.
@@ -91,6 +84,9 @@ public:
 	// DCC metadata (whose pending fast clears FindTexture applies: the caller checks IsMetaCleared), and with
 	// `storage_dcc` one written as storage too.
 	[[nodiscard]] bool IsSampledImageCurrent(ImageId id, const ImageDesc& desc, bool storage_dcc = false);
+	// The view's levels and layers lie in the image `desc` describes. FindImage moves a view into a larger image it found
+	// (its first level and layer in that image), so a description it was given is not a request of its own any more.
+	[[nodiscard]] static bool ViewFitsImage(const ImageDesc& desc);
 	// A depth image sampled through a view of its memory (FindImage takes it through ResolveDepthOverlap, a 32-bit
 	// float view of a D32S8 image having no format of the same class, or through its stencil plane's association): the
 	// lookup finds it again while no image was registered or unregistered over the view's pages since `epoch` (the same
@@ -122,8 +118,6 @@ public:
 	// The image, or null when `id` names no live image (an erased one a record kept): not touched.
 	[[nodiscard]] Image*        TryGetImage(ImageId id) noexcept { return m_slot_images.try_get(id); }
 	void MarkGpuWritten(ImageId id);
-	// A speculative translation's use of the image, when it is committed (`serial`: the image it used).
-	void TouchSpeculated(Image& image, uint64_t serial);
 
 	[[nodiscard]] bool ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
 	                                        uint32_t packed_clear);
@@ -250,9 +244,8 @@ private:
 	// can read it.
 	[[nodiscard]] bool        DetachImage(ImageId id);
 	void                      RetireImage(ImageId id);
-	// Deleted images a speculation's packet may still read (Spec::PacketsPassed), destroyed once it passed.
-	std::vector<std::pair<ImageId, Spec::PacketMarks>> m_retired;
-	void                                               EraseRetired();
+	// A deleted image destroyed, its slot erased (RetireImage's, once nothing uses it).
+	void                      EraseSlot(ImageId id);
 	// An image a depth overlap replaced, out of every index but kept (one an address, the collector's run it was parked
 	// at): ResolveDepthOverlap takes it back when the memory is asked for in its description again, instead of making
 	// another image (the game takes one surface as a depth target and as a color target in turn every frame).
@@ -312,8 +305,6 @@ private:
 	                                         uint64_t& end);
 	// A sampled view's refresh of its levels (the others stay dirty); false: RefreshImage's.
 	[[nodiscard]] bool RefreshTextureLevels(ImageId id, const ImageViewInfo& view);
-	void               UpdatePartialHashes(Image& image, bool all);
-	[[nodiscard]] bool CheckPartialHashes(const Image& image);
 	void                      MarkAsMaybeDirty(ImageId id, Image& image);
 	void                      TrackImageDownload(ImageId id, Image& image);
 	[[nodiscard]] static bool SameBacking(const ImageInfo& cached, const ImageInfo& requested,

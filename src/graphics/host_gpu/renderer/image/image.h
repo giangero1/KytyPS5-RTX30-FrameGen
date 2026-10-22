@@ -21,9 +21,6 @@ namespace Libs::Graphics {
 class Buffer;
 class CommandScheduler;
 struct ImageTestAccess;
-namespace Spec {
-struct ImageEntry;
-} // namespace Spec
 
 using ImageId = Common::SlotId;
 
@@ -60,8 +57,7 @@ struct ImageBinding {
 void BeginTransitGroup() noexcept;
 void EndTransitGroup() noexcept;
 
-// Moves whenever an image's barrier state (layout, access) is set outside a speculation's own view: what was found
-// in place holds while it does not.
+// Moves whenever an image's barrier state (layout, access) is set: what was found in place holds while it does not.
 [[nodiscard]] uint64_t ImageStateEpoch() noexcept;
 void                   MoveImageStateEpoch() noexcept;
 
@@ -95,14 +91,10 @@ public:
 	                                   std::optional<ImageSubresourceRange> range);
 	void Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
 	             std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer);
-	// The whole-image barrier state the calling thread's next transition starts from (a speculative translation's
-	// own once it used the image: speculation-state.h).
+	// The whole-image barrier state the next transition starts from.
 	[[nodiscard]] const VulkanImageState& CurrentState() const;
-	// A speculative translation's work uses the image as it is now (its commit puts it there first: a use without a
-	// transition needs this too); null outside one.
-	Spec::ImageEntry* SpeculativeEntry();
 	// The barrier state set to `state` (each subresource's: `subresources`, unless empty), with the barriers there
-	// from the image's (a speculative translation's work is committed where it found the image).
+	// from the image's.
 	void RestoreState(const VulkanImageState& state, const std::vector<VulkanImageState>& subresources,
 	                  vk::CommandBuffer command_buffer);
 	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -381,8 +373,6 @@ public:
 	// Page-aligned ranges inside the tracked pages the image stopped watching after partial
 	// CPU writes; always inside CpuDirtyRanges while the image is partially dirty.
 	std::vector<std::pair<uint64_t, uint64_t>> untracked_holes;
-	// KYTY_PARTIAL_IMAGE_DIRTY=2: guest data hashes per partial-dirty granule at the last upload.
-	std::vector<uint64_t> partial_hashes;
 	ImageId          depth_id {};
 	uint64_t         frame_accessed_last = 0; // TextureCache::AdvanceFrame count at the last use
 	size_t           lru_id             = 0;
@@ -393,8 +383,7 @@ public:
 	const Buffer*    staged_ring        = nullptr;
 	uint64_t         staged_offset      = 0;
 	uint64_t         staged_serial      = 0;
-	// The barrier state (backing.state, backing.subresource_states, transit_group): changed under this lock, which a
-	// speculative translation's thread reads it under (SpeculativeEntry).
+	// The barrier state (backing.state, backing.subresource_states, transit_group): changed under this lock.
 	struct StateLock {
 		explicit StateLock(const Image& owner) noexcept: image(owner) {
 			while (image.state_busy.exchange(true, std::memory_order_acquire)) _mm_pause();

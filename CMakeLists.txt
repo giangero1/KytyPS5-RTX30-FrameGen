@@ -134,8 +134,6 @@ endif()
 project(Kyty${KYTY_PROJECT_NAME}${CMAKE_BUILD_TYPE}${KYTY_COMPILER} VERSION 0.3.0)
 
 include_directories(
-	${KYTY_THIRD_PARTY_DIR}/gtest/include
-	${KYTY_THIRD_PARTY_DIR}/gtest
 	${KYTY_THIRD_PARTY_DIR}/fmt/include
 	${KYTY_THIRD_PARTY_DIR}/magic_enum/include/magic_enum
 	${PROJECT_BINARY_DIR}
@@ -209,6 +207,18 @@ if(KYTY_CLANG_CL)
 		add_compile_options(-fprofile-instr-generate)
 		add_compile_definitions(KYTY_PGO_GENERATE=1)
 		link_libraries("${kyty_profile_runtime}")
+	elseif(KYTY_PGO_USE)
+		add_compile_options("-fprofile-instr-use=${KYTY_PGO_USE}" -Wno-profile-instr-unprofiled
+		                    -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+	endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+	# Linux: the same PGO switches. The profile must be made on Linux (tools/pgo is clang-cl's).
+	option(KYTY_PGO_GENERATE "Instrumented build; the live command `pgo <file>` writes the profile" OFF)
+	set(KYTY_PGO_USE "" CACHE FILEPATH "llvm-profdata output to optimize with (empty: none)")
+	if(KYTY_PGO_GENERATE)
+		add_compile_options(-fprofile-instr-generate)
+		add_link_options(-fprofile-instr-generate)
+		add_compile_definitions(KYTY_PGO_GENERATE=1)
 	elseif(KYTY_PGO_USE)
 		add_compile_options("-fprofile-instr-use=${KYTY_PGO_USE}" -Wno-profile-instr-unprofiled
 		                    -Wno-profile-instr-out-of-date -Wno-backend-plugin)
@@ -379,6 +389,7 @@ set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
 	"${gpu_tiler_shader_dir}/gpu_blit_color_to_ms_depth.frag"
 	"${gpu_tiler_shader_dir}/gpu_imgui_hdr.frag"
+	"${gpu_tiler_shader_dir}/fsr_hud_mask.frag"
 )
 foreach(shader_source IN LISTS gpu_blit_shader_sources)
 	get_filename_component(shader_name "${shader_source}" NAME_WE)
@@ -408,6 +419,12 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/frame-gen.cpp"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.h"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.cpp"
+	"${KYTY_SOURCE_DIR}/local/screenshot.h"
+	"${KYTY_SOURCE_DIR}/local/screenshot.cpp"
+	"${KYTY_SOURCE_DIR}/local/anti-lag.h"
+	"${KYTY_SOURCE_DIR}/local/anti-lag.cpp"
+	"${KYTY_SOURCE_DIR}/local/fsr-native.h"
+	"${KYTY_SOURCE_DIR}/local/fsr-native.cpp"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.h"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
@@ -424,6 +441,11 @@ if (KYTY_CLANG_CL)
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL2-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak libzstd_static)
+# Linux: AMD FidelityFX FSR 3 built from source (3rdparty/fidelityfx) for KYTY_UPSCALER=fsr
+# (src/local/fsr-native.h); Windows loads AMD's runtime instead (frame-gen.cpp).
+if (LINUX)
+	list(APPEND kyty_emulator_link_libraries kyty_fidelityfx)
+endif()
 
 # Linux system libraries required by the static FFmpeg archive.
 if(LINUX)
@@ -657,6 +679,7 @@ target_include_directories(event_queue_lifetime_tests PRIVATE ${inc_headers})
 
 add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
+add_kyty_full_emulator_test(pad_input_tests "${KYTY_TESTS_DIR}/PadInputTests.cpp")
 add_executable(save_data_capacity_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SaveDataCapacityTests.cpp")
 target_include_directories(save_data_capacity_tests PRIVATE ${inc_headers})
@@ -752,6 +775,7 @@ if(BUILD_TESTING)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
+	add_test(NAME pad_input COMMAND $<TARGET_FILE:pad_input_tests>)
 	add_test(NAME save_data_capacity COMMAND $<TARGET_FILE:save_data_capacity_tests>)
 	add_test(NAME save_data_backup COMMAND $<TARGET_FILE:save_data_backup_tests>)
 	add_test(NAME fiber_migration COMMAND $<TARGET_FILE:fiber_migration_tests>)
@@ -831,6 +855,7 @@ if(BUILD_TESTING)
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests
+		pad_input_tests
 		fiber_migration_tests
 		save_data_capacity_tests
 		save_data_backup_tests
@@ -848,7 +873,6 @@ configure_macos_guest_address_space(kyty_emulator)
 if(LINUX)
 	set_property(SOURCE
 		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/graphicsRun.cpp"
-		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/speculation.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/commandScheduler.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/descriptors.cpp"
@@ -883,8 +907,8 @@ endif()
 target_link_libraries(kyty_emulator ${CMAKE_DL_LIBS})
 target_include_directories(kyty_emulator PRIVATE ${inc_headers})
 
-# Local frame generation experiments (src/local/frame-gen.cpp): the NVIDIA Streamline SDK when it
-# was unpacked under _Build/deps (never part of the repository). Its DLLs are loaded at run time.
+# Frame generation (src/local/frame-gen.cpp): the NVIDIA Streamline SDK when it was unpacked under _Build/deps
+# (never part of the repository). Its DLLs are loaded at run time.
 if (WIN32)
 	set(KYTY_STREAMLINE_SDK "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/streamline/sdk" CACHE PATH
 	    "NVIDIA Streamline SDK for KYTY_FRAMEGEN (local only)")
@@ -896,6 +920,22 @@ if (WIN32)
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_STREAMLINE=1)
 	endif()
+	# KYTY_FRAMEGEN_BACKEND=fsr: AMD FidelityFX SDK 1.1.4's API headers (ffx-api/include, MIT) when unpacked under
+	# _Build/deps/fidelityfx; its runtime (amd_fidelityfx_vk.dll, signed by AMD) goes next to the emulator.
+	set(KYTY_FIDELITYFX_SDK "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/fidelityfx" CACHE PATH
+	    "AMD FidelityFX SDK (ffx-api) for KYTY_FRAMEGEN_BACKEND=fsr")
+	if (EXISTS "${KYTY_FIDELITYFX_SDK}/include/ffx_api/ffx_api.h")
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
+		             INCLUDE_DIRECTORIES "${KYTY_FIDELITYFX_SDK}/include")
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
+		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_FSR=1)
+	endif()
+elseif (LINUX)
+	# Linux has no Streamline: DLSS (KYTY_UPSCALER=dlss) through NVIDIA's NGX, by the bridge libkyty_dlss.so that
+	# tools/local/dlss-bridge/build-dlss-linux.sh builds apart; loaded at run time (dlopen), the emulator links no NVIDIA
+	# code.
+	set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
+	             COMPILE_DEFINITIONS KYTY_FRAMEGEN_NGX=1)
 endif()
 
 clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")
@@ -939,8 +979,7 @@ endif()
 install(TARGETS kyty_emulator DESTINATION .)
 
 # x86_64 Linux and Windows: the Vulkan recording worker (KYTY_VULKAN_RECORDING, with the
-# native XPR draws built on it) and the native resource preparation tests (the
-# ahead-of-time SRT library is loaded with dlopen on Linux, LoadLibrary on Windows).
+# native XPR draws built on it) and the native resource preparation tests.
 if((LINUX OR WIN32) AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 	find_package(Python3 REQUIRED COMPONENTS Interpreter)
 	set(recording_generated "${CMAKE_CURRENT_BINARY_DIR}/local-vulkan-recording.inc")
@@ -953,7 +992,7 @@ if((LINUX OR WIN32) AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 		DEPENDS "${recording_generator}" "${vulkan_registry}" "${vulkan_hpp}"
 		VERBATIM)
 	foreach(recording_target kyty_emulator kyty_shader_precompile shader_recompiler_compute_tests xpr_replay_tests
-			virtual_memory_allocation_tests)
+			virtual_memory_allocation_tests pad_input_tests)
 		target_sources(${recording_target} PRIVATE
 			"${KYTY_SOURCE_DIR}/local/vulkan-recording.cpp" "${recording_generated}")
 		target_include_directories(${recording_target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
@@ -966,10 +1005,9 @@ if((LINUX OR WIN32) AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 	target_link_libraries(vulkan_recording_tests PRIVATE Threads::Threads Vulkan::Headers)
 
 	foreach(native_resource_target kyty_emulator kyty_shader_precompile shader_recompiler_compute_tests shader_cfg_tests
-			resource_tracking_tests resource_materialization_tests virtual_memory_allocation_tests)
+			resource_tracking_tests resource_materialization_tests virtual_memory_allocation_tests pad_input_tests)
 		target_sources(${native_resource_target} PRIVATE "${lod_stats_pack_header}")
 		target_compile_definitions(${native_resource_target} PRIVATE KYTY_LOCAL_NATIVE_RESOURCES=1)
-		target_link_libraries(${native_resource_target} ${CMAKE_DL_LIBS})
 	endforeach()
 	if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_LINKER MATCHES "ld.lld$")
 		# Clang otherwise selected GNU ld/LLVMgold despite CMAKE_LINKER, which

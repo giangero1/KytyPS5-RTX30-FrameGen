@@ -66,14 +66,20 @@ jobs:
           out="_Build/package/$PACKAGE"
           mkdir -p "$out/tools/local/static-precompile"
           cp "$build/kyty_emulator" "$build/kyty_shader_precompile" "$out"/
-          cp tools/local/run_ds.sh "$out"/
+          cp tools/local/run_ds.sh precompile-linux.sh tools/local/dlss-bridge/get-dlss-linux.sh "$out"/
+          # DLSS: the bridge's source only (MIT); get-dlss-linux.sh downloads NVIDIA's SDK and builds it on the user's PC,
+          # so the package carries none of NVIDIA's files.
+          mkdir -p "$out/dlss-bridge"
+          cp tools/local/dlss-bridge/kyty_dlss_bridge.cpp tools/local/dlss-bridge/LICENSE.txt src/local/kyty-dlss-bridge.h \
+            "$out/dlss-bridge/"
           cp LICENSE "$out"/
           cp -r LICENSES "$out"/
           # The render-pass states the precompile program makes the seed file with (the same files
           # the Windows package carries): the first launch lists the game's shaders from its files.
           cp tools/local/static-precompile/pass-states.json "$out/tools/local/static-precompile/"
           cp tools/local/static-precompile/hints-*.hints "$out/tools/local/static-precompile/" 2>/dev/null || true
-          chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/run_ds.sh"
+          chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/run_ds.sh" "$out/precompile-linux.sh" \
+            "$out/get-dlss-linux.sh"
           cat > "$out/README.md" <<'EOF'
           # KytyPS5 (Linux x64) for Demon's Souls (PPSA01341)
 
@@ -99,11 +105,28 @@ jobs:
           1920x1080 window and shows MangoHud when it is installed (`MANGO=1`; `MANGO=0` hides it). The first
           launch translates shaders in the background for a minute or two; later launches are faster.
 
+          If the unpacker dropped the files' execute permission ("Permission denied"):
+          `chmod +x kyty_emulator kyty_shader_precompile run_ds.sh precompile-linux.sh get-dlss-linux.sh`.
+
           ## Shader precompile (optional)
 
-          `kyty_shader_precompile` collects every shader and pipeline of the game into the static
-          pipeline cache ahead of time, so a new area does not stall on its first pipelines. See the
-          repository's `tools/local/static-precompile/README.md`.
+          `./precompile-linux.sh --game <the game>` collects every shader and pipeline of the game into the static
+          pipeline cache ahead of time (hours the first time: run it overnight; an interrupted run resumes), so a new
+          area does not stall on its first pipelines. `--quick` compiles only what recorded play used, `--help` lists
+          the rest. See the repository's `tools/local/static-precompile/README.md`.
+
+          ## DLSS (optional, NVIDIA RTX)
+
+          `./get-dlss-linux.sh` (once; it offers to install git and a C++ compiler when missing) downloads NVIDIA's DLSS
+          SDK and builds `libkyty_dlss.so` from `dlss-bridge/`, next to the emulator with NVIDIA's DLSS libraries:
+          then `KYTY_UPSCALER=dlss` and `KYTY_FRAMEGEN` work (the repository's `tools/local/dlss-bridge/README.md`).
+
+          ## FSR 3 (built in, any graphics card)
+
+          AMD FSR 3 is part of this package (AMD's FidelityFX SDK, MIT license in `LICENSES/`): `KYTY_UPSCALER=fsr`
+          upscales the game's 3D on its PS5 Pro path in place of Sony's upscaler (sharpness `KYTY_FSR_SHARPNESS`, 0.0-1.0,
+          default 0.6), and `KYTY_FRAMEGEN_BACKEND=fsr` turns on FSR 3 frame generation (2x), for example
+          `KYTY_UPSCALER=fsr KYTY_FRAMEGEN_BACKEND=fsr ./run_ds.sh`.
 
           Sizeable parts of this program are under the third-party licenses in `LICENSES/` and
           `LICENSE`.

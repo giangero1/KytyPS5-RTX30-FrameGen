@@ -3,7 +3,7 @@
 // The specializations a seed is compiled with: every resource bound to a plain descriptor of the kind
 // the shader declares (an image of the declared dimension and the numeric class its use suggests
 // (PredictImageNumericClasses), a buffer without stride, and where a
-// store packs a format, the one most of them use: one 32-bit integer), and with portable modules each
+// store packs a format, the one most of them use: one 32-bit integer), and each
 // indirect image table, whose size is the game's data, in turn in its plain form (one texture) and
 // padded to 2, 4, 8 and 16 candidates (BuildResourceSpecialization), for programs with at most two
 // tables; a vertex or pixel shader's two tables (texture sets sampled twice) with the same size.
@@ -58,7 +58,7 @@ SeedSpecializations(const ShaderRecompiler::IR::Program& program) {
 		}
 		return out;
 	};
-	if (tables.empty() || tables.size() > 2 || !ShaderRecompiler::IR::PortableShaders()) {
+	if (tables.empty() || tables.size() > 2) {
 		return with_volumes_as_2d({plain});
 	}
 	constexpr uint32_t sizes[] = {1, 2, 4, 8, 16};
@@ -105,13 +105,55 @@ SeedSpecializations(const ShaderRecompiler::IR::Program& program) {
 	return with_volumes_as_2d(std::move(out));
 }
 
+// A compute seed's recorded specialization, then the same with the 3D images the shader declares (outside tables) given
+// 2D textures as SeedSpecializations' guesses do, and given volumes again where the record had 2D: the game binds either
+// to the same program, and the hints hold the one their recording met. The other compiled at its first encounter
+// (10-18, RX 9070 XT: a boss's death met 3 large CS 0x44353015859c5f9b... whose hints were 3D 3D with 3D 2D, 16 s each,
+// a 51 s freeze).
+static std::vector<ShaderRecompiler::IR::ResourceSpecialization>
+RecordedSpecializations(const ShaderRecompiler::IR::Program&               program,
+                        const ShaderRecompiler::IR::ResourceSpecialization& recorded) {
+	using ShaderRecompiler::Decoder::ImageDimension;
+	using ShaderRecompiler::IR::ImageResource;
+	std::vector out {recorded};
+	if (program.stage != ShaderType::Compute) return out;
+	std::vector<uint32_t> volumes;
+	for (uint32_t index = 0; index < program.info.images.size() && index < recorded.images.size(); index++) {
+		const auto& image = program.info.images[index];
+		const bool  table = image.source < program.descriptor_sources.size() &&
+		                   program.descriptor_sources[image.source].indirect_image.has_value();
+		if (image.dimension == ImageDimension::Dim3D && !table &&
+		    recorded.images[index].indirect_root == ImageResource::NoIndirectImage &&
+		    (recorded.images[index].dimension == ImageDimension::Dim3D ||
+		     recorded.images[index].dimension == ImageDimension::Dim2D))
+			volumes.push_back(index);
+	}
+	if (volumes.empty()) return out;
+	// (The sets of SeedSpecializations: the last 1, 2, ... of them 2D; with three also 2D 2D 3D and 3D 2D 3D.)
+	std::vector<std::vector<uint32_t>> flat_sets;
+	for (size_t last = 1; last <= volumes.size(); last++) flat_sets.emplace_back(volumes.end() - last, volumes.end());
+	if (volumes.size() == 3) flat_sets.insert(flat_sets.end(), {{volumes[0], volumes[1]}, {volumes[1]}});
+	auto volume = recorded;
+	for (const auto index: volumes) volume.images[index].dimension = ImageDimension::Dim3D;
+	const auto add = [&](ShaderRecompiler::IR::ResourceSpecialization specialization) {
+		if (std::ranges::find(out, specialization) == out.end()) out.push_back(std::move(specialization));
+	};
+	add(volume);
+	for (const auto& flat_set: flat_sets) {
+		auto flat = volume;
+		for (const auto index: flat_set) flat.images[index].dimension = ImageDimension::Dim2D;
+		add(std::move(flat));
+	}
+	return out;
+}
+
 // A recorded specialization's indirect image tables in their portable form (BuildResourceSpecialization):
 // candidates padded to a power of two, the key mapping found through a header word.
 static void PortableIndirectTables(const ShaderRecompiler::IR::Program&         program,
                                    ShaderRecompiler::IR::ResourceSpecialization& specialization) {
 	using ShaderRecompiler::IR::ImageResource;
 	const auto base = program.info.images.size();
-	if (!ShaderRecompiler::IR::PortableShaders() || specialization.images.size() <= base) return;
+	if (specialization.images.size() <= base) return;
 	std::vector<ShaderRecompiler::IR::ResourceSpecialization::Image> images(specialization.images.begin(),
 	                                                                         specialization.images.begin() + base);
 	uint32_t active = 0;
@@ -312,11 +354,13 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 			if (std::ranges::any_of(translated.program.descriptor_sources,
 			                        [](const auto& source) { return source.indirect_image.has_value(); }))
 				indirect.fetch_add(1, std::memory_order_relaxed);
-			// A seed that carries a specialization (a recorded warmup file) is compiled with it.
+			// A seed that carries a specialization (a recorded warmup file) is compiled with it (a compute seed's with its
+			// volumes' other dimensions too: RecordedSpecializations).
 			const bool recorded = !seed.specialization.buffers.empty() || !seed.specialization.images.empty();
-			auto       specializations =
-			    recorded ? std::vector {seed.specialization} : SeedSpecializations(translated.program);
-			if (recorded) PortableIndirectTables(translated.program, specializations[0]);
+			auto       specializations = recorded ? RecordedSpecializations(translated.program, seed.specialization)
+			                                      : SeedSpecializations(translated.program);
+			if (recorded)
+				for (auto& specialization: specializations) PortableIndirectTables(translated.program, specialization);
 			for (size_t variant = 0; variant < specializations.size(); variant++) {
 				auto& specialization = specializations[variant];
 				if (variant != 0) translated = ShaderRecompiler::TranslateProgram(seed.code, options);
@@ -603,7 +647,18 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 		blob_writer                     = std::make_unique<PipelineCacheBlobWriter>();
 		m_graphics.pipeline_blob_writer = blob_writer.get();
 	}
-	vk::PipelineCache target = binaries || blobs ? nullptr : m_static_cache;
+	// NVIDIA trains its compression dictionary once a process has made a few hundred pipelines (230 to 319 here), and
+	// the captures after it are left out (PipelineBinaryWriter). A shard stops well before, after capture_cap captures
+	// (KYTY_PRECOMPILE_SHARD_CAP, default 160 on NVIDIA; 0: none), its other work items left to its halves (exit 3),
+	// instead of compiling pipelines it cannot keep.
+	const size_t capture_cap = [&]() -> size_t {
+		if (const char* value = std::getenv("KYTY_PRECOMPILE_SHARD_CAP"); value != nullptr && *value != 0)
+			return std::strtoull(value, nullptr, 10);
+		constexpr uint32_t NvidiaVendor = 0x10DE;
+		return m_graphics.GetPhysicalDeviceProperties().vendorID == NvidiaVendor ? 160 : 0;
+	}();
+	std::atomic<size_t> capped {0};
+	vk::PipelineCache   target = binaries || blobs ? nullptr : m_static_cache;
 	if (create_pipelines && !blobs && (shards > 1 || binaries)) {
 		vk::PipelineCacheCreateInfo info {};
 		if (m_graphics.device.createPipelineCache(&info, nullptr, &target) != vk::Result::eSuccess) target = nullptr;
@@ -730,8 +785,12 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 			if (!mine(n) || (writer != nullptr && writer->LeftOut() != 0) ||
 			    (blob_writer != nullptr && blob_writer->LeftOut() != 0))
 				return;
+			if (n < seed_words.size() && stage_of(n) != ShaderType::Compute) return;
+			if (writer != nullptr && capture_cap != 0 && writer->Captured() >= capture_cap) {
+				capped.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
 			if (n < seed_words.size()) {
-				if (stage_of(n) != ShaderType::Compute) return;
 				LocalShaderWarmup::Record input;
 				if (!decode(static_cast<uint32_t>(n), input)) return;
 				const bool covered = covers(ShaderType::Compute, input.hash);
@@ -877,7 +936,12 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 		                 plan.owners.size() - planned_keys);
 		if (!written) return false;
 	}
-	left_out = (writer != nullptr ? writer->LeftOut() : 0) + (blob_writer != nullptr ? blob_writer->LeftOut() : 0);
+	if (const auto stopped = capped.load(); stopped != 0)
+		PipelineCacheLog("Shader seeds: stopped after {} captured pipelines (KYTY_PRECOMPILE_SHARD_CAP), {} work items left "
+		                 "to a smaller shard",
+		                 writer->Captured(), stopped);
+	left_out = (writer != nullptr ? writer->LeftOut() : 0) + (blob_writer != nullptr ? blob_writer->LeftOut() : 0) +
+	           capped.load();
 	m_graphics.pipeline_binary_writer = nullptr;
 	m_graphics.pipeline_blob_writer   = nullptr;
 	if (!args.timings.empty()) {

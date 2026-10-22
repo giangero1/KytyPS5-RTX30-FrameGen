@@ -20,6 +20,8 @@ Copy-Item "$root\_Build\windows-pgogen\kyty_emulator.exe", "$root\_Build\windows
 $params = @{ Label = 'pgotrain'; Exe = "$exe\kyty_emulator.exe"; KeepRunning = $true; NoWalk = $true; ShotOnly = $true; StartupSeconds = 180 }
 if ($Set.Count) { $params['Set'] = $Set }
 if ($NoPrecompile) { $params['NoPrecompile'] = $true }
+# (The instrumented runtime's own file, default.profraw where it runs, made empty at start-up: under _Build instead.)
+$env:LLVM_PROFILE_FILE = "$root\_Build\pgo\windows\default-%p.profraw"
 $started = & "$S\bench-run.ps1" @params | Select-Object -Last 1
 $started
 # A start-up that never reached the HUD would train the title screen: no profile then.

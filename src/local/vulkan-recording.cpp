@@ -23,9 +23,9 @@
 extern "C" {
 // 1: record Vulkan commands for the worker thread, draws and descriptor
 // encoding as whole packets (KYTY_VULKAN_RECORDING).
-volatile std::atomic<uint32_t> kyty_local_vulkan_recording_mode {0};
+volatile std::atomic<uint32_t> kyty_local_vulkan_recording_mode {1};
 // 1: queue command-buffer begin/end/submit instead of draining (DeferredSubmitEnabled).
-volatile std::atomic<uint32_t> kyty_local_deferred_submit_mode {0};
+volatile std::atomic<uint32_t> kyty_local_deferred_submit_mode {1};
 // Pauses the idle worker spins before it blocks (a blocked worker costs the render thread a
 // wake-up system call per publish on Windows).
 #if defined(_WIN32)
@@ -314,9 +314,8 @@ void InvalidateRawState() {
 
 // Work calls recorded by this thread (read by the render thread's barrier dedupe, which orders
 // only its own command stream): a plain increment, not a locked add on every command.
-thread_local uint64_t g_work_calls    = 0;
-thread_local uint64_t g_writing_calls = 0;
-thread_local uint64_t g_packets       = 0;
+thread_local uint64_t g_work_calls = 0;
+thread_local uint64_t g_packets    = 0;
 #include "local-vulkan-recording.inc"
 } // namespace
 
@@ -329,7 +328,6 @@ void* ReplaceBindPipeline(void* entry) {
 }
 uint64_t WorkCalls() { return g_work_calls; }
 uint64_t RecordedWork() { return g_work_calls + g_packets; }
-uint64_t RecordedWrites() { return g_writing_calls + g_packets; }
 void Drain() { if (producer) producer->Drain(); }
 bool PacketsEnabled() {
     return producer && kyty_local_vulkan_recording_mode.load(std::memory_order_relaxed) != 0;

@@ -12,7 +12,7 @@
 
 namespace LiveTrace {
 
-// Values 3-6 and 15-18 belonged to events no longer recorded; they are not reused.
+// Values 3-6, 15-18 and 29 belonged to events no longer recorded; they are not reused.
 enum Type : uint32_t {
 	Submit        = 1,  // a: queue | type << 8, b: dwords
 	GuestDone     = 2,  // a: submitted frame
@@ -34,7 +34,6 @@ enum Type : uint32_t {
 	GpuWrite      = 26, // a: address, b: size | tick the writing command is recorded in << 32
 	LabelWrite    = 27, // a: address, b: value (low 48 bits) | source << 56 (1 end of pipe, 2 WRITE_DATA)
 	SyncReadback  = 28, // a: address, b: size | tick the copy is recorded in << 32 (drains the queue)
-	RbMismatch    = 29, // a: address, b: size | tick the copy engine waited for << 32 (KYTY_READBACK_QUEUE=3)
 	RbFast        = 30, // a: window address, b: size | tick the copy engine waits for << 32
 	BufferUse     = 31, // a: address, b: size | 1 << 63 when written (every ObtainBuffer, `tracew`)
 	FaultSite     = 32, // a: faulting guest instruction, b: fault address | 1 << 63 for a write (tracked pages)

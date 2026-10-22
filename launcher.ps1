@@ -52,9 +52,10 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 	"come from the RAM being full (see the README). Leave it off if the game runs without such crashes; a current graphics`n" +
 	"driver can help too."
 
-$settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true;
+$settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true; cheats = $false;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
-	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080 }
+	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; fsr = $false; output = '4k'
+	lowlatency = $false }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
@@ -131,31 +132,215 @@ $rtxGpu = try {
 	[bool](Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' -and $_.Name -match '\bRTX\b' })
 } catch { $false }
 $frameGenAvailable = [bool]$streamline -and $rtxGpu
+# FSR 3.1 frame generation (run-windows -Fsr), any GPU: AMD's signed amd_fidelityfx_vk.dll next to the emulator.
+$fsrDll = Join-Path (Split-Path $exe) 'amd_fidelityfx_vk.dll'
+$fsrAvailable = (Test-Path -LiteralPath $fsrDll) -and
+	((Get-AuthenticodeSignature -LiteralPath $fsrDll).SignerCertificate.Subject -match 'O=Advanced Micro Devices')
+
+# Cheats (_Patches\<title id>.json)
+# A GoldHEN-style mods file: every mod has a name, an enabled flag and the memory writes it makes.
+# The emulator already honours "enabled" (src/loader/gamePatch.cpp skips a mod whose flag is false),
+# so choosing which mods to apply only means setting those flags.
+$cheatTitleIds = @{}
+
+function Get-CheatFile([string]$game) {
+	if (!$game) { return '' }
+	try {
+		if (!$cheatTitleIds.ContainsKey($game)) {
+			$param = Read-GameParam $game
+			$cheatTitleIds[$game] = if ($param -and $param.titleId) { [string]$param.titleId } else { '' }
+		}
+		$id = $cheatTitleIds[$game]
+		if (!$id) { return '' }
+		$file = Join-Path $root "_Patches\$id.json"
+		if (Test-Path -LiteralPath $file) { return $file }
+	} catch {}
+	return ''
+}
+
+function Read-CheatFile([string]$file) {
+	# The file is UTF-8; Get-Content would read it as ANSI and can break the quotes of its text.
+	return [System.IO.File]::ReadAllText($file, [System.Text.Encoding]::UTF8)
+}
+
+function Get-CheatData([string]$file) {
+	return (Read-CheatFile $file | ConvertFrom-Json)
+}
+
+function Get-CheatCounts([string]$file) {
+	$counts = @{ on = 0; total = 0 }
+	if (!$file -or !(Test-Path -LiteralPath $file)) { return $counts }
+	try {
+		$mods = @((Get-CheatData $file).mods)
+		$counts.total = $mods.Count
+		foreach ($mod in $mods) {
+			if ($mod.enabled -ne $false) { $counts.on++ }
+		}
+	} catch {}
+	return $counts
+}
+
+function Save-CheatMods([string]$file, [string]$before, [bool[]]$wanted) {
+	# Refuse to write over a file that changed while the dialog was open.
+	if ((Read-CheatFile $file) -ne $before) { return 'file-changed' }
+	$data = Read-CheatFile $file | ConvertFrom-Json
+	$mods = @($data.mods)
+	if ($mods.Count -ne $wanted.Count) { return 'count-changed' }
+	for ($i = 0; $i -lt $mods.Count; $i++) {
+		$mods[$i] | Add-Member -NotePropertyName enabled -NotePropertyValue ([bool]$wanted[$i]) -Force
+	}
+	$data.mods = $mods
+	$json = $data | ConvertTo-Json -Depth 32
+	Copy-Item -LiteralPath $file -Destination ($file + '.bak') -Force
+	[System.IO.File]::WriteAllText($file, $json, (New-Object System.Text.UTF8Encoding($false)))
+	# Read the file back: if it no longer holds the same names and flags, put the backup back.
+	try {
+		$check = @((Read-CheatFile $file | ConvertFrom-Json).mods)
+		if ($check.Count -ne $mods.Count) { throw 'count' }
+		for ($i = 0; $i -lt $check.Count; $i++) {
+			if ([string]$check[$i].name -ne [string]$mods[$i].name) { throw 'name' }
+			if ([bool]$check[$i].enabled -ne [bool]$wanted[$i]) { throw 'enabled' }
+		}
+	} catch {
+		Copy-Item -LiteralPath ($file + '.bak') -Destination $file -Force
+		return 'verify-failed'
+	}
+	return ''
+}
+
+function Show-CheatDialog([string]$file) {
+	$data = $null
+	try { $data = Get-CheatData $file } catch {
+		[void][System.Windows.Forms.MessageBox]::Show("The cheat file cannot be read:`n$file`n`n$($_.Exception.Message)", 'Cheats')
+		return
+	}
+	$mods = @($data.mods)
+	if ($mods.Count -eq 0) {
+		[void][System.Windows.Forms.MessageBox]::Show("That file holds no cheats:`n$file", 'Cheats')
+		return
+	}
+	$before = Read-CheatFile $file
+
+	$cheatForm = New-Object System.Windows.Forms.Form -Property @{
+		Text = 'Cheats - ' + $(if ($data.name) { [string]$data.name } else { [string]$data.id })
+		StartPosition = 'CenterParent'
+		FormBorderStyle = 'FixedDialog'
+		MaximizeBox = $false
+		MinimizeBox = $false
+		ClientSize = New-Object System.Drawing.Size(600, 480)
+		Font = New-Object System.Drawing.Font('Segoe UI', 9)
+	}
+	$cheatList = New-Object System.Windows.Forms.CheckedListBox -Property @{
+		Location = New-Object System.Drawing.Point(12, 12)
+		Size = New-Object System.Drawing.Size(576, 330)
+		CheckOnClick = $true
+	}
+	foreach ($mod in $mods) { [void]$cheatList.Items.Add([string]$mod.name, ($mod.enabled -ne $false)) }
+	$cheatForm.Controls.Add($cheatList)
+
+	$cheatDesc = New-Object System.Windows.Forms.TextBox -Property @{
+		Location = New-Object System.Drawing.Point(12, 348)
+		Size = New-Object System.Drawing.Size(576, 78)
+		Multiline = $true
+		ReadOnly = $true
+		ScrollBars = 'Vertical'
+	}
+	$cheatForm.Controls.Add($cheatDesc)
+
+	# Event handlers run in their own scope, so what they read is kept in the script's.
+	$script:cheatDialogList = $cheatList
+	$script:cheatDialogDesc = $cheatDesc
+	$script:cheatDialogMods = $mods
+	$cheatList.Add_SelectedIndexChanged({
+		$index = $script:cheatDialogList.SelectedIndex
+		if ($index -ge 0) {
+			$script:cheatDialogDesc.Text = [string]$script:cheatDialogMods[$index].description
+		}
+	})
+
+	$all = New-Object System.Windows.Forms.Button -Property @{ Text = 'Select all'; Location = New-Object System.Drawing.Point(12, 436); Size = New-Object System.Drawing.Size(100, 28) }
+	$all.Add_Click({
+		for ($i = 0; $i -lt $script:cheatDialogList.Items.Count; $i++) { $script:cheatDialogList.SetItemChecked($i, $true) }
+	})
+	$none = New-Object System.Windows.Forms.Button -Property @{ Text = 'Select none'; Location = New-Object System.Drawing.Point(120, 436); Size = New-Object System.Drawing.Size(100, 28) }
+	$none.Add_Click({
+		for ($i = 0; $i -lt $script:cheatDialogList.Items.Count; $i++) { $script:cheatDialogList.SetItemChecked($i, $false) }
+	})
+	$ok = New-Object System.Windows.Forms.Button -Property @{ Text = 'OK'; Location = New-Object System.Drawing.Point(408, 436); Size = New-Object System.Drawing.Size(90, 28); DialogResult = 'OK' }
+	$cancel = New-Object System.Windows.Forms.Button -Property @{ Text = 'Cancel'; Location = New-Object System.Drawing.Point(504, 436); Size = New-Object System.Drawing.Size(90, 28); DialogResult = 'Cancel' }
+	$cheatForm.Controls.AddRange(@($all, $none, $ok, $cancel))
+	$cheatForm.AcceptButton = $ok
+	$cheatForm.CancelButton = $cancel
+
+	if ($cheatForm.ShowDialog($form) -ne 'OK') { return }
+
+	$wanted = @()
+	foreach ($i in 0..($mods.Count - 1)) { $wanted += [bool]$cheatList.GetItemChecked($i) }
+	$result = Save-CheatMods $file $before $wanted
+	if ($result -eq 'file-changed') {
+		[void][System.Windows.Forms.MessageBox]::Show('The cheat file changed while the dialog was open; nothing was written.', 'Cheats')
+	} elseif ($result -eq 'count-changed') {
+		[void][System.Windows.Forms.MessageBox]::Show('The number of cheats does not match; nothing was written.', 'Cheats')
+	} elseif ($result -eq 'verify-failed') {
+		[void][System.Windows.Forms.MessageBox]::Show('The write could not be verified; the backup was restored.', 'Cheats')
+	}
+}
+
+function Read-GameParam([string]$game) {
+	if (!$game) { return $null }
+	if (Test-Path -LiteralPath "$game\sce_sys\param.json") { return Get-Content -LiteralPath "$game\sce_sys\param.json" -Raw -Encoding UTF8 | ConvertFrom-Json }
+	$tool = @("$root\kyty_shader_precompile.exe", "$root\_Build\windows\kyty_shader_precompile.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+	if ($game -notmatch '\.zar$' -or !(Test-Path -LiteralPath $game -PathType Leaf) -or !$tool) { return $null }
+	$copy = [IO.Path]::GetTempFileName()
+	try {
+		& $tool --game $game --param $copy 2>$null | Out-Null
+		if ($LASTEXITCODE -eq 0) { return Get-Content -LiteralPath $copy -Raw -Encoding UTF8 | ConvertFrom-Json }
+	} catch {
+	} finally {
+		Remove-Item -LiteralPath $copy -ErrorAction SilentlyContinue
+	}
+	return $null
+}
 
 function Get-PlayCommand {
 	$size = $settings.resolution -split 'x'
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\run-windows.ps1`"", '-Prompt', '-Follow',
 		'-Exe', "`"$EmulatorExe`"", '-Width', $size[0], '-Height', $size[1], '-Language', $settings.language)
-	if ($settings.fullscreen) { $arguments += '-Fullscreen'; if ($settings.aspect) { $arguments += '-AspectFit' } }
+	# (-AspectFit with 21:9 or 32:9 would keep movies and menus at 16:9: the launcher's wider ratios fill the screen.)
+	if ($settings.fullscreen) {
+		$arguments += '-Fullscreen'
+		if ($settings.aspect -and $settings.ratio -notin '21:9', '32:9') { $arguments += '-AspectFit' }
+	}
 	if (!$settings.redzone) { $arguments += '-NoRedZone' }
 	if ($settings.fps120) { $arguments += '-Fps120' }
 	# Presents wait for the display's refresh (Vulkan FIFO): no tearing, and G-SYNC/FreeSync displays keep adapting.
 	if ($settings.vsync) { $arguments += @('-PresentMode', 'Fifo') }
+	# One frame queued instead of about two ($lowLatencyTip).
+	if ($settings.lowlatency) { $arguments += '-LowLatency' }
 	# HDR10 output when Windows HDR is on for the display; SDR otherwise.
 	if ($settings.hdr) { $arguments += '-Hdr' }
+	# The cheats file of this title, when it has one: the emulator applies the mods left enabled in it.
+	if ($settings.cheats) {
+		$patch = Get-CheatFile $settings.game
+		if ($patch) { $arguments += @('-Patch', "`"$patch`"") }
+	}
 	$dlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
 	# The upscaler's own render height (with DLSS always passed: the PS5 Pro path's own height is 1512).
 	$height = if ($dlss) { [int]$settings.render_dlss } else { [int]$settings.render }
-	if ($height -gt 0 -and ($height -ne 1440 -or $dlss)) { $arguments += @('-RenderHeight', $height) }
+	if ($height -gt 0) { $arguments += @('-RenderHeight', $height) }
 	if ($settings.ratio -in '21:9', '32:9') { $arguments += @('-Aspect', $settings.ratio) }
 	if ($settings.quality -in 'low', 'lowest') {
 		$arguments += @('-Quality', $settings.quality, '-TextureReduce', $(if ($settings.quality -eq 'lowest') { 2 } else { 1 }))
 	}
-	if ($frameGenAvailable -and [int]$settings.framegen -ge 2) {
+	$fsrOn = $fsrAvailable -and $settings.fsr
+	if ($fsrOn) { $arguments += '-Fsr' }
+	if (!$fsrOn -and $frameGenAvailable -and [int]$settings.framegen -ge 2) {
 		$arguments += @('-FrameGen', ([int]$settings.framegen - 1))
 	}
 	if ($dlss) { $arguments += @('-Upscaler', 'dlss') }
-	if ($frameGenAvailable -and ([int]$settings.framegen -ge 2 -or $dlss)) { $arguments += @('-StreamlineDir', "`"$streamline`"") }
+	# (DLSS makes the 4K output: the 1080p output only with the game's own upscale.)
+	if (!$dlss -and $settings.output -eq '1080p') { $arguments += '-HdOutput' }
+	if ($frameGenAvailable -and ((!$fsrOn -and [int]$settings.framegen -ge 2) -or $dlss)) { $arguments += @('-StreamlineDir', "`"$streamline`"") }
 	# Switches of the config, one -Set argument (run-windows.ps1 splits it at the commas).
 	$sets = @()
 	# The emulator's panel (KYTY_FPS_HUD) at the top right of the game image: the frame rate and frame times, or with
@@ -211,21 +396,6 @@ Add-Row 'Game folder' @($game, $browse, $browseZar)
 $title = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray' }
 Add-Row '' @($title)
 # A game: its folder (eboot.bin and sce_sys) or the folder packed into a ZArchive (a .zar file).
-function Read-GameParam([string]$game) {
-	if (!$game) { return $null }
-	if (Test-Path -LiteralPath "$game\sce_sys\param.json") { return Get-Content -LiteralPath "$game\sce_sys\param.json" -Raw -Encoding UTF8 | ConvertFrom-Json }
-	$tool = @("$root\kyty_shader_precompile.exe", "$root\_Build\windows\kyty_shader_precompile.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-	if ($game -notmatch '\.zar$' -or !(Test-Path -LiteralPath $game -PathType Leaf) -or !$tool) { return $null }
-	$copy = [IO.Path]::GetTempFileName()
-	try {
-		& $tool --game $game --param $copy 2>$null | Out-Null
-		if ($LASTEXITCODE -eq 0) { return Get-Content -LiteralPath $copy -Raw -Encoding UTF8 | ConvertFrom-Json }
-	} catch {
-	} finally {
-		Remove-Item -LiteralPath $copy -ErrorAction SilentlyContinue
-	}
-	return $null
-}
 function Update-Title {
 	$title.Text = 'Choose the folder with eboot.bin and sce_sys (the game dump), or a .zar archive of it.'
 	try {
@@ -313,8 +483,11 @@ function Select-RenderHeight {
 $renderNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 function Update-RenderNote {
 	$h = [int](([string]$render.SelectedItem -split ' ')[0])
+	# (The 1080p output's 3D is at most 1080 high: $output below.)
+	$capped = $output -and $output.Enabled -and $output.SelectedIndex -eq 1 -and $h -gt 1080
+	if ($capped) { $h = 1080 }
 	$w = [Math]::Floor($h * (Get-RatioAspect) / 8.0 + 0.5) * 8
-	$renderNote.Text = "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU"
+	$renderNote.Text = if ($capped) { "Demon's Souls' 3D at ${w}x${h} (1080 at most with the 1080p output)" } else { "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU" }
 }
 $render.Add_SelectedIndexChanged({
 	if (!$script:fillingRender) { $script:renderWanted = [int](([string]$render.SelectedItem -split ' ')[0]) }
@@ -358,6 +531,18 @@ Add-Row 'Resolution' @($resolution)
 Add-Row 'Aspect ratio' @($ratio, $ratioNote)
 Add-Row 'Render height' @($render, $renderNote)
 Add-Row 'Upscaler' @($upscaler, $upscalerNote)
+# The game's output (run-windows.ps1 -HdOutput, src/loader/demonsSoulsHdOutput.h): 4K, or the game's own 1080p mode, its
+# post-processing and HUD at 1920x1080 and its 3D at most 1080 high. DLSS makes the 4K output: the row is off with it.
+$output = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
+$output.Items.AddRange(@('4K (PS5)', '1080p'))
+$output.SelectedIndex = if ($settings.output -eq '1080p') { 1 } else { 0 }
+$outputNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
+	Text = '1080p: the game''s own HD mode, effects and HUD at 1920x1080; less GPU work; not with DLSS' }
+$output.Enabled = $upscaler.SelectedIndex -ne 1
+$output.Add_SelectedIndexChanged({ Update-RenderNote })
+$upscaler.Add_SelectedIndexChanged({ $output.Enabled = $upscaler.SelectedIndex -ne 1; Update-RenderNote })
+Add-Row 'Game output' @($output, $outputNote)
+Update-RenderNote
 $fullscreen = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Fullscreen'; AutoSize = $true; Checked = [bool]$settings.fullscreen }
 $aspect = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Keep the aspect ratio (black bars)'; AutoSize = $true; Checked = [bool]$settings.aspect }
 $aspect.Enabled = $fullscreen.Checked
@@ -373,11 +558,29 @@ $fps120 = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Up to 12
 Add-Row '' @($fps120)
 $vsync = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'VSync (no screen tearing; adaptive sync displays keep it)'; AutoSize = $true; Checked = [bool]$settings.vsync }
 Add-Row '' @($vsync)
+$lowLatencyTip = "The game keeps one finished frame waiting for the screen instead of about two, so what you press shows sooner:`n" +
+	"at 60 Hz about 15-23 ms from the game's frame to the screen instead of about 30. A frame that comes late is then no`n" +
+	"longer covered by a waiting one, so the frame pacing is a little less even."
+$lowLatency = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Low latency (less input lag, slightly less even frame pacing)'; AutoSize = $true; Checked = [bool]$settings.lowlatency }
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($lowLatency, $lowLatencyTip)
+Add-Row '' @($lowLatency)
 $hdr = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'HDR (turn on "Use HDR" in Windows display settings first)'; AutoSize = $true; Checked = [bool]$settings.hdr }
 Add-Row '' @($hdr)
 $safeGpu = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Safe GPU mode: prevents GPU-hang crashes and blue screens, but the frame rate is about 37% lower'; AutoSize = $true; Checked = [bool]$settings.safegpu }
 (New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($safeGpu, $safeGpuTip)
 Add-Row '' @($safeGpu)
+$cheats = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Cheats (_Patches\<title id>.json)'; AutoSize = $true; Checked = [bool]$settings.cheats }
+Add-Row '' @($cheats)
+$cheatButton = New-Object System.Windows.Forms.Button -Property @{ Text = 'Select...'; AutoSize = $true }
+$cheatButton.Add_Click({
+	$cheatFile = Get-CheatFile $game.Text.Trim()
+	if (!$cheatFile) {
+		[void][System.Windows.Forms.MessageBox]::Show('There is no _Patches\<title id>.json for this game.', 'Cheats')
+		return
+	}
+	Show-CheatDialog $cheatFile
+})
+Add-Row '' @($cheatButton)
 $quality = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
 $quality.Items.AddRange($qualities)
 $quality.SelectedItem = ($qualities | Where-Object { ($_ -split ' ')[0] -eq [string]$settings.quality } | Select-Object -First 1)
@@ -430,6 +633,11 @@ $frameGenFolder.Add_Click({
 	Update-UpscalerNote
 })
 Add-Row 'Frame generation' @($frameGen, $frameGenFolder, $frameGenNote)
+$fsr = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'AMD FSR 3 frame generation (2x, any GPU; instead of DLSS)'; AutoSize = $true
+	Checked = ($fsrAvailable -and [bool]$settings.fsr); Enabled = $fsrAvailable }
+(New-Object System.Windows.Forms.ToolTip).SetToolTip($fsr, "AMD FidelityFX FSR 3.1: one generated frame between two of the game's, from its depth and motion.`n" +
+	"With VSync on, the shown frames are capped at the display's refresh (a 60 Hz display runs the game at 30 fps).`nNeeds amd_fidelityfx_vk.dll next to the emulator.")
+Add-Row '' @($fsr)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)
 # (An older launcher saved true for the frame rate.)
@@ -466,16 +674,20 @@ function Read-Form {
 	$settings.redzone    = $redzone.Checked
 	$settings.fps120     = $fps120.Checked
 	$settings.vsync      = $vsync.Checked
+	$settings.lowlatency = $lowLatency.Checked
 	$settings.hdr        = $hdr.Checked
+	$settings.cheats     = $cheats.Checked
 	$settings.safegpu    = $safeGpu.Checked
 	$settings.hud        = $hud.SelectedIndex
 	$height              = [int](([string]$render.SelectedItem -split ' ')[0])
 	if ($renderForDlss) { $settings.render_dlss = $height } else { $settings.render = $height }
 	$settings.ratio      = ([string]$ratio.SelectedItem -split ' ')[0]
 	$settings.quality    = ([string]$quality.SelectedItem -split ' ')[0].ToLowerInvariant()
+	$settings.output     = if ($output.SelectedIndex -eq 1) { '1080p' } else { '4k' }
 	# (Kept as it was where the DLLs are missing.)
 	if ($frameGenAvailable) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
 	if ($frameGenAvailable) { $settings.upscaler = if ($upscaler.SelectedIndex -eq 1) { 'dlss' } else { '' } }
+	if ($fsrAvailable) { $settings.fsr = $fsr.Checked }
 	$settings.ecores     = $ecores.Checked
 	Save-Settings
 }

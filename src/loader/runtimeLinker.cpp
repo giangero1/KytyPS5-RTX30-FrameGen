@@ -21,6 +21,7 @@
 #include "loader/demonsSoulsGpuPages.h"
 #include "loader/demonsSoulsRenderSize.h"
 #include "loader/demonsSoulsSceneGuard.h"
+#include "loader/demonsSoulsHdOutput.h"
 #include "loader/demonsSoulsSuperResolution.h"
 #include "loader/demonsSoulsTouchGuard.h"
 #include "loader/elf.h"
@@ -1619,6 +1620,7 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	DemonsSoulsIdle::Install(m_programs.empty() ? nullptr : m_programs.front());
 	for (auto* program : m_programs) DemonsSoulsCopy::Install(program);
 	DemonsSoulsGpuPages::Install(m_programs.empty() ? nullptr : m_programs.front());
+	DemonsSoulsHdOutput::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsSuperResolution::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsRenderSize::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsSceneGuard::Install(m_programs.empty() ? nullptr : m_programs.front());

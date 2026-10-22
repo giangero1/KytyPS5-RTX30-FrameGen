@@ -329,10 +329,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--keymap") {
 			const auto split = value.find('=');
 			if (split == std::string::npos || split == 0 || split + 1 == value.size()) {
-				::printf("invalid keymap: %s\n", value.c_str());
-				return false;
+				// (Skipped as hostInput.cpp skips a mapping it cannot use: the game still starts.)
+				::printf("Input mapping skipped: %s (not <control>=<key>)\n", value.c_str());
+			} else {
+				options.config.keymap.push_back(value);
 			}
-			options.config.keymap.push_back(value);
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

@@ -36,13 +36,15 @@ uint32_t TranslatorDeviceFeatures() {
 
 uint32_t TranslatorFeatureSet() {
 	// (KYTY_LANE_LOCAL_COOP=0/1: the cooperative halves off or on, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads
-	// at the entry or where they are read, whatever the store was made with and the GPU allows.)
+	// at the entry or where they are read, KYTY_NATIVE_FLOAT_MIN_MAX=0/1 the float min/max emulated or native, whatever
+	// the store was made with and the GPU allows.)
 	const auto forced = [](const char* name) {
 		const char* value = std::getenv(name);
 		return value == nullptr ? -1 : std::string_view(value) != "0" ? 1 : 0;
 	};
 	static const int cooperative  = forced("KYTY_LANE_LOCAL_COOP");
 	static const int slots_at_use = forced("KYTY_TABLE_SLOTS_AT_USE");
+	static const int min_max      = forced("KYTY_NATIVE_FLOAT_MIN_MAX");
 	const auto       stored       = g_translator_features.load(std::memory_order_relaxed);
 	auto             features     = (stored & g_device_features.load(std::memory_order_relaxed)) |
 	                     g_device_required.load(std::memory_order_relaxed);
@@ -51,34 +53,8 @@ uint32_t TranslatorFeatureSet() {
 	};
 	apply(cooperative, TranslatorFeatureCooperativeHalves);
 	apply(slots_at_use, TranslatorFeatureTableSlotsAtUse);
+	apply(min_max, TranslatorFeatureNativeFloatMinMax);
 	return features;
-}
-
-// KYTY_LANE_LOCAL_COOP_SKIP=<hash>[,<hash>...]: those programs without the cooperative halves; KYTY_LANE_LOCAL_COOP_RANGE=
-// <lo>-<hi> (hex): only programs whose hash is in [lo, hi] with them, to bisect for a slow one (an RTX 3080 Laptop, NVIDIA
-// 566.07, ran 1-1's courtyard at 3-4 fps with them, 16-33 without). Diagnostics: a program left out translates as before
-// the cooperative halves, which a store stamped with them does not hold (compiled at first use, or the driver's cache).
-static bool CooperativeLeftOut(uint64_t hash) {
-	struct Rules {
-		std::vector<uint64_t> skip;
-		uint64_t              lo = 0, hi = UINT64_MAX;
-	};
-	static const Rules rules = [] {
-		Rules parsed;
-		for (const char* at = std::getenv("KYTY_LANE_LOCAL_COOP_SKIP"); at != nullptr && *at != '\0';) {
-			char* end = nullptr;
-			parsed.skip.push_back(std::strtoull(at, &end, 16));
-			if (end == at || (*end != ',' && *end != ';')) break;
-			at = end + 1;
-		}
-		if (const char* range = std::getenv("KYTY_LANE_LOCAL_COOP_RANGE"); range != nullptr && *range != '\0') {
-			char* end = nullptr;
-			parsed.lo = std::strtoull(range, &end, 16);
-			if (end != nullptr && *end == '-') parsed.hi = std::strtoull(end + 1, nullptr, 16);
-		}
-		return parsed;
-	}();
-	return hash < rules.lo || hash > rules.hi || std::ranges::find(rules.skip, hash) != rules.skip.end();
 }
 
 const Decoder::Operand& Translator::SourceAt(const Decoder::Instruction& inst, uint32_t index) {
@@ -1030,8 +1006,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		// Cooperative halves: a group of exactly one wave on 32-wide subgroups, its halves the workgroup's two subgroups,
 		// may exchange lanes through workgroup memory (LaneLocal.cpp). Where the static pipeline store was made with them
 		// (SetTranslatorFeatures; KYTY_LANE_LOCAL_COOP=0/1 decides otherwise).
-		const bool cooperative_enabled =
-		    (TranslatorFeatureSet() & TranslatorFeatureCooperativeHalves) != 0 && !CooperativeLeftOut(options.shader_hash);
+		const bool cooperative_enabled = (TranslatorFeatureSet() & TranslatorFeatureCooperativeHalves) != 0;
 		const auto* group = options.compute;
 		const bool  one_wave =
 		    group != nullptr && group->host_subgroup_size == 32u &&
@@ -1040,7 +1015,6 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		LaneLocalProof proof;
 		result.lane_local =
 		    enabled && ProveWaveLaneLocal(decoded, cooperative_enabled && one_wave, proof, log ? &reason : nullptr);
-		result.lane_local_uniform_loads = result.lane_local && proof.uniform_loads;
 		if (result.lane_local && proof.Cooperative()) {
 			result.lane_cooperative     = true;
 			result.cooperative_reads    = std::move(proof.exchange_reads);
@@ -1053,7 +1027,6 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			                     : result.lane_cooperative ? fmt::format("yes (cooperative: {} lane reads, {} branches)",
 			                                                             result.cooperative_reads.size(),
 			                                                             result.cooperative_branches.size())
-			                     : proof.uniform_loads     ? std::string("yes (uniform loads)")
 			                                               : std::string("yes");
 			std::printf("LaneLocal CS %016llx: %s\n", static_cast<unsigned long long>(options.shader_hash), verdict.c_str());
 		}
@@ -1153,9 +1126,8 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			total_threads = std::max(workgroup->threads_num[0], 1u) *
 			                std::max(workgroup->threads_num[1], 1u) *
 			                std::max(workgroup->threads_num[2], 1u);
-			// (Also a lane-local program that may run two lanes per invocation after all: CompileProgram.)
-			if (options.wave_size == 64u && workgroup->host_subgroup_size == 32u &&
-			    (!result.lane_local || result.lane_local_uniform_loads) && total_threads % 64u != 0u) {
+			if (options.wave_size == 64u && workgroup->host_subgroup_size == 32u && !result.lane_local &&
+			    total_threads % 64u != 0u) {
 				initial_exec = entry_ir.ULessThan(builtin(IR::StageInputKind::LocalInvocationIndex),
 				                                  IR::U32(IR::Value(total_threads)));
 			}

@@ -25,6 +25,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/hostMemory.h"
 #include "graphics/shader/shader.h"
+#include "loader/demonsSoulsHdOutput.h"
 #include "loader/demonsSoulsRenderSize.h"
 
 #include <algorithm>
@@ -32,6 +33,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -44,7 +46,16 @@ constexpr std::array<uint64_t, 2> ClipShaders {0x7e880a66bf1b69c6ULL, 0xb2f06202
 constexpr uint64_t                PixelShader = 0xbd39a2eba2d20d8bULL;
 // Image copies (including menu icons) and animated menu highlights.
 constexpr uint64_t CopyShader = 0x05ca0d08ae41fd2eULL, HighlightShader = 0x5d9a2e8e34030f35ULL;
-constexpr uint32_t                CanvasWidth = 3840, CanvasHeight = 2160;
+constexpr uint32_t CanvasWidthDefault = 3840, CanvasHeightDefault = 2160;
+
+// The interface canvas: 3840x2160, or the HD output's 1920x1080 (its own layout, the same areas in clip coordinates and
+// the same shaders; the pixel shader's scale constants then 1/1920, 1/1080).
+inline uint32_t CanvasWidth() {
+	return ::Loader::DemonsSoulsHdOutput::Active() ? ::Loader::DemonsSoulsHdOutput::HdWidth : 3840u;
+}
+inline uint32_t CanvasHeight() {
+	return ::Loader::DemonsSoulsHdOutput::Active() ? ::Loader::DemonsSoulsHdOutput::HdHeight : 2160u;
+}
 constexpr uint32_t                MaxVertices = 8192;
 
 // The HUD's areas in clip coordinates (y up; frames of elements reach a little past the canvas's
@@ -111,21 +122,22 @@ inline uint32_t CanvasWidthOf(const HW::Context& ctx) {
 	const auto  height = target.attrib2.height + 1u;
 	const auto  output = ::Loader::DemonsSoulsRenderSize::EffectiveOutputSize();
 	if (target.base.addr == 0) return 0;
-	return (width == CanvasWidth && height == CanvasHeight) ||
-	               (width == output.width && height == output.height)
+	return (width == CanvasWidth() && height == CanvasHeight()) ||
+	       (width == output.width && height == output.height) ||
+	       (WideWidth() != 0 && width == WideWidth() && height == CanvasHeight())
 	           ? width
 	           : 0;
 }
 
 inline bool AdjustedCanvas(const HW::Context& ctx) {
 	const auto output = ::Loader::DemonsSoulsRenderSize::EffectiveOutputSize();
-	return (output.width != CanvasWidth || output.height != CanvasHeight) &&
+	return (output.width != CanvasWidth() || output.height != CanvasHeight()) &&
 	       CanvasWidthOf(ctx) == output.width &&
 	       ctx.GetRenderTarget(0).attrib2.height + 1u == output.height;
 }
 
 inline ::Loader::DemonsSoulsRenderSize::Size LayoutOf(const HW::Context& /*ctx*/) {
-	return {CanvasWidth, CanvasHeight};
+	return {CanvasWidth(), CanvasHeight()};
 }
 
 inline bool InterfaceShader(const HW::VertexShaderInfo& vs);
@@ -247,11 +259,38 @@ inline bool IsReticle(const HW::VertexShaderInfo& vs, uint32_t first) {
 	});
 }
 
+// KYTY_FRAMEGEN_BACKEND=fsr: an interface draw names the canvas (its render target) whose alpha marks the HUD for FSR
+// (FrameGen::NoteUiCanvas).
+inline void NoteCanvas(const HW::Context& ctx, const HW::VertexShaderInfo& vs) {
+	const auto& target = ctx.GetRenderTarget(0);
+	if (target.base.addr == 0 || target.attrib2.width + 1u != CanvasWidth() ||
+	    target.attrib2.height + 1u != CanvasHeight())
+		return;
+	const uint64_t hash = HashAt(vs.es_regs.data_addr);
+	if (hash == PixelShader || std::find(ClipShaders.begin(), ClipShaders.end(), hash) != ClipShaders.end())
+		FrameGen::NoteUiCanvas(target.base.addr);
+}
+
+// The vertices of each primitive of a draw (`strip`: each vertex with the two before it), 0 when they are not looked at.
+inline uint32_t PrimitiveCorners(Prospero::PrimitiveType primitive, bool& strip) {
+	using Prospero::PrimitiveType;
+	strip = primitive == PrimitiveType::kTriStrip;
+	switch (primitive) {
+		case PrimitiveType::kTriList:
+		case PrimitiveType::kTriStrip:
+		case PrimitiveType::kRectList:
+		case PrimitiveType::kRectListLegacy: return 3;
+		case PrimitiveType::kQuadListLegacy: return 4;
+		default: return 0;
+	}
+}
+
 // The areas the draw's vertices lie in (a bit each, Outside for one in none), from its vertices in
 // guest memory; 0 when it is no interface draw into the canvas in a frame showing the 3D, or its
 // vertices are not readable.
 inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs, uint32_t first,
-                         uint32_t count) {
+                         uint32_t count, Prospero::PrimitiveType primitive = Prospero::PrimitiveType::kTriList) {
+	if (count != 0 && FrameGen::FsrMarksHud()) NoteCanvas(ctx, vs);
 	if (count == 0) return 0;
 	const auto& target = ctx.GetRenderTarget(0);
 	const auto  width  = CanvasWidthOf(ctx);
@@ -260,9 +299,8 @@ inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs,
 	const uint64_t hash  = HashAt(vs.es_regs.data_addr);
 	const bool clip = std::find(ClipShaders.begin(), ClipShaders.end(), hash) != ClipShaders.end();
 	if (!clip && hash != PixelShader) return 0;
-	// (An interface shader's target: the canvas the wide output's other draws into it are widened
-	// in, StretchScope.)
-	if (AdjustedCanvas(ctx)) state.canvas = target.base.addr;
+	// (An interface shader's target: the canvas the wide output's other draws into it are widened in, StretchScope.)
+	if (AdjustedCanvas(ctx) || width != CanvasWidth()) state.canvas = target.base.addr;
 	if (::Loader::DemonsSoulsRenderSize::WideAspect() <= 0.0) return 0;
 	if (!FrameGen::SceneNoted()) return 0;
 	const auto& viewport = ctx.GetScreenViewport().viewports[0];
@@ -299,6 +337,29 @@ inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs,
 	uint32_t areas = 0;
 	bool     icon  = true;
 	float    min_x = 2.0f, max_x = -2.0f;
+	// A primitive over an area's edge: a corner in an area and another on the canvas outside them, or in an area held
+	// to another side. The HUD's own (glyphs, frames, icons) each lie in one area; a menu's (the toolbelt's backdrop
+	// at 43:18 reaches into the picked-up items' and the health's areas, issue #106) are cut at those edges by drawing
+	// each area's part apart, its pieces moved to different sides: such a draw is left as it is, as menus are.
+	bool       strip   = false;
+	const auto corners = PrimitiveCorners(primitive, strip);
+	uint32_t   prim_areas = 0, prim_corner = 0;
+	bool       prim_out = false, straddles = false;
+	// (Strips: the last two corners' area bits and whether each was on the canvas outside the areas.)
+	std::array<std::pair<uint32_t, bool>, 2> last {};
+	const auto over_edge = [](uint32_t in_areas, bool out) {
+		if (in_areas == 0) return false;
+		if (out) return true;
+		float side = 0.0f;
+		bool  any  = false;
+		for (uint32_t a = 0; a < Areas.size(); ++a) {
+			if ((in_areas & (1u << a)) == 0) continue;
+			if (any && Areas[a].side != side) return true;
+			side = Areas[a].side;
+			any  = true;
+		}
+		return false;
+	};
 	for (uint32_t i = 0; i < count; ++i) {
 		float xy[2] {};
 		std::memcpy(xy,
@@ -309,12 +370,13 @@ inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs,
 			xy[0] = 2.0f * xy[0] * scale[0] - 1.0f;
 			xy[1] = 1.0f - 2.0f * xy[1] * scale[1];
 		}
-		// (The wide canvas: the window x the viewport puts it at, in the 3840 wide layout's clip
-		// coordinates.)
+		// (The wide canvas: the window x the viewport puts it at, in the 3840 wide layout's clip coordinates.)
 		if (AdjustedCanvas(ctx)) {
 			const auto layout = LayoutOf(ctx);
 			xy[0] = 2.0f * (viewport.xoffset + xy[0] * viewport.xscale) / layout.width - 1.0f;
 			xy[1] = 1.0f - 2.0f * (viewport.yoffset + xy[1] * viewport.yscale) / layout.height;
+		} else if (width != CanvasWidth()) {
+			xy[0] = 2.0f * (viewport.xoffset + xy[0] * viewport.xscale) / CanvasWidth() - 1.0f;
 		}
 		icon  = icon && xy[0] >= Icon.x0 && xy[0] <= Icon.x1 && xy[1] >= Icon.y0 && xy[1] <= Icon.y1;
 		min_x = std::min(min_x, xy[0]);
@@ -328,6 +390,24 @@ inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs,
 			}
 		}
 		areas |= bit;
+		if (corners != 0 && !straddles) {
+			const uint32_t in_area = bit & (Outside - 1u);
+			const bool     out     = bit == Outside && std::fabs(xy[0]) <= 1.0f && std::fabs(xy[1]) <= 1.0f;
+			if (strip) {
+				straddles = i >= 2 && over_edge(in_area | last[0].first | last[1].first, out || last[0].second || last[1].second);
+				last[0]   = last[1];
+				last[1]   = {in_area, out};
+			} else {
+				prim_areas |= in_area;
+				prim_out = prim_out || out;
+				if (++prim_corner == corners) {
+					straddles   = over_edge(prim_areas, prim_out);
+					prim_areas  = 0;
+					prim_out    = false;
+					prim_corner = 0;
+				}
+			}
+		}
 	}
 	// The HUD is what the frame draws from its round icon on: the markers over the world (enemies' health bars and the
 	// damage dealt) come before it, at their targets, often inside the HUD's areas (a bar above an enemy in the top left
@@ -337,7 +417,17 @@ inline uint32_t Classify(const HW::Context& ctx, const HW::VertexShaderInfo& vs,
 	// The lock-on reticle, drawn after the icon: a marker over the world as the ones before it (below).
 	if (state.icon_frame == frame && clip && hash == ClipShaders[1] && count == 4 && areas == Outside && IsReticle(vs, first))
 		return Marker;
-	if (state.icon_frame == frame) return areas;
+	if (state.icon_frame == frame) {
+		static const bool log = std::getenv("KYTY_HUD_LOG") != nullptr;
+		static uint64_t logged_frame = 0;
+		if (log && straddles && logged_frame != frame) {
+			logged_frame = frame;
+			std::printf("HUD anchor: frame %llu draw of %u vertices (%s) over an area's edge (areas %#x, x %.2f to %.2f): "
+			            "drawn as it is\n",
+			            static_cast<unsigned long long>(frame), count, clip ? "clip" : "pixels", areas, min_x, max_x);
+		}
+		return straddles ? 0u : areas;
+	}
 	// The game places those markers with its own 16:9 projection of their targets: aspect / (16/9) times as far from the
 	// screen's centre as the wider 3D shows the targets (the lock-on and an enemy's health bar beside an enemy off the
 	// centre, the user 10-19). A draw before the icon in a frame after one with the HUD is drawn as an area held to the
@@ -378,15 +468,15 @@ struct Rect {
 	int left = 0, top = 0, right = 0, bottom = 0;
 };
 inline uint32_t Complement(const HW::Context& ctx, std::array<Rect, 32>& out) {
-	const auto  layout      = LayoutOf(ctx);
-	const auto  CanvasWidth = layout.width, CanvasHeight = layout.height;
-	const auto& viewport = ctx.GetScreenViewport().viewports[0];
-	const bool  wide     = AdjustedCanvas(ctx);
-	const auto  window_x = [&](float x) {
-        return wide ? (x + 1.0f) * (CanvasWidth / 2.0f) : viewport.xoffset + x * viewport.xscale;
+	const auto  layout       = LayoutOf(ctx);
+	const auto  canvasWidth  = layout.width, canvasHeight = layout.height;
+	const auto& viewport     = ctx.GetScreenViewport().viewports[0];
+	const bool  wide         = AdjustedCanvas(ctx) || CanvasWidthOf(ctx) > CanvasWidth();
+	const auto  window_x     = [&](float x) {
+		return wide ? (x + 1.0f) * (canvasWidth / 2.0f) : viewport.xoffset + x * viewport.xscale;
 	};
 	std::array<Rect, Areas.size()>        held {};
-	std::array<int, 2 * Areas.size() + 2> ys {0, static_cast<int>(CanvasHeight)};
+	std::array<int, 2 * Areas.size() + 2> ys {0, static_cast<int>(canvasHeight)};
 	uint32_t                              ny = 2;
 	for (uint32_t a = 0; a < Areas.size(); ++a) {
 		const auto& area = Areas[a];
@@ -395,13 +485,13 @@ inline uint32_t Complement(const HW::Context& ctx, std::array<Rect, 32>& out) {
 		            y1 = viewport.yoffset + area.y1 * viewport.yscale;
 		auto& r        = held[a];
 		r.left         = std::clamp(static_cast<int>(std::floor(std::min(x0, x1))), 0,
-		                            static_cast<int>(CanvasWidth));
+		                            static_cast<int>(canvasWidth));
 		r.right        = std::clamp(static_cast<int>(std::ceil(std::max(x0, x1))), 0,
-		                            static_cast<int>(CanvasWidth));
+		                            static_cast<int>(canvasWidth));
 		r.top          = std::clamp(static_cast<int>(std::floor(std::min(y0, y1))), 0,
-		                            static_cast<int>(CanvasHeight));
+		                            static_cast<int>(canvasHeight));
 		r.bottom       = std::clamp(static_cast<int>(std::ceil(std::max(y0, y1))), 0,
-		                            static_cast<int>(CanvasHeight));
+		                            static_cast<int>(canvasHeight));
 		ys[ny++]       = r.top;
 		ys[ny++]       = r.bottom;
 	}
@@ -420,7 +510,7 @@ inline uint32_t Complement(const HW::Context& ctx, std::array<Rect, 32>& out) {
 		std::sort(spans.begin(), spans.begin() + ns);
 		int x = 0;
 		for (uint32_t s = 0; s <= ns; ++s) {
-			const int gap_end = s < ns ? spans[s].first : static_cast<int>(CanvasWidth);
+			const int gap_end = s < ns ? spans[s].first : static_cast<int>(CanvasWidth());
 			if (gap_end > x && count < out.size()) {
 				// (Merged with the rectangle above of the same columns.)
 				const auto above =
@@ -562,7 +652,7 @@ public:
 		const bool  adjusted = AdjustedCanvas(ctx);
 		const auto  output   = adjusted
 		                           ? ::Loader::DemonsSoulsRenderSize::EffectiveOutputSize()
-		                           : ::Loader::DemonsSoulsRenderSize::Size {CanvasWidth, CanvasHeight};
+		                           : ::Loader::DemonsSoulsRenderSize::Size {CanvasWidth(), CanvasHeight()};
 		const auto  layout   = LayoutOf(ctx);
 		auto        t =
 		    ::Loader::DemonsSoulsRenderSize::InterfaceTransformFor(output, true, a.side, layout);
@@ -618,6 +708,11 @@ inline Rect Widened(const HW::Context& ctx, const Rect& rect) {
 	        static_cast<int>(std::floor(rect.top * t.yscale)),
 	        static_cast<int>(std::ceil(rect.right * t.xscale)),
 	        static_cast<int>(std::ceil(rect.bottom * t.yscale))};
+}
+inline Rect Widened(const Rect& rect) {
+	const float k = static_cast<float>(WideWidth()) / CanvasWidth();
+	return {static_cast<int>(std::floor(rect.left * k)), rect.top, static_cast<int>(std::ceil(rect.right * k)), rect.bottom};
+}
 }
 
 // For the length of one draw into the wide output's interface canvas that is not the HUD's (menus, fades, markers over

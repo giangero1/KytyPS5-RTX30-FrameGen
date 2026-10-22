@@ -1,7 +1,9 @@
 #include "loader/demonsSoulsRenderSize.h"
+#include "loader/demonsSoulsHdOutput.h"
 
 #include "common/emulatorConfig.h"
 #include "graphics/host_gpu/hostMemory.h"
+#include "graphics/presentation/window.h"
 #include "graphics/host_gpu/renderer/demonsSouls.h"
 #include "loader/demonsSoulsSuperResolution.h"
 #include "loader/elf.h"
@@ -30,10 +32,11 @@ bool HoldsPair(uint64_t address, uint32_t width, uint32_t height) {
 	return pair[0] == width && pair[1] == height;
 }
 
-// The one address of a mode's render size the mode cases (`pattern`) load (both cases load the same
-// constant).
-std::optional<uint64_t> FindRenderConstant(const Program& program, std::string_view pattern,
-                                           uint32_t width, uint32_t height) {
+// The one address of a mode's render size the mode cases (`pattern`) load (both cases load the same constant), after
+// their output (`output_width` x `output_height`: the 4K modes' unless given).
+std::optional<uint64_t> FindRenderConstant(const Program& program, std::string_view pattern, uint32_t width,
+                                           uint32_t height, uint32_t output_width = OutputWidth,
+                                           uint32_t output_height = OutputHeight) {
 	std::vector<uint64_t> constants;
 	for (const auto site: GuestCode::Find(program, GuestCode::Pattern(pattern), 64)) {
 		int32_t output_displacement = 0, render_displacement = 0;
@@ -42,7 +45,7 @@ std::optional<uint64_t> FindRenderConstant(const Program& program, std::string_v
 		            sizeof(int32_t));
 		const uint64_t output = site + 8 + static_cast<int64_t>(output_displacement);
 		const uint64_t render = site + 16 + static_cast<int64_t>(render_displacement);
-		if (HoldsPair(output, OutputWidth, OutputHeight) && HoldsPair(render, width, height) &&
+		if (HoldsPair(output, output_width, output_height) && HoldsPair(render, width, height) &&
 		    std::find(constants.begin(), constants.end(), render) == constants.end())
 			constants.push_back(render);
 	}
@@ -153,22 +156,53 @@ Size EffectiveOutputSize() {
 	return g_output;
 }
 
+uint32_t AutoHeight(bool upscaler) {
+	const char* setting = std::getenv("KYTY_RENDER_HEIGHT");
+	if (setting != nullptr && *setting != 0 && std::strcmp(setting, "auto") != 0) return 0;
+	uint32_t width = 0, height = 0;
+	Libs::Graphics::WindowOutputSize(&width, &height);
+	if (height == 0) return 0;
+	if (upscaler) height = std::max(SuperResolutionLeastHeight, static_cast<uint32_t>(std::lround(height / 1.5)));
+	return std::clamp(height, 720u, upscaler ? OutputHeight : RenderHeight);
+}
+
 static bool InstallSettings(Program* program, bool trinity) {
 	const char* setting = std::getenv("KYTY_RENDER_HEIGHT");
 	const char* wide    = std::getenv("KYTY_RENDER_ASPECT");
-	if ((!trinity && (setting == nullptr || *setting == 0) && (wide == nullptr || *wide == 0)) ||
+	const bool  numeric   = setting != nullptr && *setting != 0 && std::strcmp(setting, "auto") != 0;
+	const auto  automatic = AutoHeight(DemonsSoulsSuperResolution::Active());
+	if ((!trinity && !numeric && automatic == 0 && (wide == nullptr || *wide == 0)) ||
 	    program == nullptr || !Libs::Graphics::DemonsSouls::IsSupportedGame() ||
 	    program->file_name.filename() != "eboot.bin")
 		return false;
-	// (The game's super resolution path: display mode 5 is the performance mode,
-	// loader/demonsSoulsSuperResolution.h.)
-	const uint32_t game_width  = trinity ? TrinityWidth : RenderWidth;
-	const uint32_t game_height = trinity ? TrinityHeight : RenderHeight;
-	const int      mode        = trinity ? TrinityMode : PerformanceMode;
-	auto           requested   = setting != nullptr && *setting != 0
-	                                 ? static_cast<uint32_t>(std::strtoul(setting, nullptr, 10))
-	                                 : game_height;
-	const auto     aspect      = wide != nullptr && *wide != 0 ? ParseAspect(wide) : 0.0;
+	const bool     hd          = DemonsSoulsHdOutput::Active();
+	const uint32_t game_width  = hd ? DemonsSoulsHdOutput::HdWidth : trinity ? TrinityWidth : RenderWidth;
+	const uint32_t game_height = hd ? DemonsSoulsHdOutput::HdHeight : trinity ? TrinityHeight : RenderHeight;
+	const int      mode        = hd ? HdUpscaledMode : trinity ? TrinityMode : PerformanceMode;
+	const uint32_t out_width   = hd ? DemonsSoulsHdOutput::HdWidth : OutputWidth;
+	const uint32_t out_height  = hd ? DemonsSoulsHdOutput::HdHeight : OutputHeight;
+	auto requested = automatic != 0 ? automatic
+	                 : numeric      ? static_cast<uint32_t>(std::strtoul(setting, nullptr, 10))
+	                                : game_height;
+	if (automatic != 0) {
+		uint32_t window_width = 0, window_height = 0;
+		Libs::Graphics::WindowOutputSize(&window_width, &window_height);
+		std::printf("Demon's Souls render size: automatic for the %ux%u window: %s 3D at height %u%s
+", window_width,
+		            window_height, hd ? "HD output (1920x1080)," : trinity ? "PS5 Pro output (3840x2160)," : "4K output,",
+		            std::min(requested, hd ? DemonsSoulsHdOutput::HdHeight : requested),
+		            hd && window_height == DemonsSoulsHdOutput::HdHeight ? " (pixel-exact)"
+		            : !hd && !trinity && window_height == OutputHeight ? " (pixel-exact)"
+		                                                               : "");
+		if (hd && requested > DemonsSoulsHdOutput::HdHeight) requested = DemonsSoulsHdOutput::HdHeight;
+	}
+	if (hd && requested > DemonsSoulsHdOutput::HdHeight && requested <= OutputHeight) {
+		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is above the HD output's 1080; 1080 instead
+",
+		            requested);
+		requested = DemonsSoulsHdOutput::HdHeight;
+	}
+	const auto aspect = wide != nullptr && *wide != 0 ? ParseAspect(wide) : 0.0;
 	if (wide != nullptr && *wide != 0 && aspect == 0.0)
 		std::printf("Demon's Souls render size: KYTY_RENDER_ASPECT=%s is not wider than 16:9 and "
 		            "at most 32:9; 16:9 kept\n",
@@ -212,13 +246,11 @@ static bool InstallSettings(Program* program, bool trinity) {
 		            setting, game_width, game_height);
 		return false;
 	}
-	auto constant =
-	    FindRenderConstant(*program, trinity ? TrinityCase : ModeCase, game_width, game_height);
-	if (!constant && !trinity) constant = FindRenderConstant(*program, ModeCaseDuplicated, game_width, game_height);
-	const auto widths = FindUniqueData(
-	    *program, std::span(reinterpret_cast<const uint8_t*>(ModeWidths), sizeof(ModeWidths)));
-	const auto heights = FindUniqueData(
-	    *program, std::span(reinterpret_cast<const uint8_t*>(ModeHeights), sizeof(ModeHeights)));
+	auto constant = hd ? FindRenderConstant(*program, ModeCase, ModeWidths[mode], ModeHeights[mode], out_width, out_height)
+	                   : FindRenderConstant(*program, trinity ? TrinityCase : ModeCase, game_width, game_height);
+	if (!constant && !trinity && !hd) constant = FindRenderConstant(*program, ModeCaseDuplicated, game_width, game_height);
+	const auto widths   = FindUniqueData(*program, std::span(reinterpret_cast<const uint8_t*>(ModeWidths), sizeof(ModeWidths)));
+	const auto heights  = FindUniqueData(*program, std::span(reinterpret_cast<const uint8_t*>(ModeHeights), sizeof(ModeHeights)));
 	// (The render setup's 16:9: the one such store in the code.)
 	std::optional<uint64_t> aspect_store;
 	if (aspect != 0.0) {
@@ -243,6 +275,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 	patches.Value(*constant, pair);
 	patches.Value(*widths + mode * sizeof(uint32_t), size.width);
 	patches.Value(*heights + mode * sizeof(uint32_t), size.height);
+	if (hd) DemonsSoulsHdOutput::SetMode(HdUpscaledMode + 1);
 	if (aspect_store) {
 		// The projection's aspect: the render size's own, as the game's 2560x1440 has 16/9.
 		const float value = static_cast<float>(static_cast<double>(size.width) / size.height);
@@ -251,11 +284,13 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (!patches.Apply()) return false;
 	if (aspect_store) g_wide_aspect = static_cast<double>(size.width) / size.height;
 	if (trinity) g_output = output;
-	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
+	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation
+",
 	                        output.width, output.height, OutputWidth, OutputHeight);
-	std::printf("Demon's Souls render size: performance mode renders %ux%u instead of %ux%u "
-	            "(output %ux%u)%s\n",
-	            size.width, size.height, game_width, game_height, output.width, output.height,
+	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s
+",
+	            hd ? "HD" : "performance", size.width, size.height, game_width, game_height,
+	            output.width, output.height,
 	            trinity        ? ", DLSS output follows launcher resolution"
 	            : aspect_store ? ", its projection as wide"
 	                           : "");
@@ -267,8 +302,8 @@ bool InstallSuperResolution(Program* program) {
 }
 
 void Install(Program* program) {
-	// Mode 5 was already installed transactionally before SuperResolution::Active became true.
 	if (!DemonsSoulsSuperResolution::Active()) (void)InstallSettings(program, false);
+}
 }
 
 } // namespace Loader::DemonsSoulsRenderSize

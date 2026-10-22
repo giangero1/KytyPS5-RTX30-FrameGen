@@ -16,7 +16,6 @@
 #include "libs/errno.h"
 #include "live-census.h"
 #include "live-counters.h"
-#include "speculation-state.h"
 
 #include <algorithm>
 #include <array>
@@ -78,8 +77,7 @@ constexpr uint32_t NormalizeRegisterOffset(uint32_t raw_offset) {
 // rendering writes per-draw data in compute passes). Like the indirect draw arguments, bring
 // GPU-written bytes back before the command processor reads guest memory; without it a table
 // read before its first download is all zeros (an "unknown register 0" crash at startup).
-// False when a speculative translation refused it (speculation-state.h): the packet applies nothing.
-[[nodiscard]] bool SyncCommandMemory(uint64_t address, uint64_t bytes, const char* what) {
+void SyncCommandMemory(uint64_t address, uint64_t bytes, const char* what) {
 	LiveCounters::Add(LiveCounters::IndirectTables);
 	LiveCensus::Scope census(LiveCensus::CommandSync, 0, 0);
 	if (!Libs::LibKernel::Memory::SyncGpuCleanBacking(address, bytes)) {
@@ -90,8 +88,6 @@ constexpr uint32_t NormalizeRegisterOffset(uint32_t raw_offset) {
 			     what, address, bytes);
 		}
 	}
-	const auto* spec = Spec::Current();
-	return spec == nullptr || spec->refused == nullptr;
 }
 
 // An entry of an indirect register table the emulator cannot apply: report the table once in a
@@ -2009,9 +2005,8 @@ KYTY_CP_OP_PARSER(CpOpIndirectBuffer) {
 		     indirect_num_dw, buffer[2]);
 	}
 
-	if (!SyncCommandMemory(reinterpret_cast<uint64_t>(indirect_buffer),
-	                       uint64_t {indirect_num_dw} * sizeof(uint32_t), "IndirectBuffer"))
-		return 3;
+	SyncCommandMemory(reinterpret_cast<uint64_t>(indirect_buffer),
+	                  uint64_t {indirect_num_dw} * sizeof(uint32_t), "IndirectBuffer");
 	GraphicsDbgDumpDcb("ci", indirect_num_dw, indirect_buffer);
 
 	cp.ProcessIndirectBuffer({indirect_buffer, indirect_num_dw});
@@ -2037,8 +2032,7 @@ KYTY_CP_OP_PARSER(CpOpIndirectCxRegs) {
 		EXIT("indirect CX registers have null address, num_regs = %" PRIu32 "\n", indirect_num_dw);
 	}
 	const auto indirect_address = reinterpret_cast<uint64_t>(indirect_buffer);
-	if (!SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectCxRegs"))
-		return KYTY_PM4_LEN(cmd_id) - 1u;
+	SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectCxRegs");
 	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2) {
 		// Keep the encoded offset for packet control values, and use the normalized offset
 		// only for register dispatch.
@@ -2103,8 +2097,7 @@ KYTY_CP_OP_PARSER(CpOpIndirectShRegs) {
 		EXIT("indirect SH registers have null address, num_regs = %" PRIu32 "\n", indirect_num_dw);
 	}
 	const auto indirect_address = reinterpret_cast<uint64_t>(indirect_buffer);
-	if (!SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectShRegs"))
-		return KYTY_PM4_LEN(cmd_id) - 1u;
+	SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectShRegs");
 
 	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2) {
 		auto raw_cmd_offset = indirect_buffer[0];
@@ -2145,8 +2138,7 @@ KYTY_CP_OP_PARSER(CpOpIndirectUcRegs) {
 		EXIT("indirect UC registers have null address, num_regs = %" PRIu32 "\n", indirect_num_dw);
 	}
 	const auto indirect_address = reinterpret_cast<uint64_t>(indirect_buffer);
-	if (!SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectUcRegs"))
-		return KYTY_PM4_LEN(cmd_id) - 1u;
+	SyncCommandMemory(indirect_address, uint64_t {indirect_num_dw} * 8u, "IndirectUcRegs");
 	for (uint32_t i = 0; i < indirect_num_dw; i++, indirect_buffer += 2) {
 		auto raw_cmd_offset = indirect_buffer[0];
 		auto cmd_offset     = NormalizeRegisterOffset(raw_cmd_offset);

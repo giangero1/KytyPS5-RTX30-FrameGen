@@ -15,19 +15,14 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "kernel/memory.h"
-#include "speculation-state.h"
 #include "fresh-memory.h"
 #include "texture-offload.h"
 
 extern "C" {
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_bda_dirty_regions_mode {0};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_bda_dirty_regions_mode {1};
 // 1: watchers removed while memory is released skip the host protection change there
 // (PageManager::SetUnmappingRange); a write fault on a page nothing watches unprotects it.
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_unmap_protect_skip_mode {0};
-// Live switch (same-process A/B): a write fault in the 16 KiB window right after the one the same thread's last window
-// fault ended in, within 2 ms (a sequential stream of writes), takes the next 64 KiB at once. (1-1 route, 120 cap, A-B-A
-// over 29 points: window faults -13.6%, fps +0.7%, 1% low +3.8%, p99 -4.1%; uploads +9%, on the upload worker.)
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_window_stream_mode {1};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_unmap_protect_skip_mode {1};
 }
 
 namespace Libs::Graphics {
@@ -64,23 +59,21 @@ bool GpuResourceManager::TryInvalidateCpuWriteWindow(uint64_t fault) {
 	constexpr uint64_t window_size  = 4 * TRACKER_PAGE_SIZE;
 	constexpr uint64_t stream_size  = 16 * TRACKER_PAGE_SIZE;
 	const auto         window_begin = fault & ~(window_size - 1);
-	if (kyty_local_window_stream_mode.load(std::memory_order_relaxed) != 0) {
-		// The window after the one this thread's last window fault ended in, within 2 ms (~6.4M TSC ticks at 3.2 GHz):
-		// a stream, whose next 64 KiB goes at once (the next fault in it is the window after that).
-		thread_local uint64_t last_end = 0, last_tsc = 0;
-		const uint64_t        now      = __rdtsc();
-		const bool            stream   = window_begin == last_end && now - last_tsc < 6'400'000;
-		if (stream && TryInvalidateCpuWriteWindow(fault, window_begin, stream_size)) {
-			last_end = window_begin + stream_size;
-			last_tsc = now;
-			return true;
-		}
-		if (!TryInvalidateCpuWriteWindow(fault, window_begin, window_size)) return false;
-		last_end = window_begin + window_size;
+	// The window after the one this thread's last window fault ended in, within 2 ms (~6.4M TSC ticks at 3.2 GHz): a
+	// stream, whose next 64 KiB goes at once (the next fault in it is the window after that). (1-1 route, 120 cap, A-B-A
+	// over 29 points: window faults -13.6%, fps +0.7%, 1% low +3.8%, p99 -4.1%; uploads +9%, on the upload worker.)
+	thread_local uint64_t last_end = 0, last_tsc = 0;
+	const uint64_t        now      = __rdtsc();
+	const bool            stream   = window_begin == last_end && now - last_tsc < 6'400'000;
+	if (stream && TryInvalidateCpuWriteWindow(fault, window_begin, stream_size)) {
+		last_end = window_begin + stream_size;
 		last_tsc = now;
 		return true;
 	}
-	return TryInvalidateCpuWriteWindow(fault, window_begin, window_size);
+	if (!TryInvalidateCpuWriteWindow(fault, window_begin, window_size)) return false;
+	last_end = window_begin + window_size;
+	last_tsc = now;
+	return true;
 }
 
 bool GpuResourceManager::TryInvalidateCpuWriteWindow(uint64_t fault, uint64_t window_begin, uint64_t window_size) {
@@ -145,17 +138,6 @@ bool GpuResourceManager::HandleFault(PageFaultAccess access, uint64_t fault_vadd
 	} else {
 		LiveCounters::Add(LiveCounters::ReadFault);
 		if (LiveCensus::g_render) LiveCounters::Add(LiveCounters::RenderReadFaults);
-		// A speculative translation's thread read GPU-written memory: the readback is the normal path's (the
-		// scheduler's own command buffers and ticks), as the translation in order would make it there.
-		struct NormalPath {
-			Spec::State*                state    = std::exchange(Spec::t_state, nullptr);
-			CommandScheduler::Recorder* recorder = CommandScheduler::ThreadRecorder();
-			NormalPath() { CommandScheduler::SetThreadRecorder(nullptr); }
-			~NormalPath() {
-				Spec::t_state = state;
-				CommandScheduler::SetThreadRecorder(recorder);
-			}
-		} normal_path;
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;
@@ -379,13 +361,6 @@ void GpuResourceManager::RefreshBdaRanges() {
 bool GpuResourceManager::PrepareBdaReadRanges(std::span<const GuestRange> ranges) {
 	if (ranges.empty() || ranges.size() > 128 ||
 	    std::ranges::any_of(ranges, [](const auto& range) { return !range.Valid(); })) return false;
-	if (auto* spec = Spec::Current()) {
-		// Prepared when it is committed (and its guest memory writes made after its work).
-		if (std::ranges::any_of(ranges, [&](const auto& range) { return spec->open_journal_set.Intersects(range.address, range.size); }))
-			Spec::Refuse("memory the processor writes");
-		spec->bda.insert(spec->bda.end(), ranges.begin(), ranges.end());
-		return true;
-	}
 	// (Before the lock: making buffers asks for it.)
 	m_buffer_cache.EnsureBdaReadable(ranges);
 	std::shared_lock lock(m_mapped_ranges_mutex);
@@ -442,12 +417,6 @@ void GpuResourceManager::SynchronizeDirtyBdaRegions(GuestRange range) {
 }
 
 void GpuResourceManager::PrepareBda() {
-	if (auto* spec = Spec::Current()) {
-		// Prepared when it is committed (and its guest memory writes made after its work).
-		if (spec->writes.size() > spec->Sealed().writes) Spec::Refuse("memory the processor writes");
-		spec->bda_all = true;
-		return;
-	}
 	// Unknown shader addresses cannot prove disjointness from an in-flight readback.
 	LiveCounters::Add(LiveCounters::BdaFullSyncs);
 	m_buffer_cache.DrainGuestReadback();

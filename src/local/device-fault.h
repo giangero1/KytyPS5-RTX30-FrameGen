@@ -175,13 +175,6 @@ inline void NoteSubmit(uint64_t timeline, uint64_t tick, const VkCommandBuffer* 
 	}
 }
 
-// A buffer reset without a submission.
-inline void NoteDiscard(VkCommandBuffer command) {
-	if (!BreadcrumbsOn()) return;
-	std::lock_guard lock(g_breadcrumbs.mutex);
-	if (const auto found = g_breadcrumbs.open.find(command); found != g_breadcrumbs.open.end()) found->second.clear();
-}
-
 inline void NoteCreated(uint64_t device, uint64_t size, uint64_t cpu) {
 	if (device == 0 || g_registry.device.load(std::memory_order_relaxed) == VK_NULL_HANDLE) return;
 	std::lock_guard lock(g_registry.mutex);
@@ -353,8 +346,8 @@ inline void AppendCheckpoints(std::string& text) {
 	}
 }
 
-// A diagnostic's report of its own state for the work past `reached` (KYTY_TABLE_WATCH: what the stalled dispatches'
-// blocks held when they were recorded and hold now), called once per stall.
+// A diagnostic's report of its own state for the work past `reached` (KYTY_DISPATCH_TIMING: which of the timed
+// dispatches the GPU is in, and what that one read), called once per stall.
 inline std::atomic<void (*)(uint64_t reached)> g_stall_dump {nullptr};
 
 // The last dispatches recorded (the render thread's; a stall reads them unlocked, a torn entry is possible): their
@@ -367,9 +360,8 @@ inline std::array<DispatchNote, 4096> g_dispatches;
 inline std::atomic<size_t>            g_dispatch_next {0};
 inline void NoteDispatch(uint64_t tick, uint64_t hash, uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
 	if (!BreadcrumbsOn()) return;
-	// (The render thread's: no locked add. A speculation's thread may note one too, which at worst overwrites an entry
-	// of this diagnostic. The add and the entry's store were ~0.6% of the render thread at Latria, ~1250 dispatches a
-	// frame.)
+	// (The render thread's: no locked add. The add and the entry's store were ~0.6% of the render thread at Latria,
+	// ~1250 dispatches a frame.)
 	const auto at = g_dispatch_next.load(std::memory_order_relaxed);
 	g_dispatch_next.store(at + 1, std::memory_order_relaxed);
 	g_dispatches[at % g_dispatches.size()] = {.tick = tick, .hash = hash, .indirect = indirect, .x = x, .y = y, .z = z};
@@ -378,7 +370,7 @@ inline void NoteDispatch(uint64_t tick, uint64_t hash, uint32_t x, uint32_t y, u
 // A timeline that stopped (MasterSemaphore::Wait's STALL): the submissions of it the GPU has not finished (the first
 // few), each with what it waits for and where those semaphores are now (`counter`: a semaphore's current value).
 // The 8 GB simulation froze with everything submitted and no thread in a binding (10-13): is the first unfinished
-// submission waiting for a semaphore that never comes (a sparse binding's, WaitBeforeNextSubmit), or did the GPU stall?
+// submission waiting for a semaphore that never comes, or did the GPU stall?
 template <typename Counter>
 inline void ReportStall(uint64_t timeline, uint64_t reached, Counter&& counter) {
 	if (const auto dump = g_stall_dump.load(std::memory_order_acquire); dump != nullptr) {

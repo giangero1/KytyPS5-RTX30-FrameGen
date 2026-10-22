@@ -40,21 +40,16 @@
 #include <thread>
 #include <tuple>
 #include <vulkan/vulkan_format_traits.hpp>
-#include <xxhash.h>
-#include "speculation-state.h"
 
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_write_window_handoff_mode {0};
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_image_granules_mode {0};
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_texture_resolve_pages_mode {0};
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_partial_image_dirty_mode {0};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_write_window_handoff_mode {1};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_image_granules_mode {2};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_texture_resolve_pages_mode {1};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_partial_image_dirty_mode {1};
 // 1: a partial refresh uploads only the rows of tile blocks over the dirty ranges of a large
 // subresource, not the whole subresource (UploadImagePartial).
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_partial_row_bands_mode {0};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_partial_row_bands_mode {1};
 // 0: a sampled view refreshes the whole texture, not only its levels (RefreshTextureLevels; on by default, 0 for an A/B).
 [[gnu::used]] volatile std::atomic<uint32_t> kyty_local_texture_levels_mode {1};
-// 0: an image GPU buffer writes covered parts of is uploaded whole, not only the subresources over them (InitializeImage;
-// on by default, 0 for an A/B).
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_buffer_ranges_mode {1};
 // 0: a compute fill over images it does not match runs as the dispatch, and the images are uploaded after it, not cleared
 // (TryConsumeComputeImageClear, InitializeImage; on by default, 0 for an A/B; KYTY_FILL_CLEAR=0 from the start).
 [[gnu::used]] volatile std::atomic<uint32_t> kyty_local_fill_clear_mode {[] {
@@ -408,11 +403,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 				cache->m_scheduler.Context().GetGpu().SendCommandSync(
 				    [cache, vaddr, size, touch] { cache->RestoreOffloaded(vaddr, size, static_cast<uint8_t>(touch)); });
 			});
-			// Not: the upload worker (the render thread waits for it), deferred GPU work, a speculation's recorder (they
-			// cannot wait for the GPU), other host threads (the render thread may wait for them).
+			// Not: the upload worker (the render thread waits for it), deferred GPU work (it cannot wait for the GPU),
+			// other host threads (the render thread may wait for them).
 			state.can_wait.store(+[] {
-				if (AsyncUpload::t_worker || CommandScheduler::InDeferredOperation() || CommandScheduler::ThreadRecorder() != nullptr)
-					return false;
+				if (AsyncUpload::t_worker || CommandScheduler::InDeferredOperation()) return false;
 				return GuestGpu::IsGpuThread() || LibKernel::PthreadSelfOrNull() != nullptr;
 			});
 		}
@@ -423,25 +417,6 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		                      "clean; nothing discarded)\n");
 	}
 #endif
-}
-
-void KytyTextureGcThresholds(uint64_t total_budget, uint64_t& trigger, uint64_t& pressure, uint64_t& critical) {
-	constexpr int64_t GiB       = 1024ll * 1024 * 1024;
-	const auto        budget    = static_cast<int64_t>(std::min<uint64_t>(total_budget, INT64_MAX));
-	const auto        threshold = std::min<int64_t>(budget, 8 * GiB);
-	pressure =
-	    static_cast<uint64_t>(std::max<int64_t>(std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
-	critical =
-	    static_cast<uint64_t>(std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
-	trigger = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
-}
-
-bool KytyGcLiveBudget() {
-	static const bool enabled = [] {
-		const char* env = std::getenv("KYTY_GC_LIVE_BUDGET");
-		return env != nullptr && std::atoi(env) != 0;
-	}();
-	return enabled;
 }
 
 uint64_t KytyGcLiveBudgetValue(const GraphicContext& graphics) {
@@ -593,8 +568,6 @@ ImageId TextureCache::InsertImage(const ImageInfo& info, bool may_fail) {
 // table set touches its images at least every 8 flips: TableImageSet::TouchTicks.)
 size_t TextureCache::ReclaimImageMemory(uint64_t bytes, bool all) {
 	constexpr uint64_t UnusedTicks = 16;
-	// (A speculation's recorder cannot wait for the GPU: the GPU thread translates that work again.)
-	if (CommandScheduler::ThreadRecorder() != nullptr) throw CommandScheduler::RecorderRefusal {"ReclaimImageMemory"};
 	const auto           start = std::chrono::steady_clock::now();
 	const uint64_t       goal  = all ? UINT64_MAX : std::max(bytes * 2, uint64_t {256} << 20u);
 	uint64_t             freed = 0;
@@ -612,12 +585,12 @@ size_t TextureCache::ReclaimImageMemory(uint64_t bytes, bool all) {
 	if (!victims.empty()) {
 		m_scheduler.Wait(m_scheduler.CurrentTick());
 		// (Destroyed now, not after RetireImage's operation: the GPU is done with them.)
-		const auto packet = Spec::PacketNow();
 		for (const auto id: victims) {
-			m_retirement_bytes += m_slot_images[id].info.data.size;
-			m_retired.emplace_back(id, packet);
+			const auto bytes = m_slot_images[id].info.data.size;
+			m_retirement_bytes += bytes;
+			m_completed_retirement_bytes += bytes;
+			EraseSlot(id);
 		}
-		EraseRetired();
 		LiveCounters::Add(LiveCounters::GcImageDeletes, victims.size());
 	}
 	static std::atomic<uint32_t> reports {0};
@@ -657,11 +630,6 @@ bool TextureCache::RegistrationsOverlapSince(uint64_t address, uint64_t size, ui
 	for (auto entry = log.rbegin(); entry != log.rend() && entry->epoch > epoch; ++entry)
 		if ((entry->begin & ~(page - 1)) < end && begin < ((entry->end + page - 1) & ~(page - 1))) return true;
 	return false;
-}
-
-bool TextureCache::StillResolved(const Image& image, uint64_t serial, uint64_t epoch) const {
-	return image.serial == serial && image.registered &&
-	       !RegistrationsSince(image.info.data.address, image.info.data.size, epoch);
 }
 
 bool TextureCache::RegistrationsSince(uint64_t address, uint64_t size, uint64_t epoch) const {
@@ -796,16 +764,14 @@ void TextureCache::RetireImage(ImageId id) {
 	const auto bytes = m_slot_images[id].info.data.size;
 	m_retirement_bytes += bytes;
 	TraceResource(m_slot_images[id], "retire", "detached-await-completion", m_gc_tick);
-	// (A speculation's packet may still read it: Spec::PacketNow.)
-	const auto packet = Spec::PacketNow();
 	if (m_scheduler.Active()) {
-		m_scheduler.DeferOperation([this, id, packet] {
-			m_retired.emplace_back(id, packet);
-			EraseRetired();
+		m_scheduler.DeferOperation([this, id, bytes] {
+			m_completed_retirement_bytes += bytes;
+			EraseSlot(id);
 		});
 	} else {
-		m_retired.emplace_back(id, packet);
-		EraseRetired();
+		m_completed_retirement_bytes += bytes;
+		EraseSlot(id);
 	}
 }
 
@@ -880,11 +846,6 @@ void TextureCache::FreeGuestAliases(ImageId written) {
 }
 
 void TextureCache::TouchImage(Image& image) {
-	if (auto* spec = Spec::Current()) { // (touched when the speculative translation is committed)
-		auto& touched = spec->touched_images;
-		if (touched.empty() || touched.back().first != &image) touched.emplace_back(&image, image.serial);
-		return;
-	}
 	if (image.registered) {
 		m_lru_cache.Touch(image.lru_id, m_gc_tick);
 	}
@@ -1289,15 +1250,18 @@ ImageId TextureCache::GetNullImage(const ImageDesc& desc) {
 	return id;
 }
 
+bool TextureCache::ViewFitsImage(const ImageDesc& desc) {
+	const auto& view      = desc.view_info;
+	const auto& resources = desc.info.resources;
+	return view.level_count != 0 && view.layer_count != 0 && view.base_level < resources.levels &&
+	       view.level_count <= resources.levels - view.base_level &&
+	       (desc.info.IsVolume() ||
+	        (view.base_layer < resources.layers && view.layer_count <= resources.layers - view.base_layer));
+}
+
 void TextureCache::ValidateImageDesc(const ImageDesc& desc) const {
 	ImageOps::Validate(desc.info);
-	if (desc.view_info.format == vk::Format::eUndefined || desc.view_info.level_count == 0 ||
-	    desc.view_info.layer_count == 0 ||
-	    desc.view_info.base_level >= desc.info.resources.levels ||
-	    desc.view_info.level_count > desc.info.resources.levels - desc.view_info.base_level ||
-	    (!desc.info.IsVolume() &&
-	     (desc.view_info.base_layer >= desc.info.resources.layers ||
-	      desc.view_info.layer_count > desc.info.resources.layers - desc.view_info.base_layer))) {
+	if (desc.view_info.format == vk::Format::eUndefined || !ViewFitsImage(desc)) {
 		EXIT("TextureCache: invalid image view description\n");
 	}
 	if (desc.type == BindingType::DepthTarget && !IsSupportedDepthTargetFormat(desc.info)) {
@@ -2113,8 +2077,7 @@ bool TextureCache::RefillUpload(Image& image) {
 		return false;
 	};
 	if (image.staged_ring == nullptr) return refuse("none");
-	if (image.staged_serial != m_scheduler.CommandSerial() || m_scheduler.CurrentTick() >= CommandScheduler::PendingTick ||
-	    m_scheduler.Current().IsInvalid())
+	if (image.staged_serial != m_scheduler.CommandSerial() || m_scheduler.Current().IsInvalid())
 		return refuse("submitted");
 	if (image.IsBufferModified() || image.IsGpuModified() || image.usage.storage || image.usage.render_target ||
 	    image.usage.depth_target || image.binding.is_target || UploadBinding(image) == BindingType::DepthTarget)
@@ -2156,7 +2119,6 @@ void TextureCache::InitializeImage(ImageId id) {
 		RestoreOffloaded(image.info.data.address, image.info.data.size, static_cast<uint8_t>(TextureOffload::Touch::Upload));
 	}
 	if (TextureOffload::IsRestoring(image.info.data.address, image.info.data.size)) {
-		if (CommandScheduler::ThreadRecorder() != nullptr) throw CommandScheduler::RecorderRefusal {"texture offload restore"};
 		if (m_offload_unsubmitted) {
 			m_offload_unsubmitted = false;
 			m_scheduler.Flush();
@@ -2180,10 +2142,6 @@ void TextureCache::InitializeImage(ImageId id) {
 		// A refill first: no GPU work at all, where a partial upload records some (and would end the refills: its
 		// copies come after the whole upload's, which a refill would then overwrite with older bytes).
 		bool uploaded = RefillUpload(image);
-		if (uploaded && kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 2 &&
-		    PartialDirtyCandidate(image)) {
-			UpdatePartialHashes(image, true);
-		}
 		if (!uploaded && image.IsPartiallyCpuDirty() && !image.IsBufferModified()) {
 			g_partial_fail = "";
 			uploaded = UploadImagePartial(image);
@@ -2228,8 +2186,7 @@ void TextureCache::InitializeImage(ImageId id) {
 		// buffers holding them. At Boletaria every frame a compute shader writes two 15 MiB buffers in memory shared with
 		// render targets - a 1440p R32 array, 720p RGBA16F ones - and each of them was uploaded whole again: 105 MiB of
 		// detiles a frame for 30 MiB written (10-13).
-		if (!uploaded && image.IsBufferModified() && !image.IsCpuDirty() && !image.BufferModifiedRanges().empty() &&
-		    kyty_local_buffer_ranges_mode.load(std::memory_order_relaxed) != 0) {
+		if (!uploaded && image.IsBufferModified() && !image.IsCpuDirty() && !image.BufferModifiedRanges().empty()) {
 			const auto ranges = image.BufferModifiedRanges();
 			uploaded          = UploadImageChunked(image, &ranges);
 			if (uploaded) image.staged_ring = nullptr;
@@ -2242,8 +2199,7 @@ void TextureCache::InitializeImage(ImageId id) {
 		// again and again (an 8 GB laptop's GPU faults in the culling chain came 3 times in 4 tours with that, 10-18).
 		if (!uploaded && image.IsPartiallyCpuDirty() && !image.IsMaybeCpuDirty() &&
 		    kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 1 &&
-		    (!image.IsBufferModified() || (!image.BufferModifiedRanges().empty() &&
-		                                   kyty_local_buffer_ranges_mode.load(std::memory_order_relaxed) != 0))) {
+		    (!image.IsBufferModified() || !image.BufferModifiedRanges().empty())) {
 			auto ranges = image.CpuDirtyRanges();
 			if (image.IsBufferModified()) {
 				for (const auto& [begin, end]: image.BufferModifiedRanges()) Image::AddRange(ranges, begin, end);
@@ -2255,10 +2211,6 @@ void TextureCache::InitializeImage(ImageId id) {
 		if (!uploaded && UploadImageChunked(image)) {
 			uploaded            = true;
 			image.staged_ring   = nullptr;
-			if (kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 2 &&
-			    PartialDirtyCandidate(image)) {
-				UpdatePartialHashes(image, true);
-			}
 		}
 		if (!uploaded) {
 			bool refillable = false;
@@ -2291,10 +2243,6 @@ void TextureCache::InitializeImage(ImageId id) {
 			image.staged_ring   = refillable ? source : nullptr;
 			image.staged_offset = source_offset;
 			image.staged_serial = m_scheduler.CommandSerial();
-			if (kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 2 &&
-			    PartialDirtyCandidate(image)) {
-				UpdatePartialHashes(image, true);
-			}
 		}
 		image.ClearBufferModified();
 	}
@@ -2356,75 +2304,7 @@ void DirtyRowBands(const std::vector<std::pair<uint64_t, uint64_t>>& dirty, uint
 	}
 }
 
-[[nodiscard]] uint64_t HashGuestRange(uint64_t vaddr, uint64_t size) {
-	if (const auto* data = LibKernel::Memory::TryGetBackingPointer(vaddr, size)) {
-		return XXH3_64bits(data, static_cast<size_t>(size));
-	}
-	thread_local std::vector<uint8_t> bytes;
-	bytes.resize(size);
-	if (!LibKernel::Memory::TryReadBacking(vaddr, bytes.data(), size) &&
-	    !LibKernel::Memory::TryReadPrtBacking(vaddr, bytes.data(), size)) {
-		// Unreadable (unbacked sparse pages): equal to itself until the pages become readable.
-		return 0x5ca1ab1e0ddba11ull;
-	}
-	return XXH3_64bits(bytes.data(), static_cast<size_t>(size));
-}
-
 } // namespace
-
-// KYTY_PARTIAL_IMAGE_DIRTY=2: every granule of a large image is hashed at a whole upload, and the
-// dirty granules again after a partial one; a partial upload first checks that the granules it
-// leaves alone still hold the data uploaded last time (a write the page watchers missed).
-void TextureCache::UpdatePartialHashes(Image& image, bool all) {
-	const auto& info  = image.info;
-	const auto  count = (info.data.size + PartialDirtyGranule - 1) / PartialDirtyGranule;
-	if (image.partial_hashes.size() != count) {
-		if (!all) {
-			return;
-		}
-		image.partial_hashes.assign(count, 0);
-	}
-	for (uint64_t index = 0; index < count; index++) {
-		const auto begin = info.data.address + index * PartialDirtyGranule;
-		const auto size  = std::min(PartialDirtyGranule, info.data.End() - begin);
-		if (all || IntersectsRanges(image.CpuDirtyRanges(), begin, begin + size)) {
-			image.partial_hashes[index] = HashGuestRange(begin, size);
-		}
-	}
-}
-
-bool TextureCache::CheckPartialHashes(const Image& image) {
-	const auto& info  = image.info;
-	const auto  count = (info.data.size + PartialDirtyGranule - 1) / PartialDirtyGranule;
-	if (image.partial_hashes.size() != count) {
-		std::printf("PARTIAL VERIFY no baseline addr=0x%llx size=0x%llx\n",
-		            static_cast<unsigned long long>(info.data.address),
-		            static_cast<unsigned long long>(info.data.size));
-		return false;
-	}
-	uint64_t mismatches = 0;
-	uint64_t first      = 0;
-	for (uint64_t index = 0; index < count; index++) {
-		const auto begin = info.data.address + index * PartialDirtyGranule;
-		const auto size  = std::min(PartialDirtyGranule, info.data.End() - begin);
-		if (!IntersectsRanges(image.CpuDirtyRanges(), begin, begin + size) &&
-		    HashGuestRange(begin, size) != image.partial_hashes[index]) {
-			if (mismatches++ == 0) {
-				first = begin;
-			}
-		}
-	}
-	if (mismatches != 0) {
-		std::printf("PARTIAL VERIFY mismatch addr=0x%llx size=0x%llx granules=%llu first=0x%llx "
-		            "dirty_ranges=%zu\n",
-		            static_cast<unsigned long long>(info.data.address),
-		            static_cast<unsigned long long>(info.data.size),
-		            static_cast<unsigned long long>(mismatches), static_cast<unsigned long long>(first),
-		            image.CpuDirtyRanges().size());
-		return false;
-	}
-	return true;
-}
 
 // A depth array whose CPU writes cover some layers (the game's 80-layer shadow-map pool, whose free 4 MiB layers its
 // texture streamer fills from the CPU): only those layers are staged, detiled and copied (of [first_layer, last_layer)
@@ -2717,10 +2597,6 @@ bool TextureCache::UploadImagePartial(Image& image, uint64_t window_begin, uint6
 	    plan.tiles.size() != plan.regions.size()) {
 		return PartialFail("plan");
 	}
-	if (kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 2 &&
-	    !CheckPartialHashes(image)) {
-		return PartialFail("hashes");
-	}
 	// The subresources over the dirty ranges (region i is the copy of tile i), or the rows of
 	// blocks over them (KYTY_PARTIAL_ROW_BANDS).
 	struct Pick {
@@ -2849,9 +2725,6 @@ bool TextureCache::UploadImagePartial(Image& image, uint64_t window_begin, uint6
 	LiveCounters::Add(LiveCounters::PartialUploads);
 	LiveCounters::Add(LiveCounters::PartialUploadBytes, total);
 	LogPartialUpload(image, pieces.size(), total);
-	if (kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 2) {
-		UpdatePartialHashes(image, false);
-	}
 	return true;
 }
 
@@ -3100,11 +2973,19 @@ void TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		EXIT("TextureCache: stencil association requires a depth/stencil image\n");
 	}
 
+	// (Not an image the GPU draws or writes to at that address: memory it shares with the stencil plane (a pool of
+	// targets reused while an area loads) made it the depth image's from then on, and the next draw to it ended the
+	// emulator, "color target requires rediscovery before final acquisition" (issue #94, fast travel to 1-1). A record of
+	// its own beside it.)
 	ImageId association {};
 	for (const auto id: FindImagesInRegion(stencil.address, stencil.size, false)) {
 		const auto owner = m_slot_images.try_get(id);
-		if (owner != nullptr && owner->info.data.address == stencil.address) {
+		if (owner == nullptr || owner->info.data.address != stencil.address) continue;
+		if (!owner->usage.render_target && !owner->usage.depth_target && !owner->usage.storage) {
 			association = id;
+		} else if (static std::atomic<uint32_t> reports {0}; reports.fetch_add(1, std::memory_order_relaxed) < 4) {
+			std::printf("TextureCache: a %s target at 0x%llx shares its memory with a depth image's stencil: kept apart\n",
+			            owner->usage.depth_target ? "depth" : "color", static_cast<unsigned long long>(stencil.address));
 		}
 	}
 	if (!association) {
@@ -3433,7 +3314,7 @@ bool TextureCache::IsSampledImageCurrent(ImageId id, const ImageDesc& desc, bool
 	    !(image->info.resources == desc.info.resources)) {
 		return false;
 	}
-	if (Spec::Current() == nullptr) image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
+	image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
 	TouchImage(*image);
 	return true;
 }
@@ -3463,7 +3344,7 @@ bool TextureCache::IsSampledDepthCurrent(ImageId id, const ImageDesc& desc, uint
 		}
 		if (associations != 1 || !leads_here) return false;
 	}
-	if (Spec::Current() == nullptr) image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
+	image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
 	TouchImage(*image);
 	return true;
 }
@@ -3516,7 +3397,7 @@ bool TextureCache::TryReuseSampledImage(ImageId id, const ImageDesc& desc, uint6
 	// The caller recorded this owner after an ordinary lookup, without an intervening
 	// registration change. A new compatible alias also changes the epoch, so it cannot
 	// silently take precedence over the cached owner. Subresource/format remaps fall back.
-	if (Spec::Current() == nullptr) image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
+	image->frame_accessed_last = m_frame.load(std::memory_order_relaxed);
 	TouchImage(*image);
 	// Nothing registered over the pages since `epoch`, so nothing since `current` either: the
 	// caller's proof moves to the current epoch (registrations stamp their pages under m_lock),
@@ -3732,7 +3613,6 @@ void TextureCache::CommitGpuWrite(Image& image, bool keep_partial) {
 		FinishRefresh(image);
 	}
 	image.MarkGpuModified();
-	Spec::NoteGpuWrite(image.info.data.address, image.info.data.size);
 }
 
 bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
@@ -4377,11 +4257,10 @@ void TextureCache::OffloadScan(uint64_t tick) {
 #endif
 }
 
-// Render thread (a speculation's recorder refuses): the discarded ranges over [vaddr, vaddr + size) downloaded back from
-// their images in one submission, the render thread waiting for it; their read watchers then go.
+// Render thread: the discarded ranges over [vaddr, vaddr + size) downloaded back from their images in one submission,
+// the render thread waiting for it; their read watchers then go.
 void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch_value, bool async) {
 #if defined(_WIN32)
-	if (CommandScheduler::ThreadRecorder() != nullptr) throw CommandScheduler::RecorderRefusal {"texture offload restore"};
 	const auto touch  = static_cast<TextureOffload::Touch>(touch_value);
 	auto       ranges = TextureOffload::BeginRestore(vaddr, size, touch, touch == TextureOffload::Touch::Count, async);
 	if (ranges.empty()) return;
@@ -4519,19 +4398,8 @@ uint64_t TextureCache::PendingDownloadTick(uint64_t address, uint64_t size) {
 	return latest;
 }
 
-void TextureCache::TouchSpeculated(Image& image, uint64_t serial) {
-	std::scoped_lock lock {m_lock};
-	if (image.serial != serial || !image.registered) return;
-	image.frame_accessed_last = m_frame.load(std::memory_order_relaxed);
-	TouchImage(image);
-}
-
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size, const char* source, const uint32_t* fill) {
 	if (!GuestRange {address, size}.Valid()) {
-		return;
-	}
-	if (auto* spec = Spec::Current()) {
-		spec->NoteInvalidated(address, size); // (when it is committed)
 		return;
 	}
 	std::scoped_lock lock {m_lock};
@@ -4708,20 +4576,12 @@ bool TextureCache::IsMeta(uint64_t address) {
 
 bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fill_value,
                                  bool* fill_known) {
-	// A speculation's answer is as after its holes; one it relies on is noted (speculation-state.h).
-	auto* spec = slice < 32 && fill_value == nullptr && fill_known == nullptr ? Spec::Current() : nullptr;
-	if (spec != nullptr)
-		if (const auto known = spec->KnownMeta(address, slice); known >= 0) return known == 1;
-	const auto not_cleared = [&] {
-		if (spec != nullptr) spec->NoteMetaRead(address, slice);
-		return false;
-	};
-	if (!MetaFilterMayHold(address)) return not_cleared();
+	if (!MetaFilterMayHold(address)) return false;
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
 	if (found == m_surface_metas.end() || found->second.type == MetaDataInfo::Type::PendingDcc ||
 	    slice >= 32) {
-		return not_cleared();
+		return false;
 	}
 	if (fill_value != nullptr) {
 		*fill_value = found->second.fill_value;
@@ -4729,7 +4589,7 @@ bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fil
 	if (fill_known != nullptr) {
 		*fill_known = found->second.fill_known;
 	}
-	return (found->second.clear_mask & (1u << slice)) != 0 || not_cleared();
+	return (found->second.clear_mask & (1u << slice)) != 0;
 }
 
 bool TextureCache::ClearMeta(uint64_t address) {
@@ -4907,15 +4767,9 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	}
 }
 
-void TextureCache::EraseRetired() {
-	std::erase_if(m_retired, [&](const auto& retired) {
-		if (!Spec::PacketsPassed(retired.second)) return false;
-		m_completed_retirement_bytes += m_slot_images[retired.first].info.data.size;
-		TraceResource(m_slot_images[retired.first], "retired", "completion-passed", m_gc_tick);
-		m_slot_images.erase(retired.first);
-		m_erase_epoch.fetch_add(1, std::memory_order_release);
-		return true;
-	});
+void TextureCache::EraseSlot(ImageId id) {
+	m_slot_images.erase(id);
+	m_erase_epoch.fetch_add(1, std::memory_order_release);
 }
 
 // Per flip, whatever the memory use (the collector below runs only near the video memory budget, never on a 32 GB GPU):
@@ -4977,7 +4831,6 @@ void TextureCache::RetireStaleImages(uint64_t tick) {
 }
 
 void TextureCache::RunGarbageCollector() {
-	EraseRetired();
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
 	const auto now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5012,27 +4865,7 @@ void TextureCache::RunGarbageCollector() {
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
-	if (KytyGcLiveBudget() && m_graphics.CanReportMemoryUsage()) {
-		static auto   kyty_budget_window = std::chrono::steady_clock::time_point {};
-		const auto    now                = std::chrono::steady_clock::now();
-		const uint64_t budget            = KytyGcLiveBudgetValue(m_graphics);
-		if (now - kyty_budget_window >= std::chrono::seconds(2)) {
-			kyty_budget_window = now;
-			uint64_t trigger = 0, pressure = 0, critical = 0;
-			KytyTextureGcThresholds(budget, trigger, pressure, critical);
-			const auto moved = [](uint64_t a, uint64_t b) { return (a > b ? a - b : b - a) >= (uint64_t {64} << 20u); };
-			if (moved(trigger, m_trigger_gc_memory)) {
-				std::printf("KYTYGCBUDGET texture budget=%lluMB trigger=%lluMB pressure=%lluMB critical=%lluMB "
-				            "used=%lluMB\n",
-				            static_cast<unsigned long long>(budget >> 20), static_cast<unsigned long long>(trigger >> 20),
-				            static_cast<unsigned long long>(pressure >> 20),
-				            static_cast<unsigned long long>(critical >> 20),
-				            static_cast<unsigned long long>(m_total_used_memory >> 20));
-				std::fflush(stdout);
-			}
-			m_trigger_gc_memory = trigger;
-		}
-	} else if (m_graphics.CanReportMemoryUsage() && !m_graphics.small_video_memory) {
+	if (m_graphics.CanReportMemoryUsage() && !m_graphics.small_video_memory) {
 		// The budget Windows gives now, not the one at start-up: another program's video memory lowers it (a Discord
 		// stream: 15.2 -> 13.9 GB on a 16 GB GPU), and past it Windows moves the game's memory out of video memory
 		// (60 -> 20-30 fps). Its lowest of the last 30 s (KytyGcLiveBudgetValue), less GetTotalMemoryBudget's headroom

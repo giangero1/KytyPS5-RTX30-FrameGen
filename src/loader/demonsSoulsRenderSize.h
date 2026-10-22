@@ -15,11 +15,11 @@ struct Program;
 // lines, and clamps its render height to that output. The display/interface canvas
 // retains its original 3840x2160 size and is composed once before presentation.
 // All original constants below remain unchanged for guest signature matching.
-// Wider aspects (21:9 means 64:27, at most 32:9) use the matching projection. With
-// DLSS, KYTY_WIDE_OUTPUT=0 retains a 16:9 output, squeezed as on the original TAA
-// path; otherwise the SR output matches the requested aspect. The original 4K UI
-// follows the existing ultrawide anchoring path, without reduced-height transforms.
+// Wider aspects (21:9 means 64:27, at most 32:9) use the matching projection.
+// Up to 1080 lines KYTY_HD_OUTPUT adds the game's HD output (1920x1080).
 namespace DemonsSoulsRenderSize {
+// The automatic height (above), or 0: KYTY_RENDER_HEIGHT set to a number, or no window size known.
+[[nodiscard]] uint32_t AutoHeight(bool upscaler);
 void Install(Program* program);
 // Discover and install mode 5's render/output settings before enabling the PS5 Pro path.
 // False means no guest memory was changed; the caller must keep the game's TAA.
@@ -79,9 +79,11 @@ inline constexpr float            FloatWidths[2] {1920.0f, 3840.0f};
 inline constexpr uint32_t ModeWidths[5] {1600, 1920, 2560, 3840, 2688};
 inline constexpr uint32_t ModeHeights[5] {900, 1080, 1440, 2160, 1512};
 inline constexpr int      PerformanceMode = 2, TrinityMode = 4; // (indexes in the tables)
-// The render setup's constructor storing the projection's aspect, 16/9 as a float: mov dword
-// [rbx+4], 0x3fe38e39 (01.007.000 0x90090ae7f, 01.005.000 0x9008ef287; the only such store either
-// build has).
+// The HD output's display mode with another render size than its 1920x1080 (loader/demonsSoulsHdOutput.h): mode 1,
+// whose case loads its 3D size (1600x900) after the 1920x1080 output, as mode 3's after the 4K one.
+inline constexpr int HdUpscaledMode = 0;
+// The render setup's constructor storing the projection's aspect, 16/9 as a float: mov dword [rbx+4], 0x3fe38e39
+// (01.007.000 0x90090ae7f, 01.005.000 0x9008ef287; the only such store either build has).
 inline constexpr std::string_view AspectStore  = "c7 43 04 39 8e e3 3f";
 inline constexpr double           GameAspect   = 16.0 / 9.0;
 inline constexpr double           WidestAspect = 32.0 / 9.0;

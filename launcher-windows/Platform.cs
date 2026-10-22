@@ -1,0 +1,268 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.Win32;
+
+namespace KytyLauncher {
+
+// What the launcher knows about this PC and the emulator's folder, found once at start.
+sealed class LauncherContext {
+	public readonly string Root;          // the folder of run-windows.ps1 (the package, or the source tree)
+	public readonly string EmulatorExe;   // kyty_emulator.exe (in the package, or _Build\windows of the source tree)
+	public readonly string PrecompileTool;
+	public readonly Settings Settings;
+	public readonly long EfficiencyMask;  // the efficiency cores of a hybrid CPU as an affinity mask, or 0
+	public readonly List<GpuInfo> Gpus;
+	public readonly bool RtxGpu;          // DLSS (the upscaler and frame generation) needs an NVIDIA RTX graphics card
+	public readonly ulong RamBytes;
+	public readonly bool FsrAvailable;    // AMD's signed amd_fidelityfx_vk.dll next to the emulator (FSR 3 frame generation)
+	public string Streamline { get; private set; } // NVIDIA's signed Streamline runtime folder, or null
+	public bool FrameGenAvailable { get { return Streamline != null && RtxGpu; } }
+
+	public LauncherContext() {
+		Root = FindRoot();
+		EmulatorExe = File.Exists(Path.Combine(Root, "kyty_emulator.exe")) ? Path.Combine(Root, "kyty_emulator.exe")
+			: Path.Combine(Root, "_Build", "windows", "kyty_emulator.exe");
+		PrecompileTool = new[] { Path.Combine(Root, "kyty_shader_precompile.exe"), Path.Combine(Root, "_Build", "windows", "kyty_shader_precompile.exe") }
+			.FirstOrDefault(File.Exists);
+		Settings = new Settings(Path.Combine(Root, "launcher-settings.json"));
+		var saved = Settings.Str("ui_language");
+		Strings.Language = saved == "zh" ? UiLanguage.Chinese : saved == "en" ? UiLanguage.English : Strings.SystemLanguage();
+		EfficiencyMask = Native.EfficiencyMask();
+		Gpus = GpuInfo.All();
+		RtxGpu = Gpus.Any(g => g.Name.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0 && HasWord(g.Name, "RTX"));
+		RamBytes = Native.TotalRam();
+		Streamline = ResolveStreamline();
+		var fsrDll = Path.Combine(Path.GetDirectoryName(EmulatorExe) ?? Root, "amd_fidelityfx_vk.dll");
+		FsrAvailable = Signature.SignedBy(fsrDll, "Advanced Micro Devices");
+	}
+
+	// The launcher sits next to run-windows.ps1 in a package; in the source tree it is built to _Build\launcher.
+	static string FindRoot() {
+		var start = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
+		for (var dir = new DirectoryInfo(start); dir != null; dir = dir.Parent) {
+			if (File.Exists(Path.Combine(dir.FullName, "run-windows.ps1"))) return dir.FullName;
+		}
+		return start;
+	}
+
+	static bool HasWord(string text, string word) {
+		var at = 0;
+		while ((at = text.IndexOf(word, at, StringComparison.Ordinal)) >= 0) {
+			var before = at == 0 || !char.IsLetterOrDigit(text[at - 1]);
+			var after = at + word.Length >= text.Length || !char.IsLetterOrDigit(text[at + word.Length]);
+			if (before && after) return true;
+			at += word.Length;
+		}
+		return false;
+	}
+
+	// NVIDIA's Streamline runtime (no release ships it): the folder chosen in the launcher, else KYTY_STREAMLINE_DIR, else
+	// a "streamline" folder next to the emulator, else the SDK beside a local build (_Build\deps\streamline\sdk). Only
+	// NVIDIA's own sl.interposer.dll counts (run-windows -StreamlineDir).
+	string ResolveStreamline() {
+		var chosen = Settings.Str("streamline");
+		if (chosen.Length != 0) return FindStreamline(chosen);
+		var environment = Environment.GetEnvironmentVariable("KYTY_STREAMLINE_DIR");
+		if (!string.IsNullOrEmpty(environment)) return FindStreamline(environment);
+		var exeDir = Path.GetDirectoryName(EmulatorExe) ?? Root;
+		var candidates = new List<string> { Path.Combine(exeDir, "streamline") };
+		var parent = Path.GetDirectoryName(exeDir);
+		if (parent != null) candidates.Add(Path.Combine(parent, "deps", "streamline", "sdk"));
+		foreach (var dir in candidates) {
+			var found = FindStreamline(dir);
+			if (found != null) return found;
+		}
+		return null;
+	}
+
+	// The runtime's folder in `dir` (the folder itself or its bin\x64) when its sl.interposer.dll is signed by NVIDIA.
+	public static string FindStreamline(string dir) {
+		if (string.IsNullOrEmpty(dir)) return null;
+		foreach (var folder in new[] { dir, Path.Combine(dir, "bin", "x64") }) {
+			var file = Path.Combine(folder, "sl.interposer.dll");
+			if (File.Exists(file)) return Signature.SignedBy(file, "NVIDIA Corporation") ? folder : null;
+		}
+		return null;
+	}
+
+	public bool UseStreamlineFolder(string dir) {
+		var found = FindStreamline(dir);
+		if (found == null) return false;
+		Settings.Set("streamline", dir);
+		Streamline = found;
+		return true;
+	}
+
+	public string LogsFolder() {
+		return Directory.Exists(Path.Combine(Root, "_Build")) ? Path.Combine(Root, "_Build", "run-logs") : Path.Combine(Root, "logs");
+	}
+
+	public string Readme() {
+		return new[] { Path.Combine(Root, "README.md"), Path.Combine(Root, "docs", "PORTABLE-README.md") }.FirstOrDefault(File.Exists);
+	}
+}
+
+sealed class GpuInfo {
+	public string Name;
+	public ulong Memory; // bytes of its own video memory, 0 when unknown
+
+	// The display adapters Windows lists (their driver's description and dedicated memory), largest memory first.
+	public static List<GpuInfo> All() {
+		var list = new List<GpuInfo>();
+		const string ClassKey = @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+		try {
+			using (var display = Registry.LocalMachine.OpenSubKey(ClassKey)) {
+				if (display == null) return list;
+				foreach (var name in display.GetSubKeyNames()) {
+					try {
+						using (var adapter = display.OpenSubKey(name)) {
+							var desc = adapter == null ? null : adapter.GetValue("DriverDesc") as string;
+							if (string.IsNullOrEmpty(desc)) continue;
+							ulong memory = 0;
+							var q = adapter.GetValue("HardwareInformation.qwMemorySize");
+							if (q is long) memory = (ulong)(long)q;
+							else if (q is byte[] && ((byte[])q).Length >= 8) memory = BitConverter.ToUInt64((byte[])q, 0);
+							if (memory == 0) {
+								var d = adapter.GetValue("HardwareInformation.MemorySize");
+								if (d is int) memory = (uint)(int)d;
+								else if (d is byte[] && ((byte[])d).Length >= 4) memory = BitConverter.ToUInt32((byte[])d, 0);
+							}
+							if (list.Any(g => g.Name == desc)) continue;
+							list.Add(new GpuInfo { Name = desc, Memory = memory });
+						}
+					} catch (Exception) {
+						// (Keys without access, such as "Properties".)
+					}
+				}
+			}
+		} catch (Exception) {
+		}
+		return list.OrderByDescending(g => g.Memory).ToList();
+	}
+}
+
+static class Signature {
+	// Whether `file` has a valid Authenticode signature whose signer is organization `organization` (O=...).
+	public static bool SignedBy(string file, string organization) {
+		if (!File.Exists(file)) return false;
+		try {
+			var signer = X509Certificate.CreateFromSignedFile(file);
+			if (signer.Subject.IndexOf("O=" + organization, StringComparison.OrdinalIgnoreCase) < 0) return false;
+		} catch (Exception) {
+			return false;
+		}
+		return Verify(file);
+	}
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct FileInfo {
+		public uint cbStruct;
+		public string pcwszFilePath;
+		public IntPtr hFile;
+		public IntPtr pgKnownSubject;
+	}
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct TrustData {
+		public uint cbStruct;
+		public IntPtr pPolicyCallbackData;
+		public IntPtr pSIPClientData;
+		public uint dwUIChoice;
+		public uint fdwRevocationChecks;
+		public uint dwUnionChoice;
+		public IntPtr pFile;
+		public uint dwStateAction;
+		public IntPtr hWVTStateData;
+		public IntPtr pwszURLReference;
+		public uint dwProvFlags;
+		public uint dwUIContext;
+		public IntPtr pSignatureSettings;
+	}
+
+	[DllImport("wintrust.dll", CharSet = CharSet.Unicode)]
+	static extern int WinVerifyTrust(IntPtr hwnd, ref Guid action, ref TrustData data);
+
+	// WinVerifyTrust (what Get-AuthenticodeSignature's "Valid" means), offline: no revocation lookup.
+	static bool Verify(string file) {
+		var action = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE"); // WINTRUST_ACTION_GENERIC_VERIFY_V2
+		var info = new FileInfo { cbStruct = (uint)Marshal.SizeOf(typeof(FileInfo)), pcwszFilePath = file };
+		var infoPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(FileInfo)));
+		try {
+			Marshal.StructureToPtr(info, infoPointer, false);
+			var data = new TrustData {
+				cbStruct = (uint)Marshal.SizeOf(typeof(TrustData)),
+				dwUIChoice = 2,             // WTD_UI_NONE
+				fdwRevocationChecks = 0,    // WTD_REVOKE_NONE
+				dwUnionChoice = 1,          // WTD_CHOICE_FILE
+				pFile = infoPointer,
+				dwStateAction = 1,          // WTD_STATEACTION_VERIFY
+				dwProvFlags = 0x10 | 0x1000 // WTD_REVOCATION_CHECK_NONE | WTD_CACHE_ONLY_URL_RETRIEVAL
+			};
+			var result = WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+			data.dwStateAction = 2; // WTD_STATEACTION_CLOSE
+			WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+			return result == 0;
+		} catch (Exception) {
+			return false;
+		} finally {
+			Marshal.DestroyStructure(infoPointer, typeof(FileInfo));
+			Marshal.FreeHGlobal(infoPointer);
+		}
+	}
+}
+
+static class Native {
+	[StructLayout(LayoutKind.Sequential)]
+	struct MemoryStatus {
+		public uint dwLength;
+		public uint dwMemoryLoad;
+		public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+	}
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
+
+	public static ulong TotalRam() {
+		var status = new MemoryStatus { dwLength = (uint)Marshal.SizeOf(typeof(MemoryStatus)) };
+		return GlobalMemoryStatusEx(ref status) ? status.ullTotalPhys : 0;
+	}
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	static extern bool GetSystemCpuSetInformation(IntPtr information, uint length, out uint returned, IntPtr process, uint flags);
+
+	// The efficiency cores (the lowest efficiency class of a hybrid CPU, processor group 0) as an affinity mask, or 0 on a
+	// CPU of one kind of core (launcher.ps1's Get-EfficiencyMask).
+	public static long EfficiencyMask() {
+		try {
+			uint length;
+			GetSystemCpuSetInformation(IntPtr.Zero, 0, out length, IntPtr.Zero, 0);
+			if (length == 0) return 0;
+			var buffer = Marshal.AllocHGlobal((int)length);
+			var sets = new List<KeyValuePair<int, int>>(); // (logical processor, efficiency class)
+			try {
+				if (!GetSystemCpuSetInformation(buffer, length, out length, IntPtr.Zero, 0)) return 0;
+				for (int offset = 0; offset < length; offset += Marshal.ReadInt32(buffer, offset)) {
+					if (Marshal.ReadInt32(buffer, offset + 4) != 0 || Marshal.ReadInt16(buffer, offset + 12) != 0) continue;
+					sets.Add(new KeyValuePair<int, int>(Marshal.ReadByte(buffer, offset + 14), Marshal.ReadByte(buffer, offset + 18)));
+					if (Marshal.ReadInt32(buffer, offset) <= 0) break;
+				}
+			} finally {
+				Marshal.FreeHGlobal(buffer);
+			}
+			if (sets.Select(s => s.Value).Distinct().Count() < 2) return 0;
+			var slowest = sets.Min(s => s.Value);
+			long mask = 0;
+			foreach (var set in sets.Where(s => s.Value == slowest && s.Key < 63)) mask |= 1L << set.Key;
+			return mask;
+		} catch (Exception) {
+			return 0;
+		}
+	}
+}
+
+}

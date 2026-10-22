@@ -1,4 +1,4 @@
-param([string]$Label = 'run', [int]$Rounds = 3, [string]$Exe = '', [switch]$NoAot, [string[]]$Extra = @(),
+param([string]$Label = 'run', [int]$Rounds = 3, [string]$Exe = '', [string[]]$Extra = @(),
       [switch]$KeepRunning, [string]$PresentMode = '', [int]$Vblank = 0, [string[]]$Set = @(),
       [string]$Patch = '', [switch]$Fullscreen, [switch]$Hdr, [switch]$ShotOnly, [switch]$NoWalk,
       [int]$StartupSeconds = 100, [int]$StartupAttempts = 3, [switch]$NoPrecompile, [string]$Config = '',
@@ -8,11 +8,11 @@ param([string]$Label = 'run', [int]$Rounds = 3, [string]$Exe = '', [switch]$NoAo
 $S = $PSScriptRoot
 $root = (Resolve-Path "$PSScriptRoot\..\..\..").Path
 Set-Location $root
+# Screenshots and the start-up states go to _Build\bench.
+$out = "$root\_Build\bench"
+New-Item -ItemType Directory -Force $out | Out-Null
 function Key([string]$key, [int]$ms = 250) { powershell -NoProfile -File "$S\key.ps1" -Key $key -HoldMs $ms | Out-Null }
-function Shot([string]$name) { powershell -NoProfile -File "$S\screen.ps1" -Out "$S\$name" -Scale 0.25 | Out-Null; "$S\$name" }
-# The game image alone, 640x360 (screen.ps1 -Client): positions below are in that image, whatever
-# the display's resolution or the window's place.
-function ClientShot([string]$name) { powershell -NoProfile -File "$S\screen.ps1" -Out "$S\$name" -Client | Out-Null; "$S\$name" }
+function Shot([string]$name) { powershell -NoProfile -File "$S\screen.ps1" -Out "$out\$name" -Scale 0.25 | Out-Null; "$out\$name" }
 Add-Type -AssemblyName System.Drawing
 # In-process capture and input for the start-up loop: a PowerShell process per screenshot or key
 # (compiling its helper each time) took seconds, so cinematics played long before a skip.
@@ -45,7 +45,8 @@ public class BenchWin {
     i[0].ki.dwFlags = 8u | (up ? 2u : 0u);
     SendInput(1, i, Marshal.SizeOf(typeof(INPUT)));
   }
-  // The client area (the game image) scaled to 640x360, or null.
+  // The client area (the game image) scaled to 640x360, or null: State's positions are in that image, whatever the
+  // display's resolution or the window's place.
   public static Bitmap Client(IntPtr h) {
     RECT r; POINT o = new POINT();
     if (!GetClientRect(h, out r) || !ClientToScreen(h, ref o) || r.Right <= 0 || r.Bottom <= 0) return null;
@@ -131,7 +132,6 @@ python tools\local\bench-windows.py reset
 if ($LASTEXITCODE -ne 0) { 'baseline save not installed: run python tools\local\bench-windows.py prepare'; exit 1 }
 $params = @{}
 if ($Exe) { $params['Exe'] = $Exe }
-if ($NoAot) { $params['NoAot'] = $true }
 if ($PresentMode) { $params['PresentMode'] = $PresentMode }
 if ($Vblank -gt 0) { $params['Vblank'] = $Vblank }
 if ($Set.Count) { $params['Set'] = $Set }
@@ -218,7 +218,7 @@ while (((Get-Date) - $start).TotalSeconds -lt $StartupSeconds) {
 	}
 	Start-Sleep -Milliseconds 500
 }
-$log | Set-Content "$S\bench-states.txt" -Encoding ascii
+$log | Set-Content "$out\bench-states.txt" -Encoding ascii
 if ($state -eq 'hud') { break }
 "no HUD after $StartupSeconds s (attempt $attempt, last state $state, window not in front $($script:unfocused)x; states: $($log -join ' | '))"
 }
@@ -227,7 +227,7 @@ if ($state -ne 'hud') { "no HUD in $StartupAttempts start-ups"; exit 1 }
 Start-Sleep 10
 if (!$NoWalk) { Key w 10000; Start-Sleep 10 }
 Shot 'scene.png' | Out-Null
-if ($ShotOnly) { powershell -NoProfile -File "$S\screen.ps1" -Out "$S\scene-$Label.png" -Scale 0.25 | Out-Null; "screenshot: $S\scene-$Label.png"; if (!$KeepRunning) { Stop-Process -Name kyty_emulator -Force -ErrorAction SilentlyContinue }; return }
+if ($ShotOnly) { powershell -NoProfile -File "$S\screen.ps1" -Out "$out\scene-$Label.png" -Scale 0.25 | Out-Null; "screenshot: $out\scene-$Label.png"; if (!$KeepRunning) { Stop-Process -Name kyty_emulator -Force -ErrorAction SilentlyContinue }; return }
 $commands = (1..$Rounds | ForEach-Object { "measure 20 $Label-$_" }) -join ' ; '
 python tools\local\bench-windows.py live $commands | Select-String 'LIVE_MEASURE' | ForEach-Object { $_.Line }
 if (!$KeepRunning) { Stop-Process -Name kyty_emulator -Force -ErrorAction SilentlyContinue }

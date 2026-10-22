@@ -1,0 +1,890 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+
+namespace KytyLauncher {
+
+// An item of a combo box: what it shows and the value it stands for.
+sealed class Choice {
+	public readonly string Label;
+	public readonly object Value;
+
+	public Choice(string label, object value) {
+		Label = label;
+		Value = value;
+	}
+
+	public override string ToString() {
+		return Label;
+	}
+}
+
+partial class MainWindow : Window {
+	// The window's sizes for each aspect ratio of the 3D.
+	static readonly Dictionary<string, string[]> ResolutionsByRatio = new Dictionary<string, string[]> {
+		{ "16:9", new[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" } },
+		{ "21:9", new[] { "2560x1080", "3440x1440", "3840x1600", "5120x2160" } },
+		{ "32:9", new[] { "3840x1080", "5120x1440", "7680x2160" } },
+	};
+	// The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
+	static readonly int[] RenderHeights = { 2160, 1800, 1620, 1512, 1440, 1296, 1152, 1080, 900 };
+
+	// (--screenshot pictures: no game art, another path shown.)
+	public static bool ScreenshotNoArt;
+	public static string ScreenshotPath;
+
+	readonly LauncherContext context;
+	readonly Commands commands;
+	readonly List<FrameworkElement> pages = new List<FrameworkElement>();
+	readonly DispatcherTimer gameTimer;
+	GameInfo game = new GameInfo();
+	StoreState storeState = StoreState.Unknown;
+	Task<StoreState> storeTask;
+	DateTime storeCheckedAt = DateTime.MinValue;
+	bool building;      // the controls are being made: their events change nothing
+	bool fillingRender; // the render heights are being listed: a selection is not a choice
+	bool renderForDlss; // the render height row is DLSS's (settings render_dlss) or the game's TAA's (render)
+	int renderWanted;   // the height last chosen for the upscaler shown
+	int pageIndex;
+
+	TextBox gamePath;
+	ComboBox resolution, ratio, render, upscaler, output, quality, frameGen, language, hud, uiLanguage;
+	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores;
+	TextBlock renderNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
+	Image banner;
+	Border bannerFallback;
+	StackPanel checkList;
+	Grid currentSettings;
+
+	Settings S { get { return context.Settings; } }
+
+	static string T(string key) {
+		return Strings.T(key);
+	}
+
+	static string F(string key, params object[] values) {
+		return Strings.F(key, values);
+	}
+
+	public MainWindow(LauncherContext context) {
+		InitializeComponent();
+		this.context = context;
+		commands = new Commands(context);
+		gameTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+		gameTimer.Tick += (s, e) => {
+			gameTimer.Stop();
+			LoadGame(gamePath.Text.Trim());
+		};
+		Nav.SelectionChanged += (s, e) => ShowPage(Nav.SelectedIndex);
+		PlayButton.Click += (s, e) => Play();
+		PrecompileButton.Click += (s, e) => Precompile("");
+		Activated += (s, e) => CheckStore(false);
+		Closing += (s, e) => ReadForm();
+		// (A small screen: the window fits its work area.)
+		var area = SystemParameters.WorkArea;
+		if (Height > area.Height - 16) Height = Math.Max(MinHeight, area.Height - 16);
+		if (Width > area.Width - 16) Width = Math.Max(MinWidth, area.Width - 16);
+		Build();
+	}
+
+	T2 Res<T2>(string key) where T2 : class {
+		return FindResource(key) as T2;
+	}
+
+	// ------------------------------------------------------------------ building the window
+
+	void Build() {
+		building = true;
+		AppSubtitle.Text = T("app.subtitle");
+		NavHint.Text = T("nav.hint");
+		PlayButton.Content = T("button.play");
+		PrecompileButton.Content = T("button.precompile");
+		pages.Clear();
+		PageHost.Children.Clear();
+		Nav.Items.Clear();
+		renderForDlss = context.FrameGenAvailable && S.Str("upscaler") == "dlss";
+		renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
+		AddPage("nav.play", BuildPlayPage());
+		AddPage("nav.display", BuildDisplayPage());
+		AddPage("nav.graphics", BuildGraphicsPage());
+		AddPage("nav.game", BuildGamePage());
+		AddPage("nav.shaders", BuildShadersPage());
+		AddPage("nav.advanced", BuildAdvancedPage());
+		building = false;
+		Nav.SelectedIndex = Math.Max(0, Math.Min(pageIndex, pages.Count - 1));
+		ShowPage(Nav.SelectedIndex);
+		LoadGame(S.Str("game"));
+		UpdateSummary();
+	}
+
+	void AddPage(string navKey, FrameworkElement page) {
+		// (Text, not a TextBlock: an element item takes its color from the list, not from its item.)
+		Nav.Items.Add(T(navKey));
+		page.Visibility = Visibility.Collapsed;
+		pages.Add(page);
+		PageHost.Children.Add(page);
+	}
+
+	void ShowPage(int index) {
+		if (index < 0) return;
+		pageIndex = index;
+		for (int i = 0; i < pages.Count; i++) pages[i].Visibility = i == index ? Visibility.Visible : Visibility.Collapsed;
+	}
+
+	FrameworkElement Page(string titleKey, params UIElement[] content) {
+		var stack = new StackPanel { Margin = new Thickness(44, 32, 44, 40), MaxWidth = 880, HorizontalAlignment = HorizontalAlignment.Left };
+		if (titleKey != null) stack.Children.Add(new TextBlock { Text = T(titleKey), Style = Res<Style>("PageTitle") });
+		foreach (var element in content) stack.Children.Add(element);
+		return new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false };
+	}
+
+	TextBlock Section(string key) {
+		return new TextBlock { Text = T(key), Style = Res<Style>("SectionTitle") };
+	}
+
+	TextBlock Desc(string text) {
+		return new TextBlock { Text = text, Style = Res<Style>("Desc") };
+	}
+
+	// A setting: its name on the left, the control and what it does on the right.
+	FrameworkElement Row(string labelKey, FrameworkElement control, TextBlock desc = null) {
+		var grid = new Grid { Margin = new Thickness(0, 7, 0, 9) };
+		grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(232) });
+		grid.ColumnDefinitions.Add(new ColumnDefinition());
+		grid.Children.Add(new TextBlock { Text = labelKey == null ? "" : T(labelKey), Style = Res<Style>("RowLabel") });
+		var right = new StackPanel();
+		right.Children.Add(control);
+		if (desc != null) right.Children.Add(desc);
+		Grid.SetColumn(right, 1);
+		grid.Children.Add(right);
+		return grid;
+	}
+
+	CheckBox Switch(bool value, bool enabled = true) {
+		var box = new CheckBox { IsChecked = value, IsEnabled = enabled, Style = Res<Style>("Switch") };
+		box.Checked += (s, e) => Changed();
+		box.Unchecked += (s, e) => Changed();
+		return box;
+	}
+
+	ComboBox Combo(IEnumerable<Choice> items, int selected, double width = 300) {
+		var box = new ComboBox { Width = width };
+		foreach (var item in items) box.Items.Add(item);
+		box.SelectedIndex = Math.Max(0, Math.Min(selected, box.Items.Count - 1));
+		box.SelectionChanged += (s, e) => Changed();
+		return box;
+	}
+
+	Button FlatButton(string key, RoutedEventHandler click) {
+		var button = new Button { Content = T(key), Style = Res<Style>("FlatButton"), HorizontalAlignment = HorizontalAlignment.Left };
+		button.Click += click;
+		return button;
+	}
+
+	static object Value(ComboBox box) {
+		var choice = box.SelectedItem as Choice;
+		return choice == null ? null : choice.Value;
+	}
+
+	static StackPanel Horizontal(params UIElement[] children) {
+		var panel = new StackPanel { Orientation = Orientation.Horizontal };
+		foreach (var child in children) panel.Children.Add(child);
+		return panel;
+	}
+
+	string Paren(string a, string b) {
+		return Strings.Language == UiLanguage.Chinese ? a + "（" + b + "）" : a + " (" + b + ")";
+	}
+
+	// ------------------------------------------------------------------ Play
+
+	FrameworkElement BuildPlayPage() {
+		// The game's own art from its dump (sce_sys\pic0.png), under a fade into the window; a plain gradient without one.
+		var bannerGrid = new Grid { Height = 270, ClipToBounds = true };
+		bannerFallback = new Border { Background = new LinearGradientBrush(Color.FromRgb(0x2A, 0x22, 0x18), Color.FromRgb(0x10, 0x10, 0x12), 35) };
+		bannerGrid.Children.Add(bannerFallback);
+		banner = new Image { Stretch = Stretch.UniformToFill, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+		RenderOptions.SetBitmapScalingMode(banner, BitmapScalingMode.HighQuality);
+		bannerGrid.Children.Add(banner);
+		var fade = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
+		fade.GradientStops.Add(new GradientStop(Color.FromArgb(0x20, 0x10, 0x10, 0x12), 0));
+		fade.GradientStops.Add(new GradientStop(Color.FromArgb(0x60, 0x10, 0x10, 0x12), 0.55));
+		fade.GradientStops.Add(new GradientStop(Color.FromArgb(0xFF, 0x10, 0x10, 0x12), 1));
+		bannerGrid.Children.Add(new Border { Background = fade });
+		var side = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 0) };
+		side.GradientStops.Add(new GradientStop(Color.FromArgb(0xB0, 0x10, 0x10, 0x12), 0));
+		side.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0x10, 0x10, 0x12), 0.6));
+		bannerGrid.Children.Add(new Border { Background = side });
+		var titles = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(44, 0, 44, 22) };
+		bannerTitle = new TextBlock { FontFamily = Res<FontFamily>("SerifFont"), FontSize = 34, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap };
+		bannerLine = new TextBlock { FontSize = 13, Foreground = Res<Brush>("TextDimBrush"), Margin = new Thickness(2, 6, 0, 0) };
+		titles.Children.Add(bannerTitle);
+		titles.Children.Add(bannerLine);
+		bannerGrid.Children.Add(titles);
+
+		// Checks on the left; the game and the current settings on the right.
+		var columns = new Grid { Margin = new Thickness(44, 22, 44, 32) };
+		columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+		columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+		columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
+
+		checkList = new StackPanel();
+		var checksCard = new Border { Style = Res<Style>("Card"), VerticalAlignment = VerticalAlignment.Top };
+		checksCard.Child = Stack(new TextBlock { Text = T("play.checks"), Style = Res<Style>("SectionTitle"), Margin = new Thickness(0, 0, 0, 10) }, checkList);
+		columns.Children.Add(checksCard);
+
+		gamePath = new TextBox { Text = S.Str("game"), Margin = new Thickness(0, 0, 0, 8) };
+		gamePath.TextChanged += (s, e) => {
+			if (building) return;
+			gameTimer.Stop();
+			gameTimer.Start();
+		};
+		var browse = FlatButton("button.folder", (s, e) => BrowseGame());
+		var browseZar = FlatButton("button.zar", (s, e) => BrowseZar());
+		browseZar.Margin = new Thickness(8, 0, 0, 0);
+		var gameCard = new Border { Style = Res<Style>("Card") };
+		gameCard.Child = Stack(new TextBlock { Text = T("play.gamebox"), Style = Res<Style>("SectionTitle"), Margin = new Thickness(0, 0, 0, 10) },
+			gamePath, Horizontal(browse, browseZar));
+		currentSettings = new Grid();
+		currentSettings.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+		currentSettings.ColumnDefinitions.Add(new ColumnDefinition());
+		var settingsCard = new Border { Style = Res<Style>("Card"), Margin = new Thickness(0, 16, 0, 0) };
+		settingsCard.Child = Stack(new TextBlock { Text = T("play.summary"), Style = Res<Style>("SectionTitle"), Margin = new Thickness(0, 0, 0, 8) },
+			currentSettings);
+		var right = Stack(gameCard, settingsCard);
+		Grid.SetColumn(right, 2);
+		columns.Children.Add(right);
+
+		var stack = new StackPanel();
+		stack.Children.Add(bannerGrid);
+		stack.Children.Add(columns);
+		return new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false };
+	}
+
+	static StackPanel Stack(params UIElement[] children) {
+		var panel = new StackPanel();
+		foreach (var child in children) panel.Children.Add(child);
+		return panel;
+	}
+
+	void BrowseGame() {
+		var current = gamePath.Text.Trim();
+		var chosen = FolderPicker.Pick(this, T("dialog.game"), Directory.Exists(current) ? current : null);
+		if (chosen != null) gamePath.Text = chosen;
+	}
+
+	void BrowseZar() {
+		var current = gamePath.Text.Trim();
+		var dialog = new Microsoft.Win32.OpenFileDialog { Title = T("dialog.zar"), Filter = "ZArchive (*.zar)|*.zar" };
+		if (File.Exists(current)) dialog.InitialDirectory = Path.GetDirectoryName(current);
+		if (dialog.ShowDialog(this) == true) gamePath.Text = dialog.FileName;
+	}
+
+	// The game at `path`: its name, art and checks (a .zar's param.json comes from the precompile program, off this thread).
+	void LoadGame(string path) {
+		if (!building && path != S.Str("game")) Changed();
+		var zar = path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
+		if (!zar) {
+			ApplyGame(GameInfo.Read(path, context.PrecompileTool, context.Root));
+			return;
+		}
+		ApplyGame(new GameInfo { Path = path });
+		var tool = context.PrecompileTool;
+		Task.Run(() => GameInfo.Read(path, tool, context.Root)).ContinueWith(task => Dispatcher.BeginInvoke(new Action(() => {
+			if (gamePath.Text.Trim() == path) ApplyGame(task.Result);
+		})));
+	}
+
+	void ApplyGame(GameInfo info) {
+		game = info;
+		GameTitle.Text = info.Found ? (info.Name.Length != 0 ? info.Name : info.TitleId) : "";
+		bannerTitle.Text = info.Found ? (info.Name.Length != 0 ? info.Name : info.TitleId) : T("play.choose");
+		bannerLine.Text = info.Found ? info.TitleId + "  ·  " + info.Version : "";
+		banner.Source = null;
+		if (info.Picture != null && !ScreenshotNoArt) {
+			try {
+				var image = new BitmapImage();
+				image.BeginInit();
+				image.CacheOption = BitmapCacheOption.OnLoad; // (the file stays free)
+				image.DecodePixelWidth = 1920;
+				image.UriSource = new Uri(info.Picture);
+				image.EndInit();
+				image.Freeze();
+				banner.Source = image;
+			} catch (Exception) {
+			}
+		}
+		UpdateCheatState();
+		storeTask = null;
+		CheckStore(true);
+	}
+
+	// The precompiled shaders' state, asked of the precompile program (at most every 30 s: also when the window comes back
+	// to the front after a precompile).
+	void CheckStore(bool force) {
+		if (!game.Found) {
+			storeState = StoreState.Unknown;
+			UpdateChecks();
+			return;
+		}
+		if (!force && (storeTask != null && !storeTask.IsCompleted || (DateTime.Now - storeCheckedAt).TotalSeconds < 30)) return;
+		storeCheckedAt = DateTime.Now;
+		if (storeTask == null) storeState = StoreState.Checking;
+		UpdateChecks();
+		var checkedGame = game;
+		var task = ShaderStore.CheckAsync(context, checkedGame);
+		storeTask = task;
+		task.ContinueWith(t => Dispatcher.BeginInvoke(new Action(() => {
+			if (game != checkedGame || storeTask != task) return;
+			storeState = t.Result;
+			UpdateChecks();
+		})));
+	}
+
+	enum Mark { Good, Warn, Bad, Busy }
+
+	void AddCheck(Mark mark, string text) {
+		var symbol = mark == Mark.Good ? "✓" : mark == Mark.Warn ? "!" : mark == Mark.Bad ? "✕" : "…";
+		var brush = mark == Mark.Good ? Res<Brush>("GoodBrush") : mark == Mark.Warn ? Res<Brush>("WarnBrush")
+			: mark == Mark.Bad ? Res<Brush>("BadBrush") : Res<Brush>("TextDimBrush");
+		var row = new DockPanel { Margin = new Thickness(0, 4, 0, 6) };
+		var icon = new TextBlock { Text = symbol, Foreground = brush, FontWeight = FontWeights.Bold, Width = 22, FontSize = 14 };
+		DockPanel.SetDock(icon, Dock.Left);
+		row.Children.Add(icon);
+		row.Children.Add(new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Res<Brush>("TextBrush"), LineHeight = 18 });
+		checkList.Children.Add(row);
+	}
+
+	void UpdateChecks() {
+		if (checkList == null) return;
+		checkList.Children.Clear();
+		var path = gamePath == null ? S.Str("game") : gamePath.Text.Trim();
+		if (game.Found) AddCheck(Mark.Good, F("game.ok", game.Name.Length != 0 ? game.Name : game.TitleId, game.TitleId, game.Version));
+		else AddCheck(Mark.Bad, T(path.Length == 0 ? "game.none" : "game.bad"));
+		var gpu = context.Gpus.FirstOrDefault();
+		if (gpu == null) AddCheck(Mark.Warn, T("gpu.none"));
+		else if (gpu.Memory > 0) AddCheck(Mark.Good, F("gpu.ok", gpu.Name, Math.Round(gpu.Memory / 1073741824.0)));
+		else AddCheck(Mark.Good, F("gpu.okNoMemory", gpu.Name));
+		var ramGb = Math.Round(context.RamBytes / 1073741824.0);
+		AddCheck(ramGb <= 20 ? Mark.Warn : Mark.Good, F(ramGb <= 20 ? "ram.low" : "ram.ok", ramGb));
+		Mark storeMark;
+		var storeText = StoreStatus(out storeMark);
+		if (storeText != null) AddCheck(storeMark, storeText);
+		if (context.FrameGenAvailable) AddCheck(Mark.Good, T("dlss.ok"));
+		else AddCheck(Mark.Busy, T(context.RtxGpu ? "dlss.noStreamline" : "dlss.noRtx"));
+		AddCheck(context.FsrAvailable ? Mark.Good : Mark.Busy, T(context.FsrAvailable ? "fsr.ok" : "fsr.none"));
+		if (storeLine != null) storeLine.Text = storeText ?? T("cheats.noGame");
+	}
+
+	// The precompiled shaders' line, or null without a game.
+	string StoreStatus(out Mark mark) {
+		mark = Mark.Busy;
+		switch (storeState) {
+			case StoreState.Checking: return T("shaders.checking");
+			case StoreState.Current: mark = Mark.Good; return T("shaders.current");
+			case StoreState.Outdated: mark = Mark.Warn; return T("shaders.outdated");
+			case StoreState.None: mark = Mark.Warn; return T("shaders.none");
+			default: return game.Found ? T("shaders.unknown") : null;
+		}
+	}
+
+	// ------------------------------------------------------------------ Display
+
+	FrameworkElement BuildDisplayPage() {
+		var ratioValue = S.Str("ratio");
+		var ratios = new[] { new Choice(T("ratio.169"), "16:9"), new Choice("21:9", "21:9"), new Choice("32:9", "32:9") };
+		ratio = Combo(ratios, Math.Max(0, Array.FindIndex(ratios, c => (string)c.Value == ratioValue)));
+		resolution = new ComboBox();
+		resolution.SelectionChanged += (s, e) => Changed();
+		UpdateResolutions(S.Str("resolution"));
+		ratio.SelectionChanged += (s, e) => {
+			if (building) return;
+			UpdateResolutions(Value(resolution) as string ?? S.Str("resolution"));
+			SelectRenderHeight();
+			UpdateRenderNote();
+		};
+		fullscreen = Switch(S.Bool("fullscreen"));
+		aspect = Switch(S.Bool("aspect"), S.Bool("fullscreen"));
+		fullscreen.Checked += (s, e) => aspect.IsEnabled = true;
+		fullscreen.Unchecked += (s, e) => aspect.IsEnabled = false;
+		hdr = Switch(S.Bool("hdr"));
+		fps120 = Switch(S.Bool("fps120"));
+		vsync = Switch(S.Bool("vsync"));
+		lowLatency = Switch(S.Bool("lowlatency"));
+		return Page("display.title",
+			Section("display.window"),
+			Row("resolution", resolution, Desc(T("resolution.desc"))),
+			Row("ratio", ratio, Desc(T("ratio.desc"))),
+			Row("fullscreen", fullscreen),
+			Row("aspect", aspect, Desc(T("aspect.desc"))),
+			Row("hdr", hdr, Desc(T("hdr.desc"))),
+			Section("display.rate"),
+			Row("fps120", fps120, Desc(T("fps120.desc"))),
+			Row("vsync", vsync, Desc(T("vsync.desc"))),
+			Row("lowlatency", lowLatency, Desc(T("lowlatency.desc"))));
+	}
+
+	string Ratio() {
+		return ratio == null ? S.Str("ratio") : Value(ratio) as string ?? "16:9";
+	}
+
+	double RatioAspect() {
+		switch (Ratio()) {
+			case "21:9": return 64.0 / 27.0;
+			case "32:9": return 32.0 / 9.0;
+			default: return 16.0 / 9.0;
+		}
+	}
+
+	// The ratio's resolutions; `wanted` kept when it is one of them, else the one nearest its height.
+	void UpdateResolutions(string wanted) {
+		string[] list;
+		if (!ResolutionsByRatio.TryGetValue(Ratio(), out list)) list = ResolutionsByRatio["16:9"];
+		var was = building;
+		building = true;
+		resolution.Items.Clear();
+		foreach (var item in list) resolution.Items.Add(new Choice(item.Replace("x", " × "), item));
+		int height;
+		var parts = (wanted ?? "").Split('x');
+		if (parts.Length < 2 || !int.TryParse(parts[1], out height)) height = 1440;
+		var index = Array.IndexOf(list, wanted);
+		if (index < 0) {
+			var best = int.MaxValue;
+			for (int i = 0; i < list.Length; i++) {
+				var distance = Math.Abs(int.Parse(list[i].Split('x')[1]) - height);
+				if (distance < best) {
+					best = distance;
+					index = i;
+				}
+			}
+		}
+		resolution.SelectedIndex = index;
+		building = was;
+		if (!building) Changed();
+	}
+
+	// ------------------------------------------------------------------ Graphics
+
+	FrameworkElement BuildGraphicsPage() {
+		upscaler = Combo(new[] { new Choice(T("upscaler.game"), ""), new Choice(T("upscaler.dlss"), "dlss") }, renderForDlss ? 1 : 0);
+		upscaler.IsEnabled = context.FrameGenAvailable;
+		upscalerNote = Desc("");
+		render = new ComboBox();
+		renderNote = Desc("");
+		render.SelectionChanged += (s, e) => {
+			if (!fillingRender && render.SelectedItem != null) renderWanted = (int)Value(render);
+			UpdateRenderNote();
+			Changed();
+		};
+		output = Combo(new[] { new Choice(T("output.4k"), "4k"), new Choice(T("output.1080"), "1080p") }, S.Str("output") == "1080p" ? 1 : 0);
+		output.IsEnabled = !renderForDlss;
+		output.SelectionChanged += (s, e) => UpdateRenderNote();
+		upscaler.SelectionChanged += (s, e) => {
+			if (building) return;
+			// The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
+			S.Set(renderForDlss ? "render_dlss" : "render", renderWanted);
+			renderForDlss = upscaler.SelectedIndex == 1;
+			renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
+			output.IsEnabled = !renderForDlss;
+			SelectRenderHeight();
+			UpdateRenderNote();
+			Changed();
+		};
+		SelectRenderHeight();
+		UpdateRenderNote();
+		UpdateUpscalerNote();
+
+		var qualityValue = S.Str("quality").ToLowerInvariant();
+		var qualities = new[] { new Choice(T("quality.standard"), "standard"), new Choice(T("quality.low"), "low"), new Choice(T("quality.lowest"), "lowest") };
+		quality = Combo(qualities, Math.Max(0, Array.FindIndex(qualities, c => (string)c.Value == qualityValue)));
+
+		var gens = new List<Choice> { new Choice(T("framegen.off"), 0) };
+		for (int x = 2; x <= 6; x++) gens.Add(new Choice(x + "x", x));
+		var genValue = S.Int("framegen");
+		frameGen = Combo(gens, context.FrameGenAvailable && genValue >= 2 ? genValue - 1 : 0, 160);
+		frameGen.IsEnabled = context.FrameGenAvailable;
+		frameGenNote = Desc("");
+		UpdateFrameGenNote();
+		var chooseStreamline = FlatButton("button.streamline", (s, e) => ChooseStreamline());
+		streamlineText = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center,
+			Margin = new Thickness(12, 0, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 380 };
+		streamlineText.Text = context.Streamline ?? (S.Str("streamline").Length != 0 ? S.Str("streamline") : T("streamline.none"));
+		fsr = Switch(context.FsrAvailable && S.Bool("fsr"), context.FsrAvailable);
+		return Page("graphics.title",
+			Section("graphics.resolution"),
+			Row("upscaler", upscaler, upscalerNote),
+			Row("render", render, renderNote),
+			Row("output", output, Desc(T("output.desc"))),
+			Section("graphics.detail"),
+			Row("quality", quality, Desc(T("quality.desc"))),
+			Section("graphics.fg"),
+			Row("framegen", frameGen, frameGenNote),
+			Row("streamline", Horizontal(chooseStreamline, streamlineText), Desc(T("streamline.desc"))),
+			Row(null, Horizontal(fsr, new TextBlock { Text = T("fsr"), Margin = new Thickness(12, 4, 0, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 520 }),
+				Desc(T(context.FsrAvailable ? "fsr.desc" : "fsr.missing"))));
+	}
+
+	string RenderLabel(int height) {
+		switch (height) {
+			case 2160: return Paren("2160", T("render.native"));
+			case 1512: return Paren("1512", T("render.pro"));
+			case 1440: return Paren("1440", T("render.ps5"));
+			default: return height.ToString();
+		}
+	}
+
+	// The highest render height whose 3D at the ratio fits the game's render target memory, made for 3840x2160: no more of
+	// the GPU's 64 KiB tiles (256x128, 128x128, 128x64, 64x64 pixels) than 3840x2160 (the emulator's FitsRenderTargets).
+	int MaxRenderHeight() {
+		var aspectValue = RatioAspect();
+		var tiles = new[] { new[] { 256, 128 }, new[] { 128, 128 }, new[] { 128, 64 }, new[] { 64, 64 } };
+		for (int h = 2160; h >= 720; h -= 8) {
+			var w = Math.Floor(h * aspectValue / 8.0 + 0.5) * 8;
+			var fits = true;
+			foreach (var tile in tiles) {
+				if (Math.Ceiling(w / tile[0]) * Math.Ceiling((double)h / tile[1]) > Math.Ceiling(3840.0 / tile[0]) * Math.Ceiling(2160.0 / tile[1])) fits = false;
+			}
+			if (fits) return h;
+		}
+		return 720;
+	}
+
+	// The heights the ratio allows; the one last chosen for this upscaler, a higher one as the highest allowed, an unknown
+	// one as the upscaler's default (DLSS 1080, the game's TAA 1440).
+	void SelectRenderHeight() {
+		var most = MaxRenderHeight();
+		var allowed = RenderHeights.Where(h => h <= most).ToList();
+		fillingRender = true;
+		var was = building;
+		building = true;
+		try {
+			render.Items.Clear();
+			foreach (var h in allowed) render.Items.Add(new Choice(RenderLabel(h), h));
+			if (renderWanted > most) {
+				render.SelectedIndex = 0;
+				return;
+			}
+			foreach (var wanted in new[] { renderWanted, renderForDlss ? 1080 : 1440 }) {
+				var index = allowed.IndexOf(wanted);
+				if (index >= 0) {
+					render.SelectedIndex = index;
+					return;
+				}
+			}
+			render.SelectedIndex = 0;
+		} finally {
+			fillingRender = false;
+			building = was;
+		}
+	}
+
+	int SelectedRender() {
+		var value = render == null ? null : Value(render);
+		return value == null ? (renderForDlss ? 1080 : 1440) : (int)value;
+	}
+
+	void UpdateRenderNote() {
+		if (render == null || renderNote == null) return;
+		var h = SelectedRender();
+		// (The 1080p output's 3D is at most 1080 high.)
+		var capped = output != null && output.IsEnabled && output.SelectedIndex == 1 && h > 1080;
+		if (capped) h = 1080;
+		var w = (int)(Math.Floor(h * RatioAspect() / 8.0 + 0.5) * 8);
+		renderNote.Text = F(capped ? "render.capped" : "render.desc", w, h);
+	}
+
+	void UpdateUpscalerNote() {
+		upscalerNote.Text = T(context.FrameGenAvailable ? "upscaler.ok" : !context.RtxGpu ? "upscaler.noRtx" : "upscaler.noStreamline");
+	}
+
+	void UpdateFrameGenNote() {
+		frameGenNote.Text = T(context.FrameGenAvailable ? "framegen.ok" : !context.RtxGpu ? "framegen.noRtx" : "framegen.noStreamline");
+	}
+
+	void ChooseStreamline() {
+		var dir = FolderPicker.Pick(this, T("dialog.streamline"), S.Str("streamline"));
+		if (dir == null) return;
+		if (!context.UseStreamlineFolder(dir)) {
+			MessageBox.Show(this, T("dialog.streamlineBad"), T("graphics.fg"), MessageBoxButton.OK, MessageBoxImage.Warning);
+			return;
+		}
+		// (Without an NVIDIA RTX graphics card the folder is kept and the rows stay off.)
+		ReadForm();
+		Build();
+	}
+
+	// ------------------------------------------------------------------ Game
+
+	FrameworkElement BuildGamePage() {
+		var languages = Strings.ConsoleLanguages.Select((name, i) => new Choice(name, i));
+		language = Combo(languages, S.Int("language"), 340);
+		cheats = Switch(S.Bool("cheats"));
+		var choose = FlatButton("button.cheats", (s, e) => ChooseCheats());
+		choose.Margin = new Thickness(16, 0, 0, 0);
+		cheatState = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 0, 0) };
+		return Page("game.title",
+			Section("game.console"),
+			Row("language", language, Desc(T("language.desc"))),
+			Section("game.cheats"),
+			Row("cheats", Horizontal(cheats, choose, cheatState), Desc(T("cheats.desc"))));
+	}
+
+	void UpdateCheatState() {
+		if (cheatState == null) return;
+		if (!game.Found) {
+			cheatState.Text = T("cheats.noGame");
+			return;
+		}
+		var file = game.CheatFile(context.Root);
+		if (file == null) {
+			cheatState.Text = T("cheats.noFile");
+			return;
+		}
+		int on, total;
+		CheatsWindow.Count(file, out on, out total);
+		cheatState.Text = F("cheats.count", on, total);
+	}
+
+	void ChooseCheats() {
+		var file = game.CheatFile(context.Root);
+		if (file == null) {
+			MessageBox.Show(this, T(game.Found ? "cheats.noFile" : "cheats.noGame"), T("cheats"), MessageBoxButton.OK, MessageBoxImage.Information);
+			return;
+		}
+		CheatsWindow.Edit(this, file);
+		UpdateCheatState();
+	}
+
+	// ------------------------------------------------------------------ Shaders
+
+	FrameworkElement BuildShadersPage() {
+		storeLine = new TextBlock { Foreground = Res<Brush>("TextBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+		// (run-windows.ps1's estimate: 55 minutes on 22 processors.)
+		var minutes = (int)(Math.Ceiling(55.0 * 22 / Math.Max(1, Environment.ProcessorCount) / 10) * 10);
+		var duration = minutes < 90 ? F("duration.minutes", minutes) : F("duration.hours", minutes / 60.0);
+		var precompile = FlatButton("button.precompile", (s, e) => Precompile(""));
+		ecores = Switch(S.Bool("ecores") && context.EfficiencyMask != 0, context.EfficiencyMask != 0);
+		var hints = FlatButton("button.hints", (s, e) => Precompile("-ExportHints"));
+		return Page("shaders.title",
+			storeLine,
+			Section("shaders.precompile"),
+			Row(null, precompile, Desc(F("precompile.desc", duration))),
+			Row(null, Horizontal(ecores, new TextBlock { Text = T("ecores"), Margin = new Thickness(12, 4, 0, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 520 }),
+				context.EfficiencyMask != 0 ? null : Desc(T("ecores.none"))),
+			Section("shaders.share"),
+			Row(null, hints, Desc(T("hints.desc"))));
+	}
+
+	// ------------------------------------------------------------------ Advanced
+
+	FrameworkElement BuildAdvancedPage() {
+		hud = Combo(new[] { new Choice(T("hud.off"), 0), new Choice(T("hud.rate"), 1), new Choice(T("hud.detailed"), 2) }, Math.Min(2, Math.Max(0, S.Int("hud"))));
+		redzone = Switch(S.Bool("redzone"));
+		safeGpu = Switch(S.Bool("safegpu"));
+		var saved = S.Str("ui_language");
+		uiLanguage = Combo(new[] { new Choice(T("uilang.auto"), ""), new Choice("English", "en"), new Choice("中文（简体）", "zh") },
+			saved == "en" ? 1 : saved == "zh" ? 2 : 0, 220);
+		uiLanguage.SelectionChanged += (s, e) => {
+			if (building) return;
+			var value = Value(uiLanguage) as string ?? "";
+			S.Set("ui_language", value);
+			Strings.Language = value == "zh" ? UiLanguage.Chinese : value == "en" ? UiLanguage.English : Strings.SystemLanguage();
+			ReadForm();
+			Build();
+		};
+		var logs = FlatButton("button.logs", (s, e) => OpenLogs());
+		var readme = FlatButton("button.readme", (s, e) => OpenReadme());
+		var root = FlatButton("button.root", (s, e) => OpenFolder(context.Root));
+		readme.Margin = root.Margin = new Thickness(10, 0, 0, 0);
+		return Page("advanced.title",
+			Section("advanced.stability"),
+			Row("hud", hud, Desc(T("hud.desc"))),
+			Row("redzone", redzone, Desc(T("redzone.desc"))),
+			Row("safegpu", safeGpu, Desc(T("safegpu.desc"))),
+			Section("advanced.launcher"),
+			Row("uilang", uiLanguage),
+			Row(null, Horizontal(logs, readme, root)),
+			Desc(T("credit")));
+	}
+
+	// ------------------------------------------------------------------ state, summary, actions
+
+	void Changed() {
+		if (building) return;
+		ReadForm();
+		UpdateSummary();
+	}
+
+	// The controls into the settings, saved (launcher.ps1's Read-Form).
+	void ReadForm() {
+		if (gamePath == null || render == null) return;
+		S.Set("game", gamePath.Text.Trim());
+		var res = Value(resolution) as string;
+		if (res != null) S.Set("resolution", res);
+		S.Set("fullscreen", fullscreen.IsChecked == true);
+		S.Set("aspect", aspect.IsChecked == true);
+		S.Set("language", Math.Max(0, language.SelectedIndex));
+		S.Set("redzone", redzone.IsChecked == true);
+		S.Set("fps120", fps120.IsChecked == true);
+		S.Set("vsync", vsync.IsChecked == true);
+		S.Set("lowlatency", lowLatency.IsChecked == true);
+		S.Set("hdr", hdr.IsChecked == true);
+		S.Set("cheats", cheats.IsChecked == true);
+		S.Set("safegpu", safeGpu.IsChecked == true);
+		S.Set("hud", Math.Max(0, hud.SelectedIndex));
+		S.Set(renderForDlss ? "render_dlss" : "render", SelectedRender());
+		S.Set("ratio", Ratio());
+		S.Set("quality", Value(quality) as string ?? "standard");
+		S.Set("output", output.SelectedIndex == 1 ? "1080p" : "4k");
+		// (Kept as they were where the DLLs are missing.)
+		if (context.FrameGenAvailable) S.Set("framegen", frameGen.SelectedIndex > 0 ? frameGen.SelectedIndex + 1 : 0);
+		if (context.FrameGenAvailable) S.Set("upscaler", upscaler.SelectedIndex == 1 ? "dlss" : "");
+		if (context.FsrAvailable) S.Set("fsr", fsr.IsChecked == true);
+		S.Set("ecores", ecores.IsChecked == true);
+		S.Save();
+	}
+
+	void UpdateSummary() {
+		var res = S.Str("resolution").Replace("x", "×");
+		var dlss = commands.Dlss;
+		var hdOutput = !dlss && S.Str("output") == "1080p";
+		var height = dlss ? S.Int("render_dlss") : S.Int("render");
+		if (hdOutput && height > 1080) height = 1080;
+		string frameGeneration;
+		if (context.FsrAvailable && S.Bool("fsr")) frameGeneration = T("summary.fsr");
+		else if (context.FrameGenAvailable && S.Int("framegen") >= 2) frameGeneration = "DLSS " + S.Int("framegen") + "x";
+		else frameGeneration = T("framegen.off");
+		var qualityKey = "quality." + (S.Str("quality").Length == 0 ? "standard" : S.Str("quality"));
+		var options = new List<string>();
+		if (S.Bool("vsync")) options.Add(T("summary.vsync"));
+		if (S.Bool("fps120")) options.Add(T("summary.fps120"));
+		if (S.Bool("lowlatency")) options.Add(T("lowlatency"));
+		if (S.Bool("hdr")) options.Add(T("summary.hdr"));
+		if (hdOutput) options.Add(T("summary.hd"));
+
+		var parts = new List<string> {
+			F(S.Bool("fullscreen") ? "summary.fullscreen" : "summary.window", res), S.Str("ratio"), F("summary.render", height),
+			dlss ? T("summary.dlss") : T("summary.taa") };
+		if (frameGeneration != T("framegen.off")) parts.Add(frameGeneration);
+		parts.AddRange(options);
+		Summary.Text = string.Join("   ·   ", parts);
+
+		if (currentSettings == null) return;
+		currentSettings.Children.Clear();
+		currentSettings.RowDefinitions.Clear();
+		var lines = new[] {
+			new[] { T("nav.display"), F(S.Bool("fullscreen") ? "summary.fullscreen" : "summary.window", res) + "  ·  " + S.Str("ratio") },
+			new[] { "3D", F("summary.render", height) + "  ·  " + (dlss ? T("summary.dlss") : T("summary.taa")) },
+			new[] { T("graphics.fg"), frameGeneration },
+			new[] { T("quality"), T(qualityKey) },
+			new[] { T("summary.options"), options.Count == 0 ? "—" : string.Join("  ·  ", options) },
+		};
+		for (int i = 0; i < lines.Length; i++) {
+			currentSettings.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+			var label = new TextBlock { Text = lines[i][0], Foreground = Res<Brush>("TextDimBrush"), Margin = new Thickness(0, 4, 18, 4) };
+			var value = new TextBlock { Text = lines[i][1], Foreground = Res<Brush>("TextBrush"), Margin = new Thickness(0, 4, 0, 4), TextWrapping = TextWrapping.Wrap };
+			Grid.SetRow(label, i);
+			Grid.SetRow(value, i);
+			Grid.SetColumn(value, 1);
+			currentSettings.Children.Add(label);
+			currentSettings.Children.Add(value);
+		}
+	}
+
+	void Play() {
+		ReadForm();
+		try {
+			commands.Start(commands.PlayArguments(game.Found ? game : null));
+		} catch (Exception e) {
+			MessageBox.Show(this, F("error.start", e.Message), T("error.title"), MessageBoxButton.OK, MessageBoxImage.Error);
+			return;
+		}
+		Close();
+	}
+
+	void Precompile(string option) {
+		ReadForm();
+		try {
+			commands.Start(commands.PrecompileArguments(option));
+		} catch (Exception e) {
+			MessageBox.Show(this, F("error.start", e.Message), T("error.title"), MessageBoxButton.OK, MessageBoxImage.Error);
+		}
+	}
+
+	void OpenLogs() {
+		var folder = context.LogsFolder();
+		try {
+			Directory.CreateDirectory(folder);
+		} catch (Exception) {
+		}
+		OpenFolder(folder);
+	}
+
+	static void OpenFolder(string folder) {
+		try {
+			Process.Start(new ProcessStartInfo("explorer.exe", "\"" + folder + "\"") { UseShellExecute = true });
+		} catch (Exception) {
+		}
+	}
+
+	void OpenReadme() {
+		var file = context.Readme();
+		if (file == null) return;
+		try {
+			Process.Start(new ProcessStartInfo("notepad.exe", "\"" + file + "\"") { UseShellExecute = true });
+		} catch (Exception) {
+		}
+	}
+
+	// ------------------------------------------------------------------ test pictures
+
+	// Each page drawn into <folder>\<n>-<page>.png without showing the window (--screenshot).
+	public void SaveScreenshots(string folder) {
+		Directory.CreateDirectory(folder);
+		if (ScreenshotPath != null) {
+			building = true;
+			gamePath.Text = ScreenshotPath;
+			building = false;
+		}
+		if (storeTask != null) {
+			try {
+				if (storeTask.Wait(60000)) {
+					storeState = storeTask.Result;
+					UpdateChecks();
+				}
+			} catch (Exception) {
+			}
+		}
+		var root = (FrameworkElement)Content;
+		var width = (int)Width;
+		var height = (int)Height;
+		var names = new[] { "play", "display", "graphics", "game", "shaders", "advanced" };
+		for (int i = 0; i < pages.Count; i++) {
+			Nav.SelectedIndex = i;
+			ShowPage(i);
+			root.Measure(new Size(width, height));
+			root.Arrange(new Rect(0, 0, width, height));
+			root.UpdateLayout();
+			var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+			var backdrop = new DrawingVisual();
+			using (var dc = backdrop.RenderOpen()) dc.DrawRectangle(Background, null, new Rect(0, 0, width, height));
+			bitmap.Render(backdrop);
+			bitmap.Render(root);
+			var encoder = new PngBitmapEncoder();
+			encoder.Frames.Add(BitmapFrame.Create(bitmap));
+			using (var stream = File.Create(Path.Combine(folder, (i + 1) + "-" + names[Math.Min(i, names.Length - 1)] + ".png"))) encoder.Save(stream);
+		}
+	}
+}
+
+}

@@ -75,6 +75,19 @@ jobs:
           Copy-Item _Build\streamline-src\include _Build\deps\streamline\sdk -Recurse
           Get-ChildItem _Build\deps\streamline\sdk\include -Name
 
+      # FSR 3.1 frame generation (src/local/frame-gen.cpp, KYTY_FRAMEGEN_BACKEND=fsr): AMD FidelityFX SDK 1.1.4's API
+      # headers (MIT, LICENSES/FidelityFX-SDK-MIT.txt) at build time; its runtime (amd_fidelityfx_vk.dll, signed by AMD)
+      # is the user's own, next to the emulator. Without them the build has no FSR.
+      - name: FidelityFX headers
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          git clone --quiet --depth 1 --branch v1.1.4 --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git _Build\fidelityfx-src
+          git -C _Build\fidelityfx-src sparse-checkout set ffx-api/include
+          New-Item -ItemType Directory -Force _Build\deps\fidelityfx | Out-Null
+          Copy-Item _Build\fidelityfx-src\ffx-api\include _Build\deps\fidelityfx -Recurse
+          Get-ChildItem _Build\deps\fidelityfx\include\ffx_api -Name
+
       # For other PCs: x86-64-v3 (AVX2), not the runner CPU's -march=native.
       - name: Build
         shell: cmd
@@ -87,6 +100,11 @@ jobs:
           _Build\windows\demons_souls_output_tests.exe || exit /b 1
           powershell -NoProfile -ExecutionPolicy Bypass -File tests\LauncherCommandTests.ps1 || exit /b 1
 
+      # The settings window (launcher-windows: WPF on .NET Framework 4.7.2, part of Windows 10 and 11).
+      - name: Build launcher
+        shell: cmd
+        run: call launcher-windows\build.cmd || exit /b 1
+
       - name: Package
         shell: pwsh
         env:
@@ -96,7 +114,7 @@ jobs:
           $out = "_Build\package\$env:PACKAGE"
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item "$build\kyty_emulator.exe", "$build\kyty_shader_precompile.exe", "$build\libwinpthread-1.dll",
-            run-windows.ps1, precompile-windows.ps1, launcher.ps1, launcher.cmd, LICENSE $out
+            _Build\launcher\KytyLauncher.exe, run-windows.ps1, precompile-windows.ps1, launcher.ps1, launcher.cmd, LICENSE $out
           Copy-Item LICENSES $out -Recurse
           Copy-Item run-windows.json "$out\launch.json"
           Copy-Item docs\PORTABLE-README.md "$out\README.md"
@@ -171,7 +189,7 @@ jobs:
           # A tag's own release, else a new tag named after the package at this commit.
           tag="$GITHUB_REF_NAME"
           [ "$GITHUB_REF_TYPE" = tag ] || tag="$PACKAGE"
-          notes="Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it and double-click run.cmd or launcher.cmd; the README.md inside explains the rest."
+          notes="Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it and double-click KytyLauncher.exe (or run.cmd); the README.md inside explains the rest."
           # The notes of this build (what changed, the per-PC shader caches, frame rates), when the commit has them.
           if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then

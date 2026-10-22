@@ -12,6 +12,7 @@
 // on such a wait-before-signal, and the worker's own submission of that tick is one of them.
 // Without them the GPU thread records and submits.
 
+#include "anti-lag.h"
 #include "common/assert.h"
 #include "device-fault.h"
 #include "live-census.h"
@@ -65,7 +66,8 @@ public:
 		submit.pCommandBuffers      = &packet.command;
 		submit.signalSemaphoreCount = 1;
 		submit.pSignalSemaphores    = &packet.signal;
-		Check(dispatch.vkQueueSubmit(packet.queue, 1, &submit, VK_NULL_HANDLE), "submit readback copy");
+		Check(Libs::Graphics::AntiLag::QueueSubmit(packet.queue, submit, dispatch.vkQueueSubmit, dispatch.vkQueueSubmit2),
+		      "submit readback copy");
 	}
 	// The copy's commands: an earlier copy on this queue may target the same download slot (a detached request).
 	template <typename Dispatch>

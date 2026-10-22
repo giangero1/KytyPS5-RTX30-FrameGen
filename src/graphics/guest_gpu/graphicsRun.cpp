@@ -10,7 +10,6 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
-#include "graphics/guest_gpu/speculation.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/bdaDirtyRegions.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderReadObserver.h"
@@ -32,7 +31,6 @@
 #include "hud-anchor.h"
 #include "live-control.h"
 #include "performance-switches.h"
-#include "speculation-state.h"
 #include "xpr-capture.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
@@ -50,7 +48,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <string>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -59,9 +56,9 @@ extern "C" {
 // 0: synchronous frame boundary. 1: the guest may prepare the following frame
 // while the renderer consumes the previous one; guest reads of GPU-written
 // memory are then served by asynchronous readbacks (BufferCache).
-[[gnu::used]] volatile std::atomic_uint32_t kyty_local_frame_pipeline_mode {0};
+[[gnu::used]] volatile std::atomic_uint32_t kyty_local_frame_pipeline_mode {1};
 // 1: a full barrier with no recorded work since the previous one is skipped.
-[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_global_barrier_dedupe {0};
+[[gnu::used]] volatile std::atomic<uint32_t> kyty_local_global_barrier_dedupe {1};
 }
 
 static thread_local CommandProcessor* g_current_processor = nullptr;
@@ -382,135 +379,6 @@ void CommandProcessor::Reset() {
 	DrawStateObserver::Invalidate();
 }
 
-const uint32_t* CommandProcessor::SuspendedPacket(const Pm4Execution& execution, uint32_t& dwords) {
-	EXIT_IF(execution.m_buffer_stack.empty());
-	const auto& cursor = execution.m_buffer_stack.back();
-	EXIT_IF(cursor.offset_dw >= cursor.commands.size() || cursor.deferred_advance_dw != 0);
-	const auto* packet = cursor.commands.data() + cursor.offset_dw;
-	dwords             = *packet == 0x80000000u ? 1u : KYTY_PM4_LEN(*packet);
-	EXIT_IF(dwords == 0 || dwords > cursor.commands.size() - cursor.offset_dw);
-	return packet;
-}
-
-bool CommandProcessor::SamePosition(const Pm4Execution& a, const Pm4Execution& b) {
-	// (The innermost first: most packets differ there. Not the deferred advances: an outer level's is set only when the
-	// execution was suspended inside the buffer it called.)
-	if (a.m_buffer_stack.size() != b.m_buffer_stack.size()) return false;
-	for (size_t i = a.m_buffer_stack.size(); i-- > 0;)
-		if (a.m_buffer_stack[i].commands.data() != b.m_buffer_stack[i].commands.data() ||
-		    a.m_buffer_stack[i].offset_dw != b.m_buffer_stack[i].offset_dw)
-			return false;
-	return true;
-}
-
-// A draw or dispatch: what chunks of a command buffer are counted in.
-static bool IsChunkWork(uint32_t opcode) {
-	switch (opcode) {
-		case Pm4::IT_DRAW_INDEX_2:
-		case Pm4::IT_DRAW_INDEX_OFFSET_2:
-		case Pm4::IT_DRAW_INDEX_AUTO:
-		case Pm4::IT_DRAW_INDIRECT:
-		case Pm4::IT_DRAW_INDEX_INDIRECT:
-		case Pm4::IT_DRAW_INDIRECT_MULTI:
-		case Pm4::IT_DRAW_INDEX_INDIRECT_MULTI:
-		case Pm4::IT_DISPATCH_DIRECT:
-		case Pm4::IT_DISPATCH_INDIRECT: return true;
-		default: return false;
-	}
-}
-
-bool CommandProcessor::AtWait(const Pm4Execution& execution) {
-	if (execution.m_buffer_stack.empty()) return false;
-	const auto& cursor = execution.m_buffer_stack.back();
-	if (cursor.offset_dw >= cursor.commands.size() || cursor.deferred_advance_dw != 0) return false;
-	const auto opcode = (cursor.commands[cursor.offset_dw] >> 8u) & 0xffu;
-	return (cursor.commands[cursor.offset_dw] >> 30u) == 3u && (opcode == Pm4::IT_WAIT_REG_MEM || opcode == Pm4::IT_WAIT_REG_MEM_64);
-}
-
-void CommandProcessor::SkipSuspendedPacket(Pm4Execution& execution) {
-	uint32_t dwords = 0;
-	(void)SuspendedPacket(execution, dwords);
-	execution.m_buffer_stack.back().offset_dw += dwords;
-	execution.m_made_progress = true;
-}
-
-bool CommandProcessor::SameDrawState(const CommandProcessor& other) const {
-	return m_context_state_pushed == other.m_context_state_pushed && m_user_data_marker == other.m_user_data_marker &&
-	       m_index_type_and_size == other.m_index_type_and_size && m_index_buffer_size == other.m_index_buffer_size &&
-	       m_index_base_addr == other.m_index_base_addr &&
-	       m_draw_indirect_args_base_addr == other.m_draw_indirect_args_base_addr &&
-	       m_dispatch_indirect_args_base_addr == other.m_dispatch_indirect_args_base_addr &&
-	       m_num_instances == other.m_num_instances && m_de_count == other.m_de_count &&
-	       m_ce_count == other.m_ce_count && m_synthetic_occlusion_counter == other.m_synthetic_occlusion_counter &&
-	       m_predicate_skip == other.m_predicate_skip;
-}
-
-// A state pass's packets (CommandProcessor::SetStateOnly): those that change the processor's state run, and those whose
-// guest memory writes and predicted clears its record keeps (Spec::t_record); the others are passed over.
-static bool StatePassRuns(uint32_t opcode, uint32_t header) {
-	switch (opcode) {
-		case Pm4::IT_WRITE_DATA:
-		case Pm4::IT_DMA_DATA:
-		case Pm4::IT_COPY_DATA:
-		case Pm4::IT_DISPATCH_DIRECT:
-		case Pm4::IT_DISPATCH_INDIRECT:
-		case Pm4::IT_SET_BASE:
-		case Pm4::IT_CLEAR_STATE:
-		case Pm4::IT_INDEX_BASE:
-		case Pm4::IT_INDEX_BUFFER_SIZE:
-		case Pm4::IT_INDEX_TYPE:
-		case Pm4::IT_NUM_INSTANCES:
-		case Pm4::IT_SET_CONTEXT_REG:
-		case Pm4::IT_SET_SH_REG:
-		case Pm4::IT_SET_UCONFIG_REG:
-		case Pm4::IT_SET_UCONFIG_REG_INDEX:
-		case Pm4::IT_SET_CONTEXT_REG_INDIRECT:
-		case Pm4::IT_SET_SH_REG_INDIRECT:
-		case Pm4::IT_SET_UCONFIG_REG_INDIRECT:
-		case Pm4::IT_INCREMENT_CE_COUNTER:
-		case Pm4::IT_INCREMENT_DE_COUNTER:
-		case Pm4::IT_INDIRECT_BUFFER:
-		case Pm4::IT_COND_EXEC:
-		case Pm4::IT_SET_PREDICATION:
-		case Pm4::IT_EVENT_WRITE: return true; // (an occlusion counter dump counts: TriggerEvent)
-		case Pm4::IT_NOP: return KYTY_PM4_R(header) == Pm4::R_CONTEXT_STATE || KYTY_PM4_R(header) == Pm4::R_DISPATCH_RESET;
-		default: return false;
-	}
-}
-
-bool CommandProcessor::SameState(const CommandProcessor& other) const {
-	return m_draw_run_skip == other.m_draw_run_skip && m_ctx == other.m_ctx && m_saved_ctx == other.m_saved_ctx &&
-	       m_ucfg == other.m_ucfg && m_sh_ctx == other.m_sh_ctx && SameDrawState(other);
-}
-
-void CommandProcessor::CopyStateFrom(const CommandProcessor& other, bool const_ram) {
-	m_draw_run_skip                    = other.m_draw_run_skip;
-	m_ctx                              = other.m_ctx;
-	m_saved_ctx                        = other.m_saved_ctx;
-	m_context_state_pushed             = other.m_context_state_pushed;
-	m_ucfg                             = other.m_ucfg;
-	m_sh_ctx                           = other.m_sh_ctx;
-	m_user_data_marker                 = other.m_user_data_marker;
-	m_index_type_and_size              = other.m_index_type_and_size;
-	m_index_buffer_size                = other.m_index_buffer_size;
-	m_index_base_addr                  = other.m_index_base_addr;
-	m_draw_indirect_args_base_addr     = other.m_draw_indirect_args_base_addr;
-	m_dispatch_indirect_args_base_addr = other.m_dispatch_indirect_args_base_addr;
-	m_num_instances                    = other.m_num_instances;
-	m_de_count                         = other.m_de_count;
-	m_ce_count                         = other.m_ce_count;
-	m_ce_complete                      = other.m_ce_complete;
-	if (const_ram) {
-		std::memcpy(m_const_ram, other.m_const_ram,
-		            size_t {std::max(m_const_ram_used, other.m_const_ram_used)} * sizeof(uint32_t));
-		m_const_ram_used = other.m_const_ram_used;
-	}
-	m_flip                        = other.m_flip;
-	m_submit_id                   = other.m_submit_id;
-	m_synthetic_occlusion_counter = other.m_synthetic_occlusion_counter;
-	m_predicate_skip              = other.m_predicate_skip;
-}
-
 void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operation) {
 	switch (operation) {
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
@@ -540,13 +408,10 @@ void CommandProcessor::BufferInit() {
 }
 
 void CommandProcessor::BufferFlush() {
-	// (A speculation's work goes to the GPU at its commit, before the guest memory writes that follow it.)
-	if (Spec::Current() != nullptr) return;
 	GetScheduler().Flush();
 }
 
 void CommandProcessor::BufferFlushDeferrable() {
-	if (Spec::Current() != nullptr) return;
 	GetScheduler().DeferrableFlush();
 }
 
@@ -601,51 +466,9 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 }
 
-// A guest memory write of the command processor: now, or when a speculative translation is committed
-// (speculation-state.h), in order with its other writes.
+// A guest memory write of the command processor.
 static void WriteGuestMemory(void* dst, const void* src, uint32_t size) {
-	// (A state pass's: its record keeps it.)
-	if (auto* record = Spec::t_record) {
-		for (uint32_t offset = 0; offset < size; offset += 4) {
-			uint32_t word = 0;
-			std::memcpy(&word, static_cast<const uint8_t*>(src) + offset, 4);
-			record->Journal(reinterpret_cast<uint64_t>(dst) + offset, word, 4);
-		}
-		return;
-	}
-	auto* spec = Spec::Current();
-	if (spec == nullptr) {
-		std::memcpy(dst, src, size);
-		Spec::NoteHostWrite(reinterpret_cast<uint64_t>(dst), size);
-		// (The labels a speculation's waits check: none without speculation.)
-		if (kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0)
-			for (uint32_t offset = 0; offset < size; offset += 4) Spec::NoteLabel(reinterpret_cast<uint64_t>(dst) + offset);
-		return;
-	}
-	for (uint32_t offset = 0; offset < size; offset += 4) {
-		uint32_t word = 0;
-		std::memcpy(&word, static_cast<const uint8_t*>(src) + offset, 4);
-		spec->Journal(reinterpret_cast<uint64_t>(dst) + offset, word, 4);
-	}
-}
-
-// Guest memory as the command processor reads it (a speculative translation sees its own pending writes).
-template <typename T>
-static T ReadGuestMemory(const T* address) {
-	// (A speculation's thread does not read what the GPU wrote: only the GPU thread's read fault reads it back.)
-	if (Spec::Current() != nullptr && !GuestGpu::IsGpuThread() &&
-	    Libs::LibKernel::Memory::ReadFaults(reinterpret_cast<uint64_t>(address), sizeof(T)))
-		return Spec::Refuse("GPU-written guest memory"), T {};
-	auto* spec = Spec::Current();
-	if (spec == nullptr) return *address;
-	static_assert(sizeof(T) % 4 == 0);
-	std::array<uint32_t, sizeof(T) / 4> words {};
-	if (reinterpret_cast<uint64_t>(address) % 4 != 0 ||
-	    !spec->ReadJournaled(reinterpret_cast<uint64_t>(address), static_cast<uint32_t>(words.size()), words.data(), false))
-		return Spec::Refuse("memory the processor writes"), T {};
-	T value;
-	std::memcpy(&value, words.data(), sizeof(T));
-	return value;
+	std::memcpy(dst, src, size);
 }
 
 bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t func) {
@@ -673,25 +496,12 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	(void)poll;
 	BreakComputeChain();
-	const T value = ReadGuestMemory(addr);
-	// (A speculation's, satisfied by what memory holds: satisfied at its commit too, Spec::WaitCheck. By its pending
-	// writes: they come first; by a previous speculation's: its chain reads.)
-	if (auto* spec = Spec::Current(); spec != nullptr && TestWaitRegMemValue(value, ref, mask, func) &&
-	                                  !spec->JournalIntersects(reinterpret_cast<uint64_t>(addr), sizeof(T)))
-		spec->waits.push_back({reinterpret_cast<uint64_t>(addr), ref, mask, func, static_cast<uint32_t>(sizeof(T))});
+	const T value = *addr;
 	if (!TestWaitRegMemValue(value, ref, mask, func)) {
-		// A speculation's: a hole on a label the processor writes (the commit waits there; what work of the GPU queues
-		// writes before the label is checked against what the speculation read). On memory only the CPU writes it
-		// stops: what the guest writes before is for the commands after it (a new speculation starts at the wait when
-		// it is satisfied: GuestGpu::Process).
-		if (Spec::Current() != nullptr) {
-			if (Spec::IsLabel(reinterpret_cast<uint64_t>(addr))) return Spec::Refuse("wait");
-			return Spec::Stop("wait on memory the CPU writes");
-		}
 		LiveTrace::Event(LiveTrace::FrontSuspend, reinterpret_cast<uint64_t>(addr),
 		                 (static_cast<uint64_t>(value) << 32u) | static_cast<uint32_t>(ref));
 		SuspendPm4();
-	} else if (Spec::Current() == nullptr) { // (a speculation's commit publishes them)
+	} else {
 		BdaDirtyRegions::Publish();
 	}
 }
@@ -733,8 +543,6 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
 		     num_bytes);
 	}
-	// (A state pass's record cannot tell the clock its commit reads.)
-	if (auto* record = Spec::t_record) return record->NoteWritten(dst_address, num_bytes);
 	const auto value = Sync::ReadReferenceClock();
 	WriteGuestMemory(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64 " size=%u\n",
@@ -779,23 +587,6 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
 	}
 	auto& buffer_cache = GetGpuResources().GetBufferCache();
-	if (auto* record = Spec::t_record) {
-		// A state pass's record: a small fill's words; a copy between guest memory no GPU work wrote (made on the CPU at
-		// the commit, as BufferCache::CopyBuffer's); else the destination as written.
-		bool       src_gds = false;
-		const auto dst     = dst_address_or_offset;
-		const auto src     = src_address_or_offset_or_immediate;
-		if (dst_gds) return;
-		if (src_sel == 2 && num_bytes <= 64 && num_bytes % 4 == 0) {
-			for (uint32_t at = 0; at < num_bytes; at += 4) record->Journal(dst + at, src & 0xffffffffu, 4);
-		} else if (src_sel != 2 && decode_gds(src_sel, src_gds) && !src_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes) &&
-		           !buffer_cache.IsRegionGpuModified(src, num_bytes)) {
-			record->Journal(dst, src, num_bytes, true);
-		} else {
-			record->NoteWritten(dst, num_bytes);
-		}
-		return;
-	}
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
@@ -818,15 +609,6 @@ void GuestGpu::Enqueue(Submission submission) {
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	submission.frame_epoch = m_submitted_frame;
-	submission.serial      = ++m_serials[submission.queue_id];
-	// (KYTY_SPECULATE=4: the graphics queue's, translated ahead from now on.)
-	if (auto* ahead = m_ahead.load(std::memory_order_acquire); ahead != nullptr && submission.queue_id == 0)
-		ahead->Push({submission.serial, submission.commands, submission.reset_processor,
-		             submission.type == SubmissionType::FlipPreparation || submission.type == SubmissionType::FrameBoundary
-		                 ? Speculation::Job::Kind::Flip
-		             : submission.type == SubmissionType::Graphics && submission.constant_commands.empty()
-		                 ? Speculation::Job::Kind::Graphics
-		                 : Speculation::Job::Kind::Other});
 	LiveTrace::Event(LiveTrace::Submit, submission.queue_id | static_cast<uint32_t>(submission.type) << 8u,
 	                 submission.commands.size());
 	m_queues[submission.queue_id].push_back(std::move(submission));
@@ -865,10 +647,6 @@ void GuestGpu::ThreadRun(void* data) {
 	BdaDirtyRegions::g_translating = true;
 	LiveTrace::g_mark_thread = true;
 	InitializePerformanceSwitches();
-	if (kyty_local_speculate_mode.load(std::memory_order_relaxed) == 4) {
-		gpu->m_speculation = std::make_unique<Speculation>(gpu->m_renderer);
-		gpu->m_ahead.store(gpu->m_speculation.get(), std::memory_order_release);
-	}
 	LiveControl::Start();
 	XprCapture::Initialize();
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
@@ -1027,130 +805,12 @@ bool GuestGpu::Process(Submission& submission) {
 		cp.SetFlip({});
 	}
 
-	// The graphics queue's command buffers, speculation on: speculatively first (speculation.h).
-	const bool speculate = submission.type == SubmissionType::Graphics && submission.queue_id == 0 &&
-	                       kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0;
-	if (speculate && !m_speculation) m_speculation = std::make_unique<Speculation>(m_renderer);
-	// (What the translation does a speculation not committed yet must see.)
-	struct EffectsScope {
-		explicit EffectsScope(Speculation* speculation) {
-			Spec::t_effects = speculation != nullptr ? &speculation->Log() : nullptr;
-		}
-		~EffectsScope() { Spec::t_effects = nullptr; }
-		KYTY_CLASS_NO_COPY(EffectsScope);
-	} effects_scope {m_speculation.get()};
-
 	cp.BufferInit();
 	bool complete = true;
 
 	switch (submission.type) {
 		case SubmissionType::Graphics: {
 			bool progressed = false;
-			// (The speculation's report: the graphics queue's time while it is on.)
-			struct QueueTime {
-				Speculation* speculation;
-				uint64_t     start = Speculation::NowNs();
-				~QueueTime() {
-					if (speculation != nullptr) speculation->NoteQueueTime(Speculation::NowNs() - start);
-				}
-			} queue_time {speculate ? m_speculation.get() : nullptr};
-			// KYTY_SPECULATE=4: chunk by chunk, each committed as the speculation's threads translated it, or translated
-			// the normal way up to where the next begins (Speculation::CommitReady).
-			if (speculate && submission.constant_commands.empty() &&
-			    kyty_local_speculate_mode.load(std::memory_order_relaxed) == 4) {
-				const Speculation::Job job {submission.serial, submission.commands};
-				for (;;) {
-					if (!submission.spec_normal) {
-						const auto outcome = m_speculation->Blocked(submission.serial)
-						                         ? m_speculation->Resume(cp, submission.command_execution)
-						                         : m_speculation->CommitReady(cp, job, submission.spec_chunk,
-						                                                      submission.command_execution, submission.spec_end);
-						progressed |= outcome != Speculation::Outcome::None;
-						if (outcome == Speculation::Outcome::Blocked) break;
-						if (outcome == Speculation::Outcome::Whole) {
-							submission.command_complete = true;
-							break;
-						}
-						if (outcome == Speculation::Outcome::Chunk) {
-							++submission.spec_chunk;
-							continue;
-						}
-						submission.spec_normal = true;
-					}
-					cp.SetStopAt(submission.spec_end ? &*submission.spec_end : nullptr);
-					const auto processed = cp.Process(submission.command_execution, submission.commands);
-					cp.SetStopAt(nullptr);
-					progressed |= submission.command_execution.MadeProgress();
-					if (cp.TakeStopReached()) {
-						submission.spec_normal = false;
-						submission.spec_end.reset();
-						++submission.spec_chunk;
-						continue;
-					}
-					submission.command_complete = processed == Pm4ProcessResult::Complete;
-					break;
-				}
-				submission.constant_complete = true;
-				complete                     = submission.command_complete;
-				if (complete) m_renderer.GetGpuResources().EndSubmission();
-				// (What a commit blocked at a wait committed before it is flushed too.)
-				if (progressed || m_speculation->Blocked(submission.serial)) cp.BufferFlush();
-				break;
-			}
-			// (From its start, or from a wait the normal translation stopped at, which a speculation may find satisfied
-			// now; one that stopped at a wait goes on from there when the work it committed satisfied it.)
-			auto outcome = Speculation::Outcome::None;
-			if (speculate && m_speculation->Blocked(submission.serial)) {
-				// (A commit waiting at a wait hole: on from there.)
-				outcome = m_speculation->Resume(cp, submission.command_execution);
-				progressed |= outcome == Speculation::Outcome::Partly;
-				while (outcome == Speculation::Outcome::Partly && CommandProcessor::AtWait(submission.command_execution)) {
-					outcome = m_speculation->TranslateAndCommit(cp, submission.serial, submission.commands,
-					                                            submission.command_execution);
-					progressed |= outcome == Speculation::Outcome::Partly;
-				}
-			} else if (speculate && submission.constant_commands.empty() &&
-			           (first_slice || CommandProcessor::AtWait(submission.command_execution))) {
-				const auto mode = kyty_local_speculate_mode.load(std::memory_order_relaxed);
-				// KYTY_SPECULATE=3: from its start, translated ahead with the graphics queue's command buffers after it.
-				if (first_slice && mode == 3) {
-					std::vector<Speculation::Job> queued;
-					{
-						Common::LockGuard lock(m_queue_mutex);
-						for (const auto& next: m_queues[0])
-							queued.push_back({next.serial, next.commands, next.reset_processor,
-							                  next.type == SubmissionType::FlipPreparation ? Speculation::Job::Kind::Flip
-							                  : next.type == SubmissionType::Graphics && next.constant_commands.empty()
-							                      ? Speculation::Job::Kind::Graphics
-							                      : Speculation::Job::Kind::Other});
-					}
-					outcome = m_speculation->CommitAhead(cp, {submission.serial, submission.commands}, queued,
-					                                     submission.command_execution);
-				} else {
-					outcome = m_speculation->TranslateAndCommit(cp, submission.serial, submission.commands,
-					                                            submission.command_execution);
-				}
-				progressed |= outcome == Speculation::Outcome::Partly;
-				while (outcome == Speculation::Outcome::Partly && CommandProcessor::AtWait(submission.command_execution)) {
-					outcome = m_speculation->TranslateAndCommit(cp, submission.serial, submission.commands,
-					                                            submission.command_execution);
-					progressed |= outcome == Speculation::Outcome::Partly;
-				}
-			}
-			if (outcome == Speculation::Outcome::Blocked) {
-				// (What it committed before the wait is flushed; the submission waits as at a wait of its own.)
-				cp.BufferFlush();
-				complete = false;
-				break;
-			}
-			if (outcome == Speculation::Outcome::Whole) {
-				submission.command_complete  = true;
-				submission.constant_complete = true;
-				m_renderer.GetGpuResources().EndSubmission();
-				cp.BufferFlush();
-				break;
-			}
-			// The rest the normal way (what was committed is progress: its holes' work is flushed with it).
 			submission.constant_complete |= submission.constant_commands.empty();
 			for (;;) {
 				bool round_progress = false;
@@ -1220,9 +880,6 @@ bool GuestGpu::Process(Submission& submission) {
 			break;
 		case SubmissionType::FrameBoundary: EXIT("frame boundary already handled\n");
 	}
-	// (KYTY_SPECULATE=4: the state after the graphics queue's submission, for a chain that could not follow it.)
-	if (complete && submission.queue_id == 0 && m_ahead.load(std::memory_order_relaxed) != nullptr)
-		m_speculation->Done(submission.serial, cp);
 
 	return complete;
 }
@@ -1281,50 +938,6 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
-// The packets a speculative translation (speculation-state.h) takes: those whose work it records and whose effects
-// it notes. At any other it stops, and the command buffer is translated as before.
-static bool SpeculationTakes(uint32_t opcode, uint32_t header) {
-	switch (opcode) {
-		case Pm4::IT_SET_CONTEXT_REG:
-		case Pm4::IT_SET_SH_REG:
-		case Pm4::IT_SET_UCONFIG_REG:
-		case Pm4::IT_SET_UCONFIG_REG_INDEX:
-		case Pm4::IT_SET_CONTEXT_REG_INDIRECT:
-		case Pm4::IT_SET_SH_REG_INDIRECT:
-		case Pm4::IT_SET_UCONFIG_REG_INDIRECT:
-		case Pm4::IT_INDEX_TYPE:
-		case Pm4::IT_INDEX_BASE:
-		case Pm4::IT_INDEX_BUFFER_SIZE:
-		case Pm4::IT_NUM_INSTANCES:
-		case Pm4::IT_SET_BASE:
-		case Pm4::IT_PFP_SYNC_ME:
-		case Pm4::IT_CLEAR_STATE:
-		case Pm4::IT_EVENT_WRITE:
-		case Pm4::IT_EVENT_WRITE_EOP:
-		case Pm4::IT_EVENT_WRITE_EOS:
-		case Pm4::IT_ACQUIRE_MEM:
-		case Pm4::IT_WAIT_REG_MEM:
-		case Pm4::IT_WAIT_REG_MEM_64:
-		case Pm4::IT_WRITE_DATA:
-		case Pm4::IT_DISPATCH_DIRECT:
-		case Pm4::IT_DISPATCH_INDIRECT: return true;
-		case Pm4::IT_INDIRECT_BUFFER: return KYTY_PM4_LEN(header) == 4u; // (not a branch)
-		case Pm4::IT_NOP: {
-			const auto r = KYTY_PM4_R(header);
-			return r == Pm4::R_ZERO || r == Pm4::R_RELEASE_MEM || r == Pm4::R_ACQUIRE_MEM ||
-			       r == Pm4::R_CONTEXT_STATE || r == Pm4::R_DISPATCH_RESET || r == Pm4::R_PUSH_MARKER ||
-			       r == Pm4::R_POP_MARKER;
-		}
-		// Draws only as table draws (TryNativeXprDraws, TryNativeDirectDraw, TryNativeAutoDraw).
-		case Pm4::IT_DRAW_INDEX_AUTO: return header == 0xc0012d00u;
-		case Pm4::IT_DRAW_INDEX_INDIRECT: return header == 0xc0032500u;
-		case Pm4::IT_DRAW_INDEX_INDIRECT_MULTI: return header == 0xc0083800u;
-		case Pm4::IT_DRAW_INDEX_2: return header == 0xc0042700u;
-		case Pm4::IT_DRAW_INDEX_OFFSET_2: return header == 0xc0033500u;
-		default: return false;
-	}
-}
-
 // The GS user SGPR at an SH register location, -1 for another register.
 static int32_t GsUserSgprAt(uint32_t location) {
 	const auto id = location - Pm4::SPI_SHADER_USER_DATA_GS_0;
@@ -1332,15 +945,8 @@ static int32_t GsUserSgprAt(uint32_t location) {
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
-	auto* const spec = Spec::Current();
-	// A speculation's refused packet suspends the execution there (speculation.cpp goes on past it, or stops).
-	const auto refuse = [&](const char* why) {
-		Spec::Refuse(why);
-		execution.m_suspended = true;
-	};
 	while (execution.m_buffer_stack.size() > stop_depth) {
-		if (spec != nullptr && spec->refused != nullptr) return refuse(spec->refused);
-		if (g_gpu_state != nullptr && spec == nullptr) { // (a speculation's thread runs no guest commands)
+		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
 		const auto buffer_index = execution.m_buffer_stack.size() - 1;
@@ -1410,39 +1016,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 			continue;
 		}
 
-		// A chunk's end (SetStopAt): before the packet the next begins at.
-		if (m_stop_at != nullptr && SamePosition(execution, *m_stop_at)) {
-			m_stop_reached        = true;
-			execution.m_suspended = true;
-			return;
-		}
-		// A state pass's chunk boundary (SetChunking): not within a run of indirect draws, which a translation takes
-		// together (the packet runs when the pass resumes, counted again).
-		if (m_chunk_every != 0 && IsChunkWork(opcode)) {
-			if (m_chunk_work >= m_chunk_every &&
-			    !(opcode == Pm4::IT_DRAW_INDEX_INDIRECT && m_chunk_last_opcode == Pm4::IT_DRAW_INDEX_INDIRECT)) {
-				m_chunk_work          = 0;
-				m_at_boundary         = true;
-				execution.m_suspended = true;
-				return;
-			}
-			++m_chunk_work;
-		}
-		m_chunk_last_opcode = opcode;
-		if (spec != nullptr) {
-			if (!GuestGpu::IsGpuThread()) Spec::EnterPacket();
-			spec->Mark(LocalVulkanRecording::RecordedWrites());
-			if (!SpeculationTakes(opcode, packet_header)) {
-				// (By opcode in the speculation's report.)
-				static const auto names = [] {
-					std::array<std::string, 512> all; // (NOPs by their R type after the opcodes)
-					for (uint32_t i = 0; i < 256; ++i) all[i] = "packet " + std::to_string(i);
-					for (uint32_t i = 0; i < 256; ++i) all[256 + i] = "packet NOP R" + std::to_string(i);
-					return all;
-				}();
-				return refuse(names[opcode == Pm4::IT_NOP ? 256u + (KYTY_PM4_R(packet_header) & 0xffu) : opcode].c_str());
-			}
-		}
 		// The CP writes an indirect draw's start instance into the user SGPR the packet names
 		// (START_INST_LOC); every path below translates the draw's shaders for it.
 		switch (opcode) {
@@ -1457,17 +1030,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 			case Pm4::IT_DRAW_INDEX_OFFSET_2:
 			case Pm4::IT_DISPATCH_DRAW_PREAMBLE: m_sh_ctx.SetStartInstanceUserSgpr(-1); break;
 			default: break;
-		}
-		// A state pass: what changes the processor's state only (a run of indirect draws ends within its packets).
-		if (m_state_only) {
-			if (opcode != Pm4::IT_DRAW_INDEX_INDIRECT) m_draw_run_skip = 0;
-			if (!StatePassRuns(opcode, packet_header)) {
-				const auto packet_dw = KYTY_PM4_LEN(packet_header);
-				EXIT_NOT_IMPLEMENTED(packet_dw == 0 || packet_dw > remaining_dw);
-				cursor.offset_dw += packet_dw;
-				execution.m_made_progress = true;
-				continue;
-			}
 		}
 
 		// Only state, draws and dispatches keep the deferred read protections pending: before a label, a memory write,
@@ -1510,7 +1072,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 					GetScheduler().CompleteDraws(consumed / 5u);
 					continue;
 				}
-				if (spec != nullptr) return refuse("draw");
 				auto& executor            = m_renderer.GetRenderExecutor();
 				native_store_end.executor = &executor;
 				if (auto* log = executor.NativeXprReadLog()) {
@@ -1530,7 +1091,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 					GetScheduler().CompleteDraws(packet[5]);
 					continue;
 				}
-				if (spec != nullptr) return refuse("draw");
 				auto& executor            = m_renderer.GetRenderExecutor();
 				native_store_end.executor = &executor;
 				if (auto* log = executor.NativeXprReadLog()) {
@@ -1550,7 +1110,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 					GetScheduler().CompleteDraws(1);
 					continue;
 				}
-				if (spec != nullptr) return refuse("draw");
 			} else if ((packet_header == 0xc0042700u || packet_header == 0xc0033500u) &&
 			           !GraphicsRunDebugDumpEnabled()) {
 				// Direct indexed draws from the same records (the normal path stores them).
@@ -1561,7 +1120,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 					GetScheduler().CompleteDraws(1);
 					continue;
 				}
-				if (spec != nullptr) return refuse("draw");
 				auto& executor            = m_renderer.GetRenderExecutor();
 				native_store_end.executor = &executor;
 				if (auto* log = executor.NativeXprReadLog()) {
@@ -1602,26 +1160,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 			     total_dw - remaining_dw, packet_header);
 		}
 
-		if (spec != nullptr && (opcode == Pm4::IT_DRAW_INDEX_INDIRECT || opcode == Pm4::IT_DRAW_INDEX_2 ||
-		                        opcode == Pm4::IT_DRAW_INDEX_OFFSET_2 || opcode == Pm4::IT_DRAW_INDEX_AUTO))
-			return refuse("draw"); // (no table draw took it)
-		uint32_t packet_dw = 0;
-		if (spec == nullptr) {
-			packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
-		} else {
-			// What would submit or wait for the GPU refuses the packet.
-			try {
-				packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
-			} catch (const CommandScheduler::RecorderRefusal& refusal) {
-				Spec::Refuse(refusal.what);
-			}
-			if (spec->refused != nullptr) {
-				// Refused in an indirect buffer it opened: this level goes on past it.
-				if (execution.m_buffer_stack.size() > buffer_index + 1 && packet_dw != 0)
-					execution.m_buffer_stack[buffer_index].deferred_advance_dw = packet_dw;
-				return refuse(spec->refused);
-			}
-		}
+		const uint32_t packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
 			if (execution.m_buffer_stack.size() > buffer_index + 1) {
@@ -1670,7 +1209,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
                                       const volatile void* address, uint32_t count_in_dwords) {
-	if (wait_op != 0 && !m_state_only) {
+	if (wait_op != 0) {
 		BufferFlushAndWait();
 	}
 
@@ -1920,7 +1459,8 @@ uint32_t CommandProcessor::TryNativeAutoDraw(std::span<const uint32_t> packet) {
 	CheckBuffer();
 	// KYTY_RENDER_ASPECT: the HUD at its sides of the screen, unstretched (hud-anchor.h); a draw over several of its
 	// areas goes the normal way, drawn once for each.
-	const auto hud = HudAnchor::Split(HudAnchor::Classify(m_ctx, m_sh_ctx.GetVs(), m_ucfg.GetIndexOffset(), packet[1]));
+	const auto hud =
+	    HudAnchor::Split(HudAnchor::Classify(m_ctx, m_sh_ctx.GetVs(), m_ucfg.GetIndexOffset(), packet[1], primitive));
 	if (hud.Several()) return 0u;
 	std::optional<HudAnchor::Scope>        anchor;
 	std::optional<HudAnchor::StretchScope> widen;
@@ -2173,17 +1713,8 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
                                       uint32_t thread_group_z, uint32_t mode,
                                       uint64_t indirect_args) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
-	if (m_state_only) {
-		if (auto* record = Spec::t_record; record != nullptr && indirect_args == 0)
-			m_renderer.GetComputeRenderExecutor().PredictDispatch(m_sh_ctx, thread_group_x, thread_group_y, thread_group_z,
-			                                                      mode, *record);
-		return;
-	}
 
 	uint32_t frame_num = 0;
-	// uint32_t local_x   = 1;
-	// uint32_t local_y   = 1;
-	// uint32_t local_z   = 1;
 
 	{
 		CheckBuffer();
@@ -2207,9 +1738,6 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		}
 
 		const auto& cs = m_sh_ctx.GetCs().cs_regs;
-		// local_x        = std::max(cs.num_thread_x, 1u);
-		// local_y        = std::max(cs.num_thread_y, 1u);
-		// local_z        = std::max(cs.num_thread_z, 1u);
 		if (cs.wave_size == 64u) {
 			static std::atomic_bool logged_wave64_shader {false};
 			if (!logged_wave64_shader.exchange(true, std::memory_order_relaxed)) {
@@ -2225,28 +1753,6 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		                                                     thread_group_y, thread_group_z, mode,
 		                                                     indirect_args);
 	}
-
-	/*constexpr uint32_t DispatchInitiatorUseThreadDimensions = 1u << 5u;
-	auto               group_count = [](uint32_t threads, uint32_t group_size) {
-	    return (threads == 0
-	                ? 0u
-	                : (threads + std::max(group_size, 1u) - 1u) / std::max(group_size, 1u));
-	};
-
-	auto groups_x = thread_group_x;
-	auto groups_y = thread_group_y;
-	auto groups_z = thread_group_z;
-	if ((mode & DispatchInitiatorUseThreadDimensions) != 0) {
-	    groups_x = group_count(thread_group_x, local_x);
-	    groups_y = group_count(thread_group_y, local_y);
-	    groups_z = group_count(thread_group_z, local_z);
-	}
-
-	const uint64_t invocations =
-	    static_cast<uint64_t>(groups_x) * groups_y * groups_z * local_x * local_y * local_z;
-	if (invocations != 0) {
-	    BufferFlushAndWait();
-	}*/
 }
 
 void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
@@ -2255,8 +1761,6 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
 }
 
 void CommandProcessor::DispatchIndirectAddress(uint64_t args_addr, uint32_t mode) {
-	// (A state pass: its state only.)
-	if (m_state_only) return m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	struct DispatchIndirectArgs {
 		uint32_t thread_group_x, thread_group_y, thread_group_z;
 	};
@@ -2292,7 +1796,8 @@ bool CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = m_num_instances;
 	}
 	// KYTY_RENDER_ASPECT: the HUD at its sides of the screen, unstretched (hud-anchor.h).
-	const auto hud = HudAnchor::Split(HudAnchor::Classify(m_ctx, m_sh_ctx.GetVs(), m_ucfg.GetIndexOffset(), args.vertex_count));
+	const auto hud = HudAnchor::Split(
+	    HudAnchor::Classify(m_ctx, m_sh_ctx.GetVs(), m_ucfg.GetIndexOffset(), args.vertex_count, m_ucfg.GetPrimType()));
 	if (hud.areas == 0 || hud.Single()) {
 		std::optional<HudAnchor::Scope>        anchor;
 		std::optional<HudAnchor::StretchScope> widen;
@@ -2645,12 +2150,6 @@ void CommandProcessor::BreakComputeChain() {
 
 void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
                                     uint64_t event_address) {
-	// (A state pass: the occlusion counter a dump moves, nothing written.)
-	if (m_state_only) {
-		if (event_type == 0x00000039 && event_index == 0x00000001 && event_address != 0)
-			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & ((1ull << 63u) - 1u);
-		return;
-	}
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::TriggerEvent()\n"
 		     "\t event_type  = 0x%08" PRIx32 "\n"
@@ -2824,16 +2323,6 @@ void CommandProcessor::SynchronizeGpu() {
 
 bool GuestGpu::IsGpuThread() noexcept {
 	return g_gpu_thread;
-}
-
-static thread_local bool g_speculation_thread = false;
-
-bool GuestGpu::IsTranslatingThread() noexcept {
-	return g_gpu_thread || g_speculation_thread;
-}
-
-void GuestGpu::SetSpeculationThread(bool speculation) noexcept {
-	g_speculation_thread = speculation;
 }
 
 void GuestGpu::SetOfflineGpuThread(bool gpu_thread) noexcept {

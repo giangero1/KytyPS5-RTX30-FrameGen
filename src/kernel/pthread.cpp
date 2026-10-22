@@ -1062,6 +1062,8 @@ bool TestGuestStackOwnerLifecycle(uint64_t* first_address, uint64_t* second_addr
 
 static KYTY_SYSV_ABI void* RunOnGuestStack(void* arg, pthread_entry_func_t func, void* stack_top) {
 #if defined(__x86_64__) || defined(_M_X64)
+	// Keeps the prologue before the host RSP snapshot below (PGO shrink-wrapping moved it after).
+	asm volatile("" ::: "rbx", "r12", "r13", "memory");
 	void*      ret = nullptr;
 	const auto aligned_stack_top =
 	    reinterpret_cast<uintptr_t>(stack_top) & ~static_cast<uintptr_t>(0x0f);

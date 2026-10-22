@@ -16,6 +16,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace Libs::Graphics {
 class CommandBuffer;
@@ -65,6 +66,10 @@ struct FrameInputs {
 	void*         token = nullptr; // Streamline FrameToken* if generated during DLSS Super Resolution
 	HudlessImages hudless;         // KYTY_FG_HUDLESS
 	bool          valid       = false;
+	// KYTY_FRAMEGEN_BACKEND=fsr: a copy of the game's interface canvas (its alpha: where the HUD is), when known.
+	VulkanImage   ui;
+	vk::ImageView ui_view  = nullptr;
+	bool          ui_valid = false;
 };
 
 // Process start, before the window: loads Streamline when KYTY_FRAMEGEN or KYTY_UPSCALER=dlss is set (it then
@@ -80,6 +85,12 @@ void Initialize();
 // A refused device's advice when this process runs without bottom-up ASLR (issue #45: forcing it on for the emulator in
 // Windows' Exploit protection let the driver make the device); empty otherwise.
 [[nodiscard]] std::string RefusedDeviceAdvice();
+// Linux (KYTY_UPSCALER=dlss through NVIDIA's NGX, the bridge libkyty_dlss.so, kyty-dlss-bridge.h): the Vulkan extensions
+// NGX needs, added to `extensions` before the instance and before the device are made (DLSS off when `available` lacks
+// one). Elsewhere, and without the bridge, nothing.
+void AddInstanceExtensions(const std::vector<vk::ExtensionProperties>& available, std::vector<const char*>& extensions);
+void AddDeviceExtensions(vk::Instance instance, vk::PhysicalDevice physical_device,
+                         const std::vector<vk::ExtensionProperties>& available, std::vector<const char*>& extensions);
 // After the device exists: checks that DLSS-G is available on it.
 void OnDevice(vk::Instance instance, vk::PhysicalDevice physical_device, vk::Device device);
 // Right after the dispatcher is loaded for the device (before the recording layer copies it):
@@ -105,6 +116,47 @@ void NoteDroppedFrame();
 // KYTY_FPS_HUD: the panel's rectangle, normalized to the game image. Its motion vectors are
 // zeroed so generated frames keep the panel in place.
 void SetStaticRect(float x0, float y0, float x1, float y1);
+
+// KYTY_FRAMEGEN_BACKEND=fsr: AMD FidelityFX FSR 3.1 frame generation instead of Streamline's DLSS-G, any GPU: one
+// generated frame per frame (2x), from the same inputs. amd_fidelityfx_vk.dll (AMD's signed runtime, next to the
+// emulator) makes the window's swapchain (its frame generation swapchain: it interpolates and paces the presents on
+// queues of its own, GraphicContext::fsr_*), so the swapchain's calls go through it.
+// After Initialize: FSR asked for and its runtime loaded (device creation then adds its queues).
+[[nodiscard]] bool UsesFsr();
+// FSR generates frames, by the Windows backend or built in (Linux): the interface canvas is looked for (NoteUiCanvas).
+[[nodiscard]] bool FsrMarksHud();
+// The video memory FSR takes beside the game's (FidelityFX's allocations, outside the emulator's allocator, and its
+// HUD images): what the emulator leaves it when it sizes its use of the budget (small_video_memory).
+[[nodiscard]] uint64_t FsrVideoMemoryReserve();
+// After the device's queues: FSR is ready when its queues were made.
+void OnFsrQueues(GraphicContext& graphics);
+// The swapchain is FSR's (Enabled() with the FSR backend).
+[[nodiscard]] bool OwnsSwapchain();
+// The swapchain calls, FSR's in place of Vulkan's (OwnsSwapchain()). Present thread.
+[[nodiscard]] vk::Result CreateSwapchain(GraphicContext& graphics, const vk::SwapchainCreateInfoKHR& info,
+                                         vk::SwapchainKHR* swapchain);
+void                     DestroySwapchain(GraphicContext& graphics, vk::SwapchainKHR swapchain);
+[[nodiscard]] vk::Result GetSwapchainImages(vk::Device device, vk::SwapchainKHR swapchain, uint32_t* count, vk::Image* images);
+[[nodiscard]] vk::Result AcquireNextImage(vk::Device device, vk::SwapchainKHR swapchain, uint64_t timeout,
+                                          vk::Semaphore semaphore, uint32_t* index);
+[[nodiscard]] vk::Result QueuePresent(vk::Queue queue, const vk::PresentInfoKHR& present);
+// Present thread, recording the frame's present commands (before its submit): FSR's configuration for the frame
+// and its prepare pass on `inputs` (null: no inputs, generation off). `region`: the part of the backbuffer the game
+// image covers.
+void RecordPrepare(GraphicContext& graphics, vk::CommandBuffer command, const FrameInputs* inputs, vk::Rect2D region);
+// Present thread: a frame without inputs while FSR generates (an idle refresh, a menu's first frames) is not
+// presented, up to a few in a row; then generation turns off and they are.
+[[nodiscard]] bool SkipsFrame(const FrameInputs* inputs);
+// GPU thread (an interface draw, hud-anchor.h): the game's 3840x2160 interface canvas, composited over the 3D into its
+// output; FSR is told where the HUD is from its alpha, so that generated frames show the HUD of the game's frame
+// instead of moving it with the scene.
+void NoteUiCanvas(uint64_t address);
+// Present thread, in the frame's present commands right after the game image is blitted into `backbuffer`
+// (transfer-destination layout, left so): FSR's HUD-less image of the frame, the backbuffer with the HUD darkened
+// (FSR then takes the HUD's pixels from the game's frame). Before the system overlay: that counts as HUD too.
+// `format`: the backbuffer's (FSR 3 built in, Linux; the Windows backend uses its swapchain's).
+void RecordHudless(GraphicContext& graphics, vk::CommandBuffer command, const FrameInputs* inputs, vk::Image backbuffer,
+                   vk::Extent2D extent, vk::Rect2D region, vk::Format format);
 
 // Renderer thread (Kyty.Gpu).
 // The guest frame ran the TAA pass: the game's 3D view (play, or a cutscene in the engine), not a movie, a menu or a
@@ -135,9 +187,10 @@ void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs);
 
 // Frame generation's own images (not the texture cache's; frame-gen-hudless.cpp's too), on the thread that records
 // them: `image` (re)made as a sampled copy target like `source`, with its view (with `attachment`, a color attachment
-// too where the format allows it, *attachment tells); a barrier from `image`'s state to `layout`, `access` at `stage`.
+// too where the format allows it, *attachment tells; of `size` when given: a blit target; with `failed`, an image that
+// cannot be made sets it instead of exiting); a barrier from `image`'s state to `layout`, `access` at `stage`.
 void Configure(GraphicContext& graphics, VulkanImage& image, vk::ImageView& view, const VulkanImage& source,
-               bool* attachment = nullptr);
+               bool* attachment = nullptr, vk::Extent2D size = {}, bool* failed = nullptr);
 void Transition(vk::CommandBuffer command, VulkanImage& image, vk::ImageAspectFlags aspect, vk::ImageLayout layout,
                 vk::AccessFlags2 access, vk::PipelineStageFlags2 stage);
 
@@ -150,6 +203,9 @@ struct UpscaleImage {
 	vk::Format          format = vk::Format::eUndefined;
 	vk::Extent2D        extent {};
 	vk::ImageUsageFlags usage {};
+	uint32_t            base_level = 0, base_layer = 0; // the subresource the view shows
+	vk::Format          image_format = vk::Format::eUndefined; // the image's own when it differs (a depth image's
+	                                                            // D32S8 under an R32 view): for upscalers making views
 };
 struct UpscaleInputs {
 	void* token = nullptr; // Acquired on the producer thread before deferred command recording.
@@ -164,8 +220,23 @@ struct UpscaleInputs {
 [[nodiscard]] bool UpscalerReady();
 // Producer thread: reserve the token before PrepareInputs can package this guest frame.
 void PrepareUpscale(UpscaleInputs& inputs);
-// Records DLSS into `command` (outside a render pass; the images in their `layout`s): false when it could not.
-[[nodiscard]] bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs);
+// Records DLSS into `command` (outside a render pass; the images in their `layout`s, left so): false when it could not.
+// `dispatch` records the commands DLSS needs around it (the recording worker's when it replays).
+[[nodiscard]] bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs,
+                           const vk::detail::DispatchLoaderDynamic& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER);
+
+// Linux (NVIDIA NGX, kyty-dlss-bridge.h, or FSR 3 built in, fsr-native.h): Streamline makes and shows the generated
+// frames inside vkQueuePresentKHR on Windows; here the presenter shows them itself (swapchain.cpp). True once DLSS-G or
+// FSR 3 is ready that way.
+[[nodiscard]] bool PresenterGenerates();
+// Present thread (PresenterGenerates): `backbuffer` is the frame finished at the swapchain's size, its UI included
+// (general layout), `region` where the game image is in it. Records into `command` the frames between the last frame
+// given and this one, into `outputs` (general layout, storage; in order), and returns how many to show before this
+// frame: none for a frame without inputs (a menu, a movie), or the first one after such frames (no frame to start from).
+[[nodiscard]] uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const FrameInputs* inputs,
+                                const UpscaleImage& backbuffer, vk::Rect2D region, std::span<const UpscaleImage> outputs);
+// Present thread: the frames the last rendered frame was shown as (1 + the generated ones), for PresentedFrames.
+void NotePresented(uint32_t frames);
 
 } // namespace FrameGen
 } // namespace Libs::Graphics

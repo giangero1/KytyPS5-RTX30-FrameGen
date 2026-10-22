@@ -1,6 +1,8 @@
 #include "loader/gameArgs.h"
 
+#include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "graphics/host_gpu/renderer/demonsSouls.h"
 #include "loader/demonsSoulsSuperResolution.h"
 
 #include <cctype>
@@ -10,24 +12,45 @@
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace Loader::GameArgs {
 namespace {
 
-// One "+name=value" line per entry of KYTY_GAME_CONVARS (';' or ',' between entries).
+// One "+name=value" line per console variable: Demon's Souls' defaults, then those of KYTY_GAME_CONVARS (';' or ','
+// between entries), whose names replace the defaults'. The default: no XPR index-buffer culling, a GPU pass that culls
+// every object's triangles (~2800 compute dispatches a frame at Boletaria 1-1) before drawing them; the PC GPU draws
+// them all instead, the image unchanged (Boletaria 1-1 standing 34.30 -> 36.48 fps; doIndexBufferCulling=true: back).
+// Above a 60 Hz vblank also gameMinDeltaTime=0.004 (as run_ds.sh gives it): the game steps by at least a frame of its
+// target rate each frame, so every frame past 60 fps played it that much faster (whatever started the emulator).
 const std::string& ExtraLines() {
 	static const std::string lines = [] {
-		std::string out;
-		const char* value = std::getenv("KYTY_GAME_CONVARS");
-		const std::string list = value != nullptr ? value : "";
-		for (size_t at = 0; at < list.size();) {
-			auto end = list.find_first_of(";,", at);
-			if (end == std::string::npos) end = list.size();
-			const auto first = list.find_first_not_of(' ', at);
-			const auto last  = list.find_last_not_of(' ', end - 1);
-			if (first != std::string::npos && first < end && last >= first) out += "+" + list.substr(first, last - first + 1) + "\n";
-			at = end + 1;
+		std::vector<std::pair<std::string, std::string>> entries; // (name, "name=value")
+		const auto add = [&](const std::string& list) {
+			for (size_t at = 0; at < list.size();) {
+				auto end = list.find_first_of(";,", at);
+				if (end == std::string::npos) end = list.size();
+				const auto first = list.find_first_not_of(' ', at);
+				const auto last  = list.find_last_not_of(' ', end - 1);
+				if (first != std::string::npos && first < end && last >= first) {
+					auto       entry = list.substr(first, last - first + 1);
+					const auto name  = entry.substr(0, entry.find('='));
+					std::erase_if(entries, [&](const auto& held) { return held.first == name; });
+					entries.emplace_back(name, std::move(entry));
+				}
+				at = end + 1;
+			}
+		};
+		const char* value = std::getenv("KYTY_GAME_CONVARS"); // (0: none, not even the defaults)
+		if (value != nullptr && std::string_view(value) == "0") return std::string();
+		if (Libs::Graphics::DemonsSouls::IsSupportedGame()) {
+			add("doIndexBufferCulling=false");
+			if (Config::GetVblankFrequency() > 60) add("gameMinDeltaTime=0.004");
 		}
+		if (value != nullptr) add(value);
+		std::string out;
+		for (const auto& [name, entry]: entries) out += "+" + entry + "\n";
 		return out;
 	}();
 	return lines;

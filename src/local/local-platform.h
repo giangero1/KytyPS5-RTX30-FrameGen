@@ -99,9 +99,6 @@ MemoryUse ProcessMemory();
 uint64_t  PhysicalMemory();
 // The physical memory the system can still give without paging (free and standby; Linux: MemAvailable). 0: unknown.
 uint64_t AvailablePhysicalMemory();
-// Diagnostics: the process's address space in [begin, end) to stdout, labelled: each allocation of 16 MiB and more (its
-// base, size, state and type), the smaller ones counted, and the free gaps of 1 GiB and more. Windows only.
-void LogAddressSpace(const char* label, uint64_t begin, uint64_t end);
 // Diagnostics: the busy blocks of every heap of the process by size ("size<TAB>count<TAB>bytes" lines to `path`, the
 // heaps locked while walked: a pause of a second or so), by size and first qword (<path>.sig.tsv: SPIR-V, a vtable as
 // module+offset, zero, data) and the committed private allocations (<path>.vm.tsv, the heaps' marked); false where
@@ -125,6 +122,8 @@ bool QuerySharedGpuMemory(uint64_t* usage);
 // The file's Authenticode signature is valid (no network: revocation not checked) and its signer is NVIDIA
 // Corporation: NVIDIA's DLLs the emulator loads (Streamline for frame generation, DLSS). false elsewhere.
 bool IsNvidiaSigned(const std::wstring& path);
+// The same for AMD's (Advanced Micro Devices: the FidelityFX runtime, KYTY_FRAMEGEN_BACKEND=fsr).
+bool IsAmdSigned(const std::wstring& path);
 
 #if defined(_WIN32)
 // With its output in files (run-windows.ps1's logs), the console window a launcher gave the process

@@ -3,7 +3,6 @@
 #include "live-counters.h"
 #include "live-trace.h"
 #include "time-census.h"
-#include "writeback-verify.h"
 #include "fresh-memory.h"
 
 #include "common/assert.h"
@@ -17,7 +16,6 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "native-resource-state.h"
-#include "speculation-state.h"
 
 #include <algorithm>
 #include <array>
@@ -32,10 +30,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <shared_mutex>
-#include <string>
 #include <thread>
-#include <type_traits>
-#include <unordered_map>
 #include <vector>
 
 #include <immintrin.h>
@@ -70,19 +65,11 @@ namespace Libs::LibKernel::Memory {
 extern "C" {
 // 1: small host-copy reads of guest backing take a lock-free read transaction
 // with a cached translation instead of the backing mutex.
-[[gnu::used]] volatile std::atomic_uint32_t kyty_local_backing_read_mode {0};
-// 1: the other parts of a view a partial unmap maps again (Windows) get the GPU trackers' protection of their watched
-// pages at once, before the address-space lock is released (GuestBackingStore::ProtectRemapped). 0: given back after
-// the lock (ReapplyRemappedViews): a CPU write to a watched page in between went unseen (a GPU copy left stale, or a
-// GPU-owned page later written back over the write).
-[[gnu::used]] volatile std::atomic_uint32_t kyty_local_protective_remap {1};
+[[gnu::used]] volatile std::atomic_uint32_t kyty_local_backing_read_mode {1};
 // 1: a partial unmap of a view (Windows) leaves the range parked in the view instead of unmapping the whole view and
 // mapping its other parts again (GuestBackingStore::UnmapOne); 2: parked no-access (a stray access faults, for
 // debugging). 0: views with nothing parked yet are split at once, as before (a view holding parked ranges keeps parking).
 [[gnu::used]] volatile std::atomic_uint32_t kyty_local_park_unmaps {1};
-// (Diagnostic: microseconds UnmapBacking waits after it mapped views again, before ReapplyRemappedViews: the window
-// kyty_local_protective_remap 0 leaves, widened.)
-[[gnu::used]] volatile std::atomic_uint32_t kyty_local_remap_window_us {0};
 }
 
 namespace VirtualMemory = Common::VirtualMemory;
@@ -548,29 +535,6 @@ public:
 			return 0;
 		}
 		if (FullyCommitted(virtual_addr, size)) {
-			// KYTY_VERIFY_COMMITTED=1: the locked walk's answer compared (COMMITTED-MISMATCH lines; none over two
-			// rounds of the user's 1-1 route).
-			static const bool verify = std::getenv("KYTY_VERIFY_COMMITTED") != nullptr;
-			if (verify) {
-				Common::LockGuard lock(m_mutex);
-				uint64_t          covered = 0;
-				auto              it      = m_ranges.upper_bound(virtual_addr);
-				if (it != m_ranges.begin()) {
-					--it;
-					uint64_t expected = virtual_addr;
-					for (; it != m_ranges.end() && it->second.start <= expected && covered < size; ++it) {
-						const auto range_end = End(it->second.start, it->second.size);
-						if (range_end <= expected || !IsCommittedRangeType(it->second.type)) break;
-						covered += std::min(size - covered, range_end - expected);
-						expected = range_end;
-					}
-				}
-				static std::atomic<uint32_t> mismatches {0};
-				if (covered != size && mismatches.fetch_add(1, std::memory_order_relaxed) < 32)
-					std::printf("COMMITTED-MISMATCH addr=0x%llx size=0x%llx covered=0x%llx\n",
-					            static_cast<unsigned long long>(virtual_addr), static_cast<unsigned long long>(size),
-					            static_cast<unsigned long long>(covered));
-			}
 			return size;
 		}
 		struct CachedRange {
@@ -1247,22 +1211,11 @@ bool TryReadBackingToHost(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBackingToHost(vaddr, data, size);
 }
 
-// A speculative translation's CPU read of guest memory no GPU work wrote: not memory its own work or its guest
-// memory writes write (both wait for its commit), and noted (speculation-state.h: a hole that writes it stops the
-// commit before the reading segment).
-static bool SpeculationReadsClean(uint64_t vaddr, uint64_t size) {
-	auto* spec = Graphics::Spec::Current();
-	if (spec == nullptr) return true;
-	if (spec->WrittenIntersects(vaddr, size) || spec->JournalIntersects(vaddr, size)) return false;
-	spec->NoteCleanRead(vaddr, size);
-	return true;
-}
-
 bool TryReadGpuCleanBackingToHost(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
-		if (!Graphics::GuestGpu::IsTranslatingThread() ||
+		if (!Graphics::GuestGpu::IsGpuThread() ||
 		    GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
-		    GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size) || !SpeculationReadsClean(vaddr, size)) {
+		    GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size)) {
 			return false;
 		}
 	}
@@ -1280,7 +1233,7 @@ bool IsUniqueGuestBackingRangeAcrossMappings(uint64_t vaddr, uint64_t size) {
 // `data` is host memory (every caller reads into a local or a scratch vector): the lock-free
 // host read applies; the guest-destination variant took both backing locks for each word.
 bool TryReadGpuCleanBackingOnWatchedPage(uint64_t vaddr, void* data, uint64_t size) {
-	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsTranslatingThread() &&
+	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread() &&
 	       IsGpuAddressRange(vaddr, size) && g_gpu_resources->HasReadWatchers(vaddr, size) &&
 	       TryReadGpuCleanBackingToHost(vaddr, data, size);
 }
@@ -1291,9 +1244,9 @@ bool ReadFaults(uint64_t vaddr, uint64_t size) {
 
 bool TryReadGpuShaderSpan(uint64_t vaddr, void* data, uint64_t size, bool clean) {
 	if (!data || size < 8 || size > (clean ? 4096u : 64u) || size % 4 != 0 || !g_gpu_resources ||
-	    !Graphics::GuestGpu::IsTranslatingThread() || !IsGpuAddressRange(vaddr, size))
+	    !Graphics::GuestGpu::IsGpuThread() || !IsGpuAddressRange(vaddr, size))
 		return false;
-	if (!clean && !g_gpu_resources->HasReadWatchers(vaddr, size) && SpeculationReadsClean(vaddr, size)) {
+	if (!clean && !g_gpu_resources->HasReadWatchers(vaddr, size)) {
 		// 8..64 bytes of whole words: fixed-size moves inline, a variable-size memcpy is a CRT call
 		// (thousands of SRT span reads per frame).
 		auto*       out = static_cast<uint8_t*>(data);
@@ -1310,15 +1263,6 @@ thread_local uint64_t g_srt_shader_hash = 0;
 
 bool SyncGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
-		return true;
-	}
-	if (Graphics::Spec::Current() != nullptr) {
-		// A speculative translation (speculation-state.h) reads guest memory as it is: words the GPU wrote need the
-		// GPU first (the translation that follows waits for it).
-		if (GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size) ||
-		    GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
-		    (!Graphics::GuestGpu::IsGpuThread() && ReadFaults(vaddr, size)) || !SpeculationReadsClean(vaddr, size))
-			Graphics::Spec::Refuse("GPU-written guest memory");
 		return true;
 	}
 	if (!Graphics::GuestGpu::IsGpuThread() ||
@@ -1427,15 +1371,6 @@ void WriteBacking(uint64_t vaddr, const void* data, uint64_t size, const char* s
 	const auto index = g_write_back_count.fetch_add(1, std::memory_order_relaxed);
 	g_write_backs[index % WriteBackRecords] = {std::chrono::steady_clock::now().time_since_epoch().count(),
 	                                          vaddr, size, source};
-	// (Diagnostic, KYTY_WRITEBACK_VERIFY: the GPU-owned pages checked before, hashed again after.)
-	struct Verify {
-		uint64_t vaddr, size;
-		bool     on;
-		~Verify() {
-			if (on) WritebackVerify::Rehash(vaddr, size);
-		}
-	} verify {vaddr, size, WritebackVerify::Enabled()};
-	if (verify.on) WritebackVerify::Check(vaddr, static_cast<const uint8_t*>(data), size, source);
 	if (TryWriteBacking(vaddr, data, size)) {
 		return;
 	}

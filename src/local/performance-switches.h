@@ -1,7 +1,7 @@
 #pragma once
-// Runtime switches of the performance paths. Every path keeps the original
-// behaviour unless its environment variable is set; the GPU thread applies them
-// once, before it consumes commands. Values outside a switch's range abort.
+// Runtime switches of the performance paths. Their defaults are the release settings (the values the variables
+// define them with); an environment variable sets one for an A/B or a workaround (0 turns a path off). The GPU
+// thread applies them once, before it consumes commands. Values outside a switch's range abort.
 
 #include "native-buffer-residency.h"
 #include "local-platform.h"
@@ -52,9 +52,6 @@ extern volatile std::atomic_uint32_t kyty_local_table_store_budget;
 extern volatile std::atomic_uint32_t kyty_local_table_set_proofs;
 extern volatile std::atomic_uint32_t kyty_local_table_mru;
 #endif
-// Speculative translation of graphics command buffers (src/graphics/guest_gpu/speculation.h).
-extern volatile std::atomic_uint32_t kyty_local_speculate_mode;
-extern volatile std::atomic_uint32_t kyty_local_speculate_threads;
 }
 
 inline void InitializePerformanceSwitches() {
@@ -66,7 +63,6 @@ inline void InitializePerformanceSwitches() {
 	};
 	const std::array switches {
 	    // Shader resource preparation.
-	    Switch {"KYTY_SRT_NATIVE", &kyty_local_srt_native_mode},
 	    Switch {"KYTY_SRT_PREDICATES", &kyty_local_srt_predicate_mode},
 	    Switch {"KYTY_PREPARATION_SCRATCH", &kyty_local_preparation_scratch_mode},
 	    Switch {"KYTY_PREPARATION_LOOKUP", &kyty_local_preparation_lookup_mode},
@@ -97,14 +93,14 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_RANGE_SET_FAST", &kyty_local_range_set_fast_mode},
 	    Switch {"KYTY_IMAGE_GRANULES", &kyty_local_image_granules_mode, 0, 2},
 	    Switch {"KYTY_TEXTURE_RESOLVE_PAGES", &kyty_local_texture_resolve_pages_mode},
-	    Switch {"KYTY_PARTIAL_IMAGE_DIRTY", &kyty_local_partial_image_dirty_mode, 0, 2},
+	    Switch {"KYTY_PARTIAL_IMAGE_DIRTY", &kyty_local_partial_image_dirty_mode},
 	    Switch {"KYTY_PARTIAL_ROW_BANDS", &kyty_local_partial_row_bands_mode},
 	    // Sampled views refresh only their levels of a streamed texture (default on; 0 for an A/B).
 	    Switch {"KYTY_TEXTURE_LEVELS", &kyty_local_texture_levels_mode},
 	    Switch {"KYTY_ASYNC_REPROTECT", &kyty_local_async_reprotect_mode},
 	    Switch {"KYTY_READBACK_NARROW", &kyty_local_readback_narrow_mode},
 	    // Also creates the transfer queue at device creation (vulkanWindow.cpp).
-	    Switch {"KYTY_READBACK_QUEUE", &kyty_local_readback_queue_mode, 0, 3},
+	    Switch {"KYTY_READBACK_QUEUE", &kyty_local_readback_queue_mode},
 	    // Images and command submission.
 	    Switch {"KYTY_IMAGE_BARRIER_DEDUPE", &kyty_local_image_barrier_dedupe},
 	    Switch {"KYTY_IMAGE_POOL", &kyty_local_image_pool_mode},
@@ -148,13 +144,11 @@ inline void InitializePerformanceSwitches() {
 	    // Table lookups that ask the last answer first (bits: pair cache size, variant, image set).
 	    Switch {"KYTY_TABLE_MRU", &kyty_local_table_mru, 0, 7},
 #endif
-	    Switch {"KYTY_SPECULATE", &kyty_local_speculate_mode, 0, 4},
-	    Switch {"KYTY_SPECULATE_THREADS", &kyty_local_speculate_threads, 1, 8},
 	};
 	std::string enabled;
 	for (const auto& setting: switches) {
 		const auto* text = std::getenv(setting.environment);
-		if (text == nullptr) {
+		if (text == nullptr || *text == '\0') { // (an empty value keeps the default, as run_ds.sh's ${NAME:-default} did)
 			continue;
 		}
 		char*      end   = nullptr;

@@ -1,17 +1,7 @@
-# 本地 PGO
+# PGO
 
-当前正式构建：`_Build/agent30fps-20260917/build/`，Clang 18 / Release / ThinLTO。
-其 profile 输入是 `_Build/pgo/walk8-20260915-v5/kyty.profdata`，不是可随测试日志删除的临时文件。
-实际编译/链接参数以该构建的 Ninja 命令和 CMakeCache 为准。
-
-重新训练时使用独立目录，保持训练和使用时的源码一致：
-
-1. 用 `-fprofile-instr-generate` 构建训练版本；若正常退出走 `std::quick_exit`，训练版本额外链接 `pgo-quick-exit.cpp`，确保 profile 写出。
-2. 设置 `LLVM_PROFILE_FILE` 到新的输出目录，正常运行代表性场景并退出。训练版本 FPS 不是收益结果。
-3. 用 `llvm-profdata-18 merge` 合并确认属于本次成功运行的非空 profraw。
-4. 在独立构建中使用 `-fprofile-instr-use=/绝对路径/kyty.profdata`，记录源码和二进制指纹，按 [同进程测量方法](../../docs/BENCHMARKING.md) 验证。
-
-不要在 FPS 测量期间编译或训练，不要覆盖正在运行或正式交付的二进制。mimalloc 是独立宿主分配器选择，不能把更换分配器与 PGO 收益混为一谈。
+发布构建（GitHub Actions 和本地 `build-windows.cmd`）都用 profile 引导优化。不要在测帧率时编译或训练，
+也不要覆盖正在运行或已发布的可执行文件。
 
 ## Windows
 
@@ -49,6 +39,6 @@ ab-exe ABBA，120 Hz 上限（`-Vblank 120`），走 10 s 后两个 6 s 窗口�
 - 1-1：渲染线程 13.52 → 12.81 ms/帧（-5.3%），fps 65.3 → 69.3（A 的第一轮带预热，去掉它 +2.7%）；
 - Latria：12.47 → 12.15 ms/帧（-2.6%），fps 75.2 → 76.1。
 2026-10-20（台式机，发布前）：10-18 之后的提交让 20 个 TU 里 62 个函数失配（bufferCache 6、renderDraw 6、graphicsRun 4、
-textureCache 4 等）。在 ddc59a8e 上用同样四个场景重新训练（`pgo-multi.ps1`），ab-exe ABBA，120 Hz 上限：
+textureCache 4 等）。在 ddc59a8e 上用同样四个场景重新训练（`tools\local\windows\pgo-multi.ps1`），ab-exe ABBA，120 Hz 上限：
 - 1-1：渲染线程 13.71 → 13.04 ms/帧（-4.9%），fps 70.0 → 72.8；
 - Latria：12.23 → 12.17 ms/帧，fps 75.8 → 76.5。

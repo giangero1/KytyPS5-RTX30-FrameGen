@@ -9,6 +9,8 @@ namespace Libs::Graphics {
 
 void               HostInputInit();
 void               HostInputKey(int key_code, bool down);
+// The keymap (--keymap) gives that key to a control of the pad.
+[[nodiscard]] bool HostInputMapsKey(int key_code);
 void               HostInputMouseButton(uint8_t mouse_button, bool down);
 void               HostInputToggleMouseToJoystick();
 [[nodiscard]] bool HostInputWaitEvent(SDL_Event* event);

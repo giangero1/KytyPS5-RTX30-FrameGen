@@ -18,6 +18,9 @@
 #include "vulkan-recording.h"
 #endif
 #include "frame-gen.h"
+#include "screenshot.h"
+#include "anti-lag.h"
+#include "fsr-native.h"
 #include "frame-gen-hudless.h"
 #include "local-platform.h"
 #include "perf-overlay.h"
@@ -60,6 +63,7 @@ struct Presenter::Frame {
 	bool                   hdr          = false; // BT.2100 PQ pixels
 	bool                   blank        = false; // a cleared frame (no guest picture)
 	bool                   scene        = false; // the game's 3D view (FrameGen::TakeScene)
+	uint64_t               anti_lag_frame = 0;   // the frame AMD Anti-Lag numbered it (AntiLag::Flip), 0: none
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
@@ -320,8 +324,16 @@ public:
 	[[nodiscard]] Status AcquireNextImage();
 	[[nodiscard]] bool   PrepareSystemOverlay(SystemOverlayHud* hud = nullptr);
 	// `scene`: the frame shows the game's 3D view (Presenter::IsSceneFrame).
+	// `fsr_inputs`: the frame's inputs for FSR's HUD-less image (FrameGen::RecordHudless), or null.
+	// `target` (Linux frame generation): the frame finished into that image (the swapchain's size and format; its
+	// `target_view` for the system overlay) instead of the acquired swapchain image, left in the general layout.
 	void                 RecordPresentCommands(CommandBuffer& command, VulkanImage& source,
-	                                           bool draw_system_overlay, bool scene);
+	                                           bool draw_system_overlay, bool scene,
+	                                           const FrameGen::FrameInputs* fsr_inputs = nullptr,
+	                                           VulkanImage* target = nullptr, vk::ImageView target_view = nullptr);
+	// The acquired swapchain image made a copy of `source` (the swapchain's size and format, general layout) and left for
+	// the present (Linux frame generation: a generated frame, or the finished one).
+	void                 RecordShow(CommandBuffer& command, const VulkanImage& source);
 	uint64_t             Submit(CommandScheduler& scheduler);
 	[[nodiscard]] Status Present();
 
@@ -554,7 +566,8 @@ struct Presenter::Impl {
 			if (presents > 1) {
 				std::snprintf(title.data(), title.size(), "%.0f FPS",
 				              (seconds >= 1.0 ? hud_frames / seconds : game) * presents);
-				std::snprintf(detail.data(), detail.size(), "DLSS Frame Generation %ux  |  game %.0f fps", presents, game);
+				std::snprintf(detail.data(), detail.size(), "%s Frame Generation %ux  |  game %.0f fps",
+				              FrameGen::UsesFsr() || FsrNative::InterpolationRequested() ? "FSR 3" : "DLSS", presents, game);
 			} else {
 				std::snprintf(title.data(), title.size(), "%.0f FPS", game);
 			}
@@ -640,6 +653,221 @@ struct Presenter::Impl {
 		}
 	}
 
+#if defined(__linux__)
+	// Linux frame generation (FrameGen::PresenterGenerates; Streamline does this inside vkQueuePresentKHR on Windows): the
+	// frame finished at the swapchain's size with its system overlay (`composed`), and the frames NGX makes between two
+	// such frames (`generated`), shown before it, evenly spaced over the time between the game's frames.
+	VulkanImage                           composed;
+	vk::ImageView                         composed_view = nullptr;
+	std::array<VulkanImage, 3>            generated;
+	std::array<vk::ImageView, 3>          generated_views {};
+	bool                                  generation_off = false;
+	std::chrono::steady_clock::time_point last_game_frame {};
+	double                                game_frame_ms = 0.0; // the game's frame time, smoothed
+
+	~Impl() { DestroyGenerationImages(); }
+
+	void DestroyGenerationImages() {
+		if (composed.image == nullptr && generated[0].image == nullptr) return;
+		present_scheduler.Wait(present_scheduler.CurrentTick() - 1);
+		auto&      graphics = window.graphic_ctx;
+		const auto destroy  = [&](VulkanImage& image, vk::ImageView& view) {
+			if (view != nullptr) graphics.device.destroyImageView(view, nullptr);
+			view = nullptr;
+			if (image.image != nullptr) graphics.DeleteImage(image);
+		};
+		destroy(composed, composed_view);
+		for (size_t i = 0; i < generated.size(); ++i) destroy(generated[i], generated_views[i]);
+	}
+
+	// The images at the swapchain's size and format (made again when it changes); false when NGX cannot write that format.
+	[[nodiscard]] bool ConfigureGenerationImages() {
+		const auto extent = swapchain.Extent();
+		const auto format = swapchain.Format();
+		if (composed.image != nullptr && composed.extent.width == extent.width && composed.extent.height == extent.height &&
+		    composed.format == format)
+			return true;
+		DestroyGenerationImages();
+		auto&      graphics = window.graphic_ctx;
+		const auto features = graphics.GetFormatProperties(format).optimalTilingFeatures;
+		if (!(features & vk::FormatFeatureFlagBits::eStorageImage) || !(features & vk::FormatFeatureFlagBits::eSampledImage)) {
+			std::printf("Frame generation: the swapchain's format (%d) cannot be NGX's output (no storage): off\n",
+			            static_cast<int>(format));
+			std::fflush(stdout);
+			return false;
+		}
+		const auto make = [&](VulkanImage& image, vk::ImageView& view, vk::ImageUsageFlags usage) {
+			vk::ImageCreateInfo create {};
+			create.imageType     = vk::ImageType::e2D;
+			create.extent        = vk::Extent3D {extent.width, extent.height, 1};
+			create.mipLevels     = 1;
+			create.arrayLayers   = 1;
+			create.format        = format;
+			create.tiling        = vk::ImageTiling::eOptimal;
+			create.initialLayout = vk::ImageLayout::eUndefined;
+			create.usage         = usage;
+			create.sharingMode   = vk::SharingMode::eExclusive;
+			create.samples       = vk::SampleCountFlagBits::e1;
+			if (!graphics.CreateImage(create, image)) return false;
+			vk::ImageViewCreateInfo info {};
+			info.image            = image.image;
+			info.viewType         = vk::ImageViewType::e2D;
+			info.format           = format;
+			info.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+			return graphics.device.createImageView(&info, nullptr, &view) == vk::Result::eSuccess;
+		};
+		const auto transfer = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+		bool       made     = make(composed, composed_view,
+		                           transfer | vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled);
+		for (size_t i = 0; made && i < generated.size(); ++i)
+			made = make(generated[i], generated_views[i],
+			            transfer | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled);
+		if (!made) {
+			std::printf("Frame generation: no memory for its %ux%u frames: off\n", extent.width, extent.height);
+			std::fflush(stdout);
+			DestroyGenerationImages();
+			return false;
+		}
+		LOGF("frame generation: frames of %ux%u, format %d\n", extent.width, extent.height, static_cast<int>(format));
+		return true;
+	}
+
+	// The frame finished into `composed`, NGX's frames between the last one and it into `generated`; those shown, then it.
+	// False: the frame goes the normal way (frame generation off for good).
+	[[nodiscard]] bool PresentGenerated(Frame& frame) {
+		if (generation_off) return false;
+		const auto overlay_visual = GetSystemOverlayVisualState();
+		if (swapchain.SetHdr(frame.hdr)) RecoverSwapchain(Swapchain::Status::Recreate);
+		if (!ConfigureGenerationImages()) {
+			generation_off = true;
+			return false;
+		}
+		auto*      hud    = UpdateHud(false);
+		const auto extent = swapchain.Extent();
+		const auto format = swapchain.Format();
+
+		uint32_t count = 0;
+		{
+			// (The renderer's lock: frame generation's inputs and HUD-less images are the renderer's, as on Windows.)
+			RenderLockGuard render_lock(renderer.GetMutex());
+			auto&           command = present_scheduler.BeginCommand();
+			const bool      draw_system_overlay =
+			    (overlay_visual.active || hud != nullptr) && swapchain.PrepareSystemOverlay(hud);
+			if (hud == nullptr || !draw_system_overlay) {
+				FrameGen::SetStaticRect(0.0f, 0.0f, 0.0f, 0.0f); // (no panel: the whole picture moves)
+			} else {
+				// The panel's motion vectors are zeroed (a margin around it).
+				const auto& region = hud->region;
+				const float w = static_cast<float>(region.extent.width), h = static_cast<float>(region.extent.height);
+				const float margin = 8.0f;
+				FrameGen::SetStaticRect(
+				    (static_cast<float>(hud->drawn.offset.x - region.offset.x) - margin) / w,
+				    (static_cast<float>(hud->drawn.offset.y - region.offset.y) - margin) / h,
+				    (static_cast<float>(hud->drawn.offset.x - region.offset.x) + static_cast<float>(hud->drawn.extent.width) + margin) / w,
+				    (static_cast<float>(hud->drawn.offset.y - region.offset.y) + static_cast<float>(hud->drawn.extent.height) + margin) / h);
+			}
+			// (With the frame's inputs FSR 3 built in gets its HUD-less image too: FrameGen::RecordHudless.)
+			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay, frame.scene,
+			                                frame.fg.valid && !frame.reusing_last ? &frame.fg : nullptr, &composed,
+			                                composed_view);
+			if (FrameGen::HudlessOn() && !frame.reusing_last) {
+				FrameGen::ScaleHudless(window.graphic_ctx, command.Handle(), frame.fg, extent, swapchain.PresentRegion(),
+				                       format);
+			}
+			std::array<FrameGen::UpscaleImage, 3> outputs {};
+			for (size_t i = 0; i < generated.size(); ++i) {
+				auto&                   image = generated[i];
+				vk::ImageMemoryBarrier2 barrier {};
+				barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+				barrier.srcAccessMask       = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+				barrier.dstStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+				barrier.dstAccessMask       = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+				barrier.oldLayout           = image.state.layout;
+				barrier.newLayout           = vk::ImageLayout::eGeneral;
+				barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier.image               = image.image;
+				barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+				vk::DependencyInfo dependency {};
+				dependency.imageMemoryBarrierCount = 1;
+				dependency.pImageMemoryBarriers    = &barrier;
+				command.Handle().pipelineBarrier2(dependency);
+				image.state = {vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderWrite, vk::ImageLayout::eGeneral};
+				outputs[i]  = {image.image, generated_views[i], vk::ImageLayout::eGeneral, format, extent, image.usage, 0, 0};
+			}
+			const FrameGen::UpscaleImage backbuffer {composed.image, composed_view, vk::ImageLayout::eGeneral, format, extent,
+			                                         composed.usage, 0, 0};
+			count = FrameGen::Generate(window.graphic_ctx, command.Handle(), frame.fg.valid && !frame.reusing_last ? &frame.fg : nullptr,
+			                           backbuffer, swapchain.PresentRegion(), outputs);
+			// (A live `screenshot`: the finished frame and the frame generated before it.)
+			const auto shot      = Screenshot::Take();
+			auto       capture   = Screenshot::Record(window.graphic_ctx, command.Handle(), composed, shot);
+			auto       generated_capture =
+			    count > 0 && !shot.empty() ? Screenshot::Record(window.graphic_ctx, command.Handle(), generated[0], shot + ".gen.ppm")
+			                               : Screenshot::Pending {};
+			frame.present_tick = present_scheduler.Submit();
+			if (capture.buffer != VK_NULL_HANDLE || generated_capture.buffer != VK_NULL_HANDLE) {
+				present_scheduler.Wait(frame.present_tick);
+				Screenshot::Finish(window.graphic_ctx, capture);
+				Screenshot::Finish(window.graphic_ctx, generated_capture);
+			}
+		}
+
+		// The game's frame time (the time between its frames here), smoothed; long gaps (a load, a pause) left out.
+		const auto now = std::chrono::steady_clock::now();
+		if (last_game_frame != std::chrono::steady_clock::time_point {}) {
+			const double ms = std::chrono::duration<double, std::milli>(now - last_game_frame).count();
+			if (ms > 2.0 && ms < 100.0) game_frame_ms = game_frame_ms <= 0.0 ? ms : game_frame_ms * 0.8 + ms * 0.2;
+		}
+		last_game_frame = now;
+		const auto spacing = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+		    std::chrono::duration<double, std::milli>(game_frame_ms / static_cast<double>(count + 1)));
+		// A newer game frame already waiting: the generated frames left are not shown (the game never waits for them).
+		const auto behind = [&] {
+			std::lock_guard lock(waiting_mutex);
+			return !waiting.Empty();
+		};
+		const auto show = [&](const VulkanImage& image) {
+			auto status = swapchain.AcquireNextImage();
+			if (status != Swapchain::Status::Success) {
+				RecoverSwapchain(status);
+				return false;
+			}
+			auto& command = present_scheduler.BeginCommand();
+			swapchain.RecordShow(command, image);
+			(void)swapchain.Submit(present_scheduler);
+			status = swapchain.Present();
+			if (status != Swapchain::Status::Success) {
+				RecoverSwapchain(status);
+				return false;
+			}
+			return true;
+		};
+		const auto start = std::chrono::steady_clock::now();
+		uint32_t   shown = 0;
+		bool       ok    = true;
+		for (uint32_t i = 0; ok && i < count; ++i) {
+			if (i > 0) {
+				if (behind()) break;
+				std::this_thread::sleep_until(start + spacing * i);
+			}
+			ok = show(generated[i]);
+			shown += ok ? 1u : 0u;
+		}
+		if (ok) {
+			if (shown > 0 && !behind()) std::this_thread::sleep_until(start + spacing * shown);
+			AntiLag::Present(frame.anti_lag_frame);
+			ok = show(composed);
+		}
+		FrameGen::NotePresented(shown + 1);
+		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
+		window.UpdateTitle(shown + (ok ? 1u : 0u),
+		                   FsrNative::InterpolationRequested() || FrameGen::UsesFsr() ? "FSR 3 FG" : "DLSS-G");
+		frames.Release(&frame, true);
+		return true;
+	}
+#endif
+
 #if defined(_WIN32)
 	// Presents faster than the display refreshes only pile up in the compositor, and on Windows
 	// a present blocked there holds the driver's device lock (see Swapchain::Present).
@@ -696,12 +924,19 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
 	if (formats.size() == 1 && formats.front().format == vk::Format::eUndefined) {
 		return {vk::Format::eR8G8B8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
 	}
-	for (const auto& candidate: formats) {
-		if (candidate.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
-			continue;
-		}
-		if (candidate.format == vk::Format::eB8G8R8A8Unorm || candidate.format == vk::Format::eR8G8B8A8Unorm) {
-			return candidate;
+	// (Linux frame generation: first a format NGX can write its frames in, a storage image, PresentGenerated.)
+	for (int pass = FrameGen::PresenterGenerates() ? 0 : 1; pass < 2; ++pass) {
+		for (const auto& candidate: formats) {
+			if (candidate.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
+				continue;
+			}
+			if (pass == 0 && !(graphics.GetFormatProperties(candidate.format).optimalTilingFeatures &
+			                   vk::FormatFeatureFlagBits::eStorageImage)) {
+				continue;
+			}
+			if (candidate.format == vk::Format::eB8G8R8A8Unorm || candidate.format == vk::Format::eR8G8B8A8Unorm) {
+				return candidate;
+			}
 		}
 	}
 	EXIT("no supported UNORM swapchain format\n");
@@ -758,6 +993,8 @@ void Swapchain::Create() {
 	create_info.imageArrayLayers = 1;
 	create_info.imageUsage =
 	    vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
+	// (FSR's HUD-less image is a copy of the backbuffer: FrameGen::RecordHudless.)
+	if (FrameGen::OwnsSwapchain()) create_info.imageUsage |= vk::ImageUsageFlagBits::eTransferSrc;
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
@@ -778,8 +1015,13 @@ void Swapchain::Create() {
 	}
 	m_fifo.store(create_info.presentMode == vk::PresentModeKHR::eFifo, std::memory_order_relaxed);
 	create_info.clipped          = VK_TRUE;
-	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
-	                     "vkCreateSwapchainKHR");
+	// KYTY_FRAMEGEN_BACKEND=fsr: FSR's frame generation swapchain, made and used through its own functions.
+	if (FrameGen::OwnsSwapchain()) {
+		RequireVulkanSuccess(FrameGen::CreateSwapchain(graphics, create_info, &m_handle), "FSR frame generation swapchain");
+	} else {
+		RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+		                     "vkCreateSwapchainKHR");
+	}
 	EXIT_IF(m_handle == nullptr);
 	if (Config::HdrEnabled()) {
 		std::printf("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
@@ -788,7 +1030,8 @@ void Swapchain::Create() {
 
 	m_images = EnumerateVulkan<vk::Image>(
 	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* images) {
-		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
+		    return FrameGen::OwnsSwapchain() ? FrameGen::GetSwapchainImages(graphics.device, m_handle, count, images)
+		                                     : graphics.device.getSwapchainImagesKHR(m_handle, count, images);
 	    });
 	EXIT_NOT_IMPLEMENTED(m_images.empty());
 
@@ -865,7 +1108,11 @@ void Swapchain::Destroy() {
 		}
 	}
 	if (m_handle != nullptr) {
-		graphics.device.destroySwapchainKHR(m_handle, nullptr);
+		if (FrameGen::OwnsSwapchain()) {
+			FrameGen::DestroySwapchain(graphics, m_handle);
+		} else {
+			graphics.device.destroySwapchainKHR(m_handle, nullptr);
+		}
 	}
 
 	m_handle      = nullptr;
@@ -897,9 +1144,12 @@ void Swapchain::Recreate(bool surface_lost) {
 Swapchain::Status Swapchain::AcquireNextImage() {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
 	m_image_index     = static_cast<uint32_t>(-1);
-	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
-	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
-	    &m_image_index);
+	const auto result =
+	    FrameGen::OwnsSwapchain()
+	        ? FrameGen::AcquireNextImage(m_window.graphic_ctx.device, m_handle, std::numeric_limits<uint64_t>::max(),
+	                                     m_image_acquired[m_frame_index], &m_image_index)
+	        : m_window.graphic_ctx.device.acquireNextImageKHR(m_handle, std::numeric_limits<uint64_t>::max(),
+	                                                          m_image_acquired[m_frame_index], nullptr, &m_image_index);
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
@@ -928,13 +1178,19 @@ bool Swapchain::PrepareSystemOverlay(SystemOverlayHud* hud) {
 }
 
 void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& source,
-                                      bool draw_system_overlay, bool scene) {
+                                      bool draw_system_overlay, bool scene,
+                                      const FrameGen::FrameInputs* fsr_inputs, VulkanImage* target,
+                                      vk::ImageView target_view) {
 	if (source.state.layout != vk::ImageLayout::eTransferSrcOptimal) {
 		EXIT("invalid prepared presentation image, vk_image=%p layout=%d\n",
 		     static_cast<void*>(source.image), static_cast<int>(source.state.layout));
 	}
-	EXIT_IF(m_image_index >= m_images.size());
+	EXIT_IF(target == nullptr && m_image_index >= m_images.size());
 	auto vk_command = command.Handle();
+	// (Linux frame generation: into `target`, left general for NGX and the copies to the swapchain, RecordShow.)
+	const vk::Image       dst_image    = target != nullptr ? target->image : m_images[m_image_index];
+	const vk::ImageView   dst_view     = target != nullptr ? target_view : m_image_views[m_image_index];
+	const vk::ImageLayout final_layout = target != nullptr ? vk::ImageLayout::eGeneral : vk::ImageLayout::ePresentSrcKHR;
 
 	vk::ImageMemoryBarrier to_transfer {};
 	to_transfer.sType                           = vk::StructureType::eImageMemoryBarrier;
@@ -943,7 +1199,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	to_transfer.newLayout                       = vk::ImageLayout::eTransferDstOptimal;
 	to_transfer.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	to_transfer.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-	to_transfer.image                           = m_images[m_image_index];
+	to_transfer.image                           = dst_image;
 	to_transfer.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
 	to_transfer.subresourceRange.baseMipLevel   = 0;
 	to_transfer.subresourceRange.levelCount     = 1;
@@ -962,9 +1218,10 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	}();
 	// KYTY_RENDER_ASPECT: the game's 3D was rendered wider and squeezed into its 16:9 output; every frame is shown at that
 	// aspect, fitted to the window (within 2% of the window's aspect: filling it): the 3D as it was rendered, the others
-	// (movies, menus, loading screens) stretched from their 16:9 (the user, 10-19: the opening movie filling the screen).
+	// (movies, menus, loading screens) stretched from their 16:9 (the user, 10-19: the opening movie filling the screen),
+	// or with KYTY_PRESENT_ASPECT=fit kept at their 16:9 (black bars at the sides; issue #97).
 	// With the wide output (DemonsSoulsRenderSize::WideOutputWidth) the game's frames are as wide as the 3D; one without
-	// it (movies, menus, loading screens) holds its 16:9 picture at the left: that part is shown, stretched.
+	// it (movies, menus, loading screens) holds its 16:9 picture at the left: that part is shown, stretched or fitted.
 	int          dst_x = 0, dst_y = 0;
 	int          dst_w = static_cast<int>(m_extent.width), dst_h = static_cast<int>(m_extent.height);
 	uint32_t     src_w = source.extent.width;
@@ -972,7 +1229,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 		src_w = std::min(src_w, (source.extent.height * 16u + 8u) / 9u);
 	const double frame_aspect = source.extent.height != 0 ? static_cast<double>(src_w) / source.extent.height : 0.0;
 	const double wide         = Loader::DemonsSoulsRenderSize::WideAspect();
-	double       aspect       = wide > 0.0 ? wide : aspect_fit ? frame_aspect : 0.0;
+	double       aspect       = wide > 0.0 && (scene || !aspect_fit) ? wide : aspect_fit ? frame_aspect : 0.0;
 	if (const double window = static_cast<double>(m_extent.width) / std::max(1u, m_extent.height);
 	    wide > 0.0 && std::fabs(aspect / window - 1.0) < 0.02) {
 		aspect = 0.0;
@@ -984,7 +1241,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 		dst_y = (static_cast<int>(m_extent.height) - dst_h) / 2;
 		if (dst_w != static_cast<int>(m_extent.width) || dst_h != static_cast<int>(m_extent.height)) {
 			const vk::ClearColorValue black {std::array<float, 4> {0.0f, 0.0f, 0.0f, 1.0f}};
-			vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, &black, 1,
+			vk_command.clearColorImage(dst_image, vk::ImageLayout::eTransferDstOptimal, &black, 1,
 			                           &to_transfer.subresourceRange);
 			// (An image barrier: <windows.h> defines MemoryBarrier as a macro.)
 			auto cleared          = to_transfer;
@@ -1016,8 +1273,14 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	region.dstOffsets[1].y               = dst_y + dst_h;
 	region.dstOffsets[1].z               = 1;
 	vk_command.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal,
-	                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1, &region,
+	                     dst_image, vk::ImageLayout::eTransferDstOptimal, 1, &region,
 	                     vk::Filter::eLinear);
+	// KYTY_FRAMEGEN_BACKEND=fsr: the HUD-less image from this, before the system overlay (which counts as HUD then); the
+	// Windows backend's of the swapchain image, FSR 3 built in's of the composed frame (`target`).
+	if (fsr_inputs != nullptr && (FrameGen::OwnsSwapchain() ? target == nullptr : target != nullptr)) {
+		FrameGen::RecordHudless(m_window.graphic_ctx, vk_command, fsr_inputs, dst_image, m_extent,
+		                        m_present_region, m_format);
+	}
 
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType         = vk::StructureType::eImageMemoryBarrier;
@@ -1027,10 +1290,10 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	                                               : vk::AccessFlagBits::eMemoryRead;
 	to_present.oldLayout     = vk::ImageLayout::eTransferDstOptimal;
 	to_present.newLayout     = draw_system_overlay ? vk::ImageLayout::eColorAttachmentOptimal
-	                                               : vk::ImageLayout::ePresentSrcKHR;
+	                                               : final_layout;
 	to_present.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	to_present.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-	to_present.image                           = m_images[m_image_index];
+	to_present.image                           = dst_image;
 	to_present.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
 	to_present.subresourceRange.baseMipLevel   = 0;
 	to_present.subresourceRange.levelCount     = 1;
@@ -1042,16 +1305,64 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	                        : vk::PipelineStageFlagBits::eAllCommands,
 	    vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1, &to_present);
 	if (draw_system_overlay) {
-		m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
+		m_system_overlay->Record(vk_command, dst_view);
 		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
 		to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
-		to_present.newLayout     = vk::ImageLayout::ePresentSrcKHR;
+		to_present.newLayout     = final_layout;
 		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
 		                           vk::PipelineStageFlagBits::eAllCommands,
 		                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
 		                           &to_present);
 	}
+	if (target != nullptr) {
+		target->state = {vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryRead, vk::ImageLayout::eGeneral};
+		target->subresource_states.clear();
+	}
+}
+
+void Swapchain::RecordShow(CommandBuffer& command, const VulkanImage& source) {
+	EXIT_IF(m_image_index >= m_images.size());
+	auto vk_command = command.Handle();
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+	// The source as the earlier submissions left it (the composition, NGX's writes), the swapchain image for the copy
+	// (after the acquire: its wait is at the transfer stage, Submit).
+	std::array<vk::ImageMemoryBarrier, 2> before {};
+	before[0].srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
+	before[0].dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+	before[0].oldLayout           = vk::ImageLayout::eGeneral;
+	before[0].newLayout           = vk::ImageLayout::eGeneral;
+	before[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before[0].image               = source.image;
+	before[0].subresourceRange    = range;
+	before[1].dstAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	before[1].oldLayout           = vk::ImageLayout::eUndefined;
+	before[1].newLayout           = vk::ImageLayout::eTransferDstOptimal;
+	before[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before[1].image               = m_images[m_image_index];
+	before[1].subresourceRange    = range;
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
+	                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, static_cast<uint32_t>(before.size()),
+	                           before.data());
+	vk::ImageCopy copy {};
+	copy.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	copy.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	copy.extent         = {std::min(source.extent.width, m_extent.width), std::min(source.extent.height, m_extent.height), 1};
+	vk_command.copyImage(source.image, vk::ImageLayout::eGeneral, m_images[m_image_index],
+	                     vk::ImageLayout::eTransferDstOptimal, copy);
+	vk::ImageMemoryBarrier to_present {};
+	to_present.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	to_present.dstAccessMask       = vk::AccessFlagBits::eMemoryRead;
+	to_present.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+	to_present.newLayout           = vk::ImageLayout::ePresentSrcKHR;
+	to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_present.image               = m_images[m_image_index];
+	to_present.subresourceRange    = range;
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
+	                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1, &to_present);
 }
 
 uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
@@ -1074,7 +1385,11 @@ Swapchain::Status Swapchain::Present() {
 	present.waitSemaphoreCount = 1;
 
 	vk::Result result;
-	if (auto& graphics = m_window.graphic_ctx; graphics.present_queue != nullptr) {
+	if (auto& graphics = m_window.graphic_ctx; FrameGen::OwnsSwapchain()) {
+		// FSR's swapchain: its game queue is the present queue (FrameGen::CreateSwapchain).
+		Common::LockGuard lock(graphics.present_queue_mutex);
+		result = FrameGen::QueuePresent(graphics.present_queue, present);
+	} else if (graphics.present_queue != nullptr) {
 		// Its own queue: a present blocked in the kernel does not hold up other submissions.
 		Common::LockGuard lock(graphics.present_queue_mutex);
 		result = graphics.present_queue.presentKHR(&present);
@@ -1115,6 +1430,7 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	auto*             frame = m_impl->frames.Acquire();
 	frame->hdr              = hdr;
 	frame->blank            = false;
+	frame->anti_lag_frame   = AntiLag::Flip();
 	RenderLockGuard render_lock(m_impl->renderer.GetMutex());
 	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
@@ -1287,6 +1603,14 @@ bool Presenter::GeneratesFrames() noexcept {
 void Presenter::Present(Frame& frame, bool reuse) {
 	KYTY_PROFILER_FUNCTION();
 	m_impl->frames.ValidateForPresent(&frame, reuse);
+#if defined(__linux__)
+	// Linux frame generation: a new frame, and those NGX makes before it (PresentGenerated). A cleared or HDR frame goes
+	// the normal way, and DLSS-G starts again after it; a last frame shown again (an idle refresh) is not new.
+	if (FrameGen::PresenterGenerates() && !reuse) {
+		if (!frame.blank && !frame.hdr && m_impl->PresentGenerated(frame)) return;
+		FrameGen::SwapchainChanging();
+	}
+#endif
 #if defined(_WIN32)
 	// (A frame DLSS-G generates frames for goes to it whatever the display's rate: it paces its presents itself, and
 	// held to the refresh it got 57 of a 102 fps game's frames a second on a 60 Hz display, 5x showing 285, not 500.)
@@ -1297,6 +1621,13 @@ void Presenter::Present(Frame& frame, bool reuse) {
 		return;
 	}
 #endif
+	// KYTY_FRAMEGEN_BACKEND=fsr: the frame's inputs for FSR (none for an idle refresh of the last frame); a frame
+	// without them between generated frames is not shown (FrameGen::SkipsFrame).
+	const FrameGen::FrameInputs* fsr_inputs = frame.fg.valid && !frame.reusing_last && !reuse ? &frame.fg : nullptr;
+	if (FrameGen::OwnsSwapchain() && FrameGen::SkipsFrame(fsr_inputs)) {
+		m_impl->frames.Release(&frame, true);
+		return;
+	}
 #if defined(KYTY_LOCAL_VULKAN_RECORDING) && defined(_WIN32)
 	// The frame's rendering may still sit in the recording worker's queue (KYTY_DEFERRED_SUBMIT).
 	// On Windows, presenting before it reaches the driver blocks vkQueuePresentKHR in the
@@ -1342,13 +1673,21 @@ void Presenter::Present(Frame& frame, bool reuse) {
 				    (static_cast<float>(hud->drawn.offset.x - region.offset.x) + static_cast<float>(hud->drawn.extent.width) + margin) / w,
 				    (static_cast<float>(hud->drawn.offset.y - region.offset.y) + static_cast<float>(hud->drawn.extent.height) + margin) / h);
 			}
-			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay, frame.scene);
-			if (FrameGen::HudlessOn() && !frame.reusing_last) {
+			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay, frame.scene, fsr_inputs);
+			if (FrameGen::OwnsSwapchain()) {
+				FrameGen::RecordPrepare(m_impl->window.graphic_ctx, command.Handle(), fsr_inputs, swapchain.PresentRegion());
+			} else if (FrameGen::HudlessOn() && !frame.reusing_last) {
 				// DLSS-G's HUD-less image, where the frame image went.
 				FrameGen::ScaleHudless(m_impl->window.graphic_ctx, command.Handle(), frame.fg, swapchain.Extent(),
 				                       swapchain.PresentRegion(), swapchain.Format());
 			}
+			// (A live `screenshot`: the game's picture as the presenter got it.)
+			auto capture       = Screenshot::Record(m_impl->window.graphic_ctx, command.Handle(), frame.image, Screenshot::Take());
 			frame.present_tick = swapchain.Submit(m_impl->present_scheduler);
+			if (capture.buffer != VK_NULL_HANDLE) {
+				m_impl->present_scheduler.Wait(frame.present_tick);
+				Screenshot::Finish(m_impl->window.graphic_ctx, capture);
+			}
 		}
 #if defined(_WIN32)
 		// The Windows driver waits in vkQueuePresentKHR, inside the kernel, for the semaphore's
@@ -1365,6 +1704,7 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			                        swapchain.Extent(), swapchain.PresentRegion(), swapchain.Format(),
 			                        swapchain.ImageCount());
 		}
+		if (!reuse) AntiLag::Present(frame.anti_lag_frame);
 		status = swapchain.Present();
 		if (generate) {
 			FrameGen::AfterPresent();

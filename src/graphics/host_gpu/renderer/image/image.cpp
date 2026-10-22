@@ -8,7 +8,6 @@
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "kernel/memory.h"
 #include "live-trace.h"
-#include "speculation-state.h"
 
 #include <algorithm>
 #include <array>
@@ -21,7 +20,7 @@
 extern "C" {
 // 1: drop a repeated-write barrier that repeats an identical transition of the
 // same image inside one transit group.
-volatile std::atomic<uint32_t> kyty_local_image_barrier_dedupe {0};
+volatile std::atomic<uint32_t> kyty_local_image_barrier_dedupe {1};
 }
 
 namespace Libs::Graphics {
@@ -121,47 +120,10 @@ vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
 	}
 }
 
-// A speculative translation's image state (speculation-state.h): its own, from the image's when it first used it;
-// the open segment notes how it found it.
-Spec::ImageEntry* Image::SpeculativeEntry() {
-	auto* spec = Spec::Current();
-	if (spec == nullptr) return nullptr;
-	const auto [found, inserted] = spec->overlay_index.try_emplace(this, spec->overlay.size());
-	Spec::ImageEntry* entry      = nullptr;
-	if (inserted) {
-		// (As a speculation before it not committed yet leaves it: the commit then finds it there.)
-		const auto* chain = spec->ChainImage(this, serial);
-		entry             = &spec->overlay.emplace_back();
-		entry->image      = this;
-		entry->serial     = serial;
-		if (chain != nullptr) {
-			entry->state        = chain->state;
-			entry->subresources = chain->subresources;
-			entry->group        = chain->group;
-		} else {
-			const StateLock lock(*this);
-			entry->state        = backing.state;
-			entry->subresources = backing.subresource_states;
-			entry->group        = transit_group;
-		}
-	} else {
-		entry = &spec->overlay[found->second];
-	}
-	if (!entry->used) {
-		entry->used               = true;
-		entry->found              = entry->state;
-		entry->found_subresources = entry->subresources;
-		entry->found_group        = entry->group;
-		spec->used.push_back(found->second);
-	}
-	return entry;
-}
-
 const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      destination_layout,
                                    vk::AccessFlags2                     destination_access,
                                    vk::PipelineStageFlags2              destination_stage,
                                    std::optional<ImageSubresourceRange> range) {
-	auto* const entry = SpeculativeEntry();
 	if (range && info.IsVolume()) {
 		range->base_layer  = 0;
 		range->layer_count = 1;
@@ -191,15 +153,15 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 	// An image already in the layout and access as a whole (a table draw's textures, every draw): nothing changes, so
 	// neither the state lock nor the state epoch, which moving made every table draw after it check and transit its
 	// images again. The barrier state's writer is this thread (the presentation's own transitions run under the
-	// renderer's lock); a speculation's thread only reads it, under the lock.
-	if (entry == nullptr && !partial && backing.subresource_states.empty() && in_place(backing.state, transit_group))
+	// renderer's lock).
+	if (!partial && backing.subresource_states.empty() && in_place(backing.state, transit_group))
 		return barriers;
 	// The same for a part of it (a view's levels or layers: textures streamed in from their small levels, sampled from
 	// a base level above 0), read only: the image, as a whole or in each subresource of the part, already in the layout
 	// with that access, as is its whole-image state. Before, such a transition took the lock, moved the state epoch
 	// (every table draw after it checked and transited its images again) and split a uniform image into subresource
 	// states for good, which every later transition of it walked.
-	if (entry == nullptr && partial && !static_cast<bool>(destination_access & write_access) &&
+	if (partial && !static_cast<bool>(destination_access & write_access) &&
 	    backing.state.layout == destination_layout && backing.state.access_mask == destination_access) {
 		bool all = true;
 		for (uint32_t level = range->base_level;
@@ -214,14 +176,11 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 			}
 		if (all) return barriers;
 	}
-	std::optional<StateLock> lock;
-	if (entry == nullptr) {
-		lock.emplace(*this);
-		MoveImageStateEpoch();
-	}
-	auto&      state                  = entry != nullptr ? entry->state : backing.state;
-	auto&      subresource_states     = entry != nullptr ? entry->subresources : backing.subresource_states;
-	auto&      group                  = entry != nullptr ? entry->group : transit_group;
+	const StateLock lock(*this);
+	MoveImageStateEpoch();
+	auto&      state                  = backing.state;
+	auto&      subresource_states     = backing.subresource_states;
+	auto&      group                  = transit_group;
 	const bool has_subresource_states = !subresource_states.empty();
 	if (partial || has_subresource_states) {
 		if (!has_subresource_states) {
@@ -294,11 +253,6 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 }
 
 const VulkanImageState& Image::CurrentState() const {
-	if (const auto* spec = Spec::Current()) {
-		if (const auto found = spec->overlay_index.find(this); found != spec->overlay_index.end())
-			return spec->overlay[found->second].state;
-		if (const auto* chain = spec->ChainImage(this, serial)) return chain->state;
-	}
 	return backing.state;
 }
 
@@ -919,7 +873,6 @@ void Image::PrepareReuse(const ImageInfo& image_info) {
 	track_addr          = 0;
 	track_addr_end      = 0;
 	untracked_holes.clear();
-	partial_hashes.clear();
 	depth_id            = {};
 	frame_accessed_last = 0;
 	staged_ring         = nullptr;

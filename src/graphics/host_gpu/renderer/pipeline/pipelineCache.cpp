@@ -68,9 +68,7 @@
 
 extern "C" {
 // 1: find graphics pipelines through a block-hashed index of the full key.
-volatile std::atomic<uint32_t> kyty_local_pipeline_index_mode {0};
-// (performance-switches.h, KYTY_SPECULATE) Speculative translation records ahead on other threads.
-extern volatile std::atomic_uint32_t kyty_local_speculate_mode;
+volatile std::atomic<uint32_t> kyty_local_pipeline_index_mode {1};
 }
 
 namespace Libs::Graphics {
@@ -719,7 +717,7 @@ struct PipelineCache::ProgramCache {
 			std::vector<PrefetchedModule>                     modules;
 			// The plan in the scratch file instead (zstd-compressed ResourcePlanSerial bytes): `plan` stays empty until
 			// the game takes the group over (LoadSpilledPlan). Its linear SRT plan stays here: rebuilding it (its code
-			// generated, its AOT function looked up) took ~1 ms of the render thread's per plan; the plan's values ~0.2.
+			// generated) took up to ~1 ms of the render thread's per plan; the plan's values ~0.2.
 			uint64_t                                                          plan_offset = 0;
 			uint32_t                                                          plan_bytes = 0, plan_raw = 0;
 			std::shared_ptr<const ShaderRecompiler::IR::LinearSrtPlan>       plan_linear;
@@ -808,9 +806,8 @@ struct PipelineCache::ProgramCache {
 		// What the translated groups held in memory before their plans were spilled (AddGroupMemory), summed by the
 		// workers as they finish them.
 		std::array<std::atomic<uint64_t>, PrefetchMemoryParts> memory {};
-		// Plans written to the scratch file (SpillPlan) and their bytes there; KYTY_PLAN_SPILL_VERIFY: reloads that saved
-		// differently.
-		std::atomic<uint64_t> spilled_plans {0}, spilled_plan_bytes {0}, spill_verify_failures {0};
+		// Plans written to the scratch file (SpillPlan) and their bytes there.
+		std::atomic<uint64_t> spilled_plans {0}, spilled_plan_bytes {0};
 	};
 	std::unique_ptr<Prefetch> prefetch;
 	// `prefetch` for threads without the pipeline cache's lock (GetPrefetchProgress, the live report): a warmup beside
@@ -1051,10 +1048,9 @@ struct PipelineCache::ProgramCache {
 				                 mib(MemPlanValues), mib(MemPlanMemoryInfo), mib(MemPlanOther), mib(MemPlanInfo), mib(MemModuleInfo),
 				                 mib(MemModuleTable), mib(MemModuleBda), mib(MemModuleBindings), mib(MemModuleSpecialization),
 				                 mib(MemGroup));
-				PipelineCacheLog("Shader prefetch: {} plans in the temporary file ({} MiB compressed), {} reloaded differently",
+				PipelineCacheLog("Shader prefetch: {} plans in the temporary file ({} MiB compressed)",
 				                 p.spilled_plans.load(std::memory_order_relaxed),
-				                 p.spilled_plan_bytes.load(std::memory_order_relaxed) >> 20u,
-				                 p.spill_verify_failures.load(std::memory_order_relaxed));
+				                 p.spilled_plan_bytes.load(std::memory_order_relaxed) >> 20u);
 			}
 		}
 	}
@@ -1125,20 +1121,6 @@ struct PipelineCache::ProgramCache {
 		if (!group.plan || !PlanSpillEnabled()) return;
 		std::vector<uint8_t> bytes;
 		if (!ResourcePlanSerial::Save(*group.plan, bytes) || bytes.size() > UINT32_MAX) return;
-		static const bool verify = std::getenv("KYTY_PLAN_SPILL_VERIFY") != nullptr;
-		if (verify) {
-			ShaderRecompiler::IR::ResourcePlan loaded;
-			std::vector<uint8_t>               again;
-			bool                               linear = false;
-			const bool                         reloaded = ResourcePlanSerial::Load(bytes, loaded, &linear);
-			loaded.linear_srt                           = group.plan->linear_srt;
-			if (!reloaded || linear != (group.plan->linear_srt != nullptr) || !ResourcePlanSerial::Save(loaded, again) ||
-			    again != bytes) {
-				if (p.spill_verify_failures.fetch_add(1, std::memory_order_relaxed) < 20)
-					PipelineCacheLog("Shader prefetch: plan of 0x{:016x} reloads differently", group.plan->shader_hash);
-				return;
-			}
-		}
 		const auto packed = ZstdPack(bytes.data(), bytes.size());
 		if (packed.empty()) return;
 		const auto packed_size = packed.size();
@@ -1399,7 +1381,6 @@ struct PipelineCache::ProgramCache {
 			EXIT_IF(module == nullptr);
 		}
 		LiveCounters::g_shader_modules.fetch_add(1, std::memory_order_relaxed);
-		if (InlineKeyCheck()) NoteInlineSpirv(module, spirv);
 		if (ModuleSpirvHashesRecorded()) {
 			NotePipelineKeyModule(module, options.shader_hash, XXH3_64bits(spirv.data(), spirv.size() * sizeof(uint32_t)),
 			                      spirv.size() * sizeof(uint32_t));
@@ -1409,10 +1390,10 @@ struct PipelineCache::ProgramCache {
 	}
 
 	// CreateModule for a prefetched module: a stored module of its SPIR-V where the prefetch's file has it (no copy), or
-	// null (the store is off; the SPIR-V validated, dumped or checked here).
+	// null (the store is off; the SPIR-V validated or dumped here).
 	vk::ShaderModule CreateModuleInPlace(const ShaderRecompiler::CompileOptions& options, const PrefetchedModule& prefetched) {
 		if (Config::ShaderValidationEnabled() || Config::GraphicsDebugDumpEnabled() || DumpWanted(options.shader_hash) ||
-		    InlineKeyCheck() || prefetched.spirv_words > UINT32_MAX)
+		    prefetched.spirv_words > UINT32_MAX)
 			return nullptr;
 		const auto bytes  = prefetched.spirv_words * sizeof(uint32_t);
 		const auto module = ModuleStore::AddFrom(
@@ -1809,16 +1790,16 @@ struct PipelineCache::ProgramCache {
 		vk::ShaderModule                         module = nullptr; // the result's, made by the worker
 	};
 
-	// In front of the game KYTY_SHADER_WARMUP_THREADS (default 1); beside it KYTY_SHADER_WARMUP_BACKGROUND_THREADS
+	// In front of the game KYTY_SHADER_WARMUP_THREADS (default 16); beside it KYTY_SHADER_WARMUP_BACKGROUND_THREADS
 	// (default SpareThreads).
 	static uint32_t WarmupThreads(bool background) {
-		uint32_t threads = background ? SpareThreads() : 1;
+		const uint32_t fallback = background ? SpareThreads() : 16;
+		uint32_t       threads  = fallback;
 		const char* name = background ? "KYTY_SHADER_WARMUP_BACKGROUND_THREADS" : "KYTY_SHADER_WARMUP_THREADS";
 		if (const char* value = std::getenv(name); value && *value) {
 			const auto end    = value + std::strlen(value);
 			const auto parsed = std::from_chars(value, end, threads);
-			if (parsed.ec != std::errc {} || parsed.ptr != end || threads == 0 || threads > 64)
-				threads = background ? SpareThreads() : 1;
+			if (parsed.ec != std::errc {} || parsed.ptr != end || threads == 0 || threads > 64) threads = fallback;
 		}
 		return threads;
 	}
@@ -1935,11 +1916,11 @@ struct PipelineCache::ProgramCache {
 	}
 
 	// The recording's records translated (warm_permutations: each record's permutation). In front of the game
-	// (KYTY_SHADER_WARMUP_BACKGROUND=0, a -Precompile run): newest first, until KYTY_SHADER_WARMUP_SECONDS or
-	// KYTY_SHADER_WARMUP_TRANSLATE_SECONDS. Beside it (`background`): every record in WarmOrder, each registered under
-	// `mutex` (the pipeline cache's) by this thread alone - a worker below normal priority holding it while the game's
-	// threads kept every CPU would hold up the render thread. The game's Get may have made the program meanwhile, or
-	// the permutation: a record then adds what the program lacks, of the same code only.
+	// (KYTY_SHADER_WARMUP_BACKGROUND=0, a -Precompile run): newest first, until KYTY_SHADER_WARMUP_SECONDS. Beside it
+	// (`background`): every record in WarmOrder, each registered under `mutex` (the pipeline cache's) by this thread
+	// alone - a worker below normal priority holding it while the game's threads kept every CPU would hold up the
+	// render thread. The game's Get may have made the program meanwhile, or the permutation: a record then adds what
+	// the program lacks, of the same code only.
 	// The permutation TranslateWarmup made (or found) for a recorded input, while the cache still has it; null: the
 	// program left (its code changed) or never had it. Under the pipeline cache's mutex, `warming` set while it is used.
 	Permutation* FindRecorded(const LocalShaderWarmup::Record& record) {
@@ -1957,8 +1938,10 @@ struct PipelineCache::ProgramCache {
 
 	void TranslateWarmup(Common::Mutex& mutex, bool background, const std::atomic<bool>& stop) {
 		const auto begin = std::chrono::steady_clock::now();
-		// 0 means all recorded inputs. A caller can explicitly bound startup time.
-		uint32_t budget_seconds = 0;
+		// At most a minute of start-up warmup (KYTY_SHADER_WARMUP_SECONDS; 0: all recorded inputs, as a precompile run,
+		// KYTY_SHADER_WARMUP_ONLY, takes them): with an empty driver cache (the first launch, a driver update) its ~4400
+		// pipelines took 4.5 minutes; the rest are built at their first use and cached from then on.
+		uint32_t budget_seconds = std::getenv("KYTY_SHADER_WARMUP_ONLY") != nullptr ? 0 : 60;
 		if (const char* value = std::getenv("KYTY_SHADER_WARMUP_SECONDS"); value && *value) {
 			const auto end = value + std::strlen(value);
 			const auto parsed = std::from_chars(value, end, budget_seconds);
@@ -1967,19 +1950,7 @@ struct PipelineCache::ProgramCache {
 		// (It bounds the wait in front of the game; beside it, the warmup goes on: what it does not make, the game makes
 		// where first needed.)
 		if (budget_seconds && !background) warm_deadline = begin + std::chrono::seconds(budget_seconds);
-		// In front of the game, the translation alone (KYTY_SHADER_WARMUP_TRANSLATE_SECONDS; 0, the default: no limit of
-		// its own). 5 s of the newest records, the rest left to the shader prefetch and their pipelines to their first
-		// use, cost a 16-thread desktop's tour 6 render-thread hitches of 15-127 ms.
-		uint32_t translate_seconds = 0;
-		if (const char* value = std::getenv("KYTY_SHADER_WARMUP_TRANSLATE_SECONDS"); value && *value) {
-			const auto end    = value + std::strlen(value);
-			const auto parsed = std::from_chars(value, end, translate_seconds);
-			if (parsed.ec != std::errc {} || parsed.ptr != end || translate_seconds > 3600) translate_seconds = 0;
-		}
-		const char* only               = std::getenv("KYTY_SHADER_WARMUP_ONLY");
-		auto        translate_deadline = background ? std::chrono::steady_clock::time_point::max() : warm_deadline;
-		if (!background && translate_seconds != 0 && (only == nullptr || std::string_view(only) != "1"))
-			translate_deadline = std::min(translate_deadline, begin + std::chrono::seconds(translate_seconds));
+		const auto translate_deadline = background ? std::chrono::steady_clock::time_point::max() : warm_deadline;
 		const size_t count = warm_records.size();
 		warm_permutations.assign(count, nullptr);
 		warm_total.store(count, std::memory_order_relaxed);
@@ -2205,19 +2176,27 @@ PipelineCache::CompileWorkers& PipelineCache::OptimizeWorkers() {
 }
 
 // A pipeline no cache holds: compiled unoptimized now (VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) and optimized on a
-// worker, or optimized before its first use (up to seconds on NVIDIA). Unoptimized first only on NVIDIA, where it was
-// measured (~100x faster to compile) and tested. (An AMD RX 6700 XT's driver crash at the first compute pipelines,
-// which kept AMD out, was native wave64 on RDNA2: the unoptimized build was not the cause. Whether AMD's driver
-// compiles faster unoptimized is not measured yet: an RX 9070 XT took 18 s for each of four compute pipelines.)
-// KYTY_PIPELINE_FAST_BUILD=1 / 0 chooses either on any GPU.
+// worker, or optimized before its first use (up to seconds on NVIDIA). Unoptimized first on NVIDIA, where it was
+// measured (~100x faster to compile) and tested, and on Mesa's RADV: an RX 9070 XT with a cold cache (Mesa 26.2.5,
+// Boletaria 1-1 from the title, 105 s) stalled 17.8 s on compiles in 26 frames instead of 31.4 s in 51, and every one of
+// the 821 unoptimized pipelines was replaced by its optimized build. (An AMD RX 6700 XT's driver crash at the first
+// compute pipelines, which kept AMD's Windows driver out, was native wave64 on RDNA2: the unoptimized build was not the
+// cause; that driver is not measured yet.) KYTY_PIPELINE_FAST_BUILD=1 / 0 chooses either on any GPU.
 static PipelineBuild FirstBuild(const GraphicContext& graphics) {
 	static const int fast = [] {
 		const char* value = std::getenv("KYTY_PIPELINE_FAST_BUILD");
 		return value == nullptr ? -1 : (std::string_view(value) != "0" ? 1 : 0);
 	}();
-	constexpr uint32_t NvidiaVendor = 0x10DE;
-	const bool         nvidia       = graphics.GetPhysicalDeviceProperties().vendorID == NvidiaVendor;
-	return fast == 1 || (fast == -1 && nvidia) ? PipelineBuild::Fast : PipelineBuild::Full;
+	static const bool measured = [&] {
+		constexpr uint32_t NvidiaVendor = 0x10DE;
+		if (graphics.GetPhysicalDeviceProperties().vendorID == NvidiaVendor) return true;
+		vk::PhysicalDeviceDriverProperties driver {};
+		vk::PhysicalDeviceProperties2      properties {};
+		properties.pNext = &driver;
+		graphics.physical_device.getProperties2(&properties);
+		return driver.driverID == vk::DriverId::eMesaRadv;
+	}();
+	return fast == 1 || (fast == -1 && measured) ? PipelineBuild::Fast : PipelineBuild::Full;
 }
 
 // An unoptimized pipeline (PipelineBuild::Fast): `build` compiles the optimized one on a worker, into
@@ -2346,10 +2325,10 @@ vk::Pipeline BindPipelineHandle(const PipelineCache::Pipeline& pipeline) {
 // least 5) leave it: their handles destroyed (BindPipelineHandle makes one again from the store, ~1-2 ms). Their shader
 // code is video memory: on an 8 GB GPU, a 5-minute 1-1 tour took the driver's share 0.6 -> 1.0 GB while the video memory
 // in use went past the budget (7.7 GB of 7.25); evicting every pipeline idle for 5 s there (a test: 9,946 evicted, 6,188
-// made again at 1.1 ms each, fps unchanged) kept it at 0.8 GB. Not those an optimized build will replace, and none while
-// speculative translation records ahead (KYTY_SPECULATE). The time since a pipeline's last binding is what keeps its
-// handle out of commands still to run: GPU work is never minutes behind. Only pipelines in this cache's maps: a worker's
-// result enters them on this thread, its remake set before (PipelineEvictSettings, KeepsRemake).
+// made again at 1.1 ms each, fps unchanged) kept it at 0.8 GB. Not those an optimized build will replace. The time
+// since a pipeline's last binding is what keeps its handle out of commands still to run: GPU work is never minutes
+// behind. Only pipelines in this cache's maps: a worker's result enters them on this thread, its remake set before
+// (PipelineEvictSettings, KeepsRemake).
 void PipelineCache::EvictIdlePipelines() {
 	const auto& settings = PipelineEvictSettings();
 	constexpr uint32_t CheckFlips   = 60;
@@ -2372,7 +2351,7 @@ void PipelineCache::EvictIdlePipelines() {
 		m_scene_since      = now;
 		m_scene_swept      = false;
 	}
-	if (!settings.on || flip % CheckFlips != 0 || kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0) return;
+	if (!settings.on || flip % CheckFlips != 0) return;
 	const bool scene_left = !m_scene_swept && now - m_scene_since >= SceneSettle;
 	uint64_t video = 0, budget = 0;
 	const bool known = m_graphics.QueryLocalVideoMemory(&video, &budget);
@@ -2580,9 +2559,11 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	                                                  ? "made unoptimized first, the optimized build replaces them "
 	                                                    "(KYTY_PIPELINE_FAST_BUILD=0: optimized at once)"
 	                                                  : "made optimized (KYTY_PIPELINE_FAST_BUILD=1: unoptimized first)");
+	// KYTY_SHADER_WARMUP: 1 (default), record, or 0 (none).
 	const char* warmup             = std::getenv("KYTY_SHADER_WARMUP");
 	bool        prefetch_by_warmup = false; // (RunWarmup starts the shader prefetch)
-	if (warmup && IsBinaryDriverCacheKey(m_driver_cache_key) && m_driver_cache != nullptr &&
+	if (warmup == nullptr) warmup = "1";
+	if (IsBinaryDriverCacheKey(m_driver_cache_key) && m_driver_cache != nullptr &&
 	    (std::string_view(warmup) == "1" || std::string_view(warmup) == "record")) {
 		const auto device = ShaderInputDeviceSignature(m_graphics.GetPhysicalDeviceProperties());
 		const auto title = PipelineCacheTitleId();
@@ -3109,7 +3090,7 @@ static std::filesystem::path StaticCachePath() {
 // then those the last precompile translated with: _PipelineCache/static/<title>_<version>.features. The first are written
 // by a precompile whose last merge made the store of its own pipelines alone (--merge --prune), the second by the last
 // merge of any precompile (--stamp: with recorded play lost, or -Quick, some pipelines stay as they were: another run
-// would not make them, so the store is not out of date for that). None (an older store, none at all): 0.
+// would not make them, so the store is not out of date for that). None (an older store): 0.
 static std::filesystem::path StaticFeaturesPath() {
 	return std::filesystem::path("_PipelineCache") / "static" / (PipelineCacheGameId() + ".features");
 }
@@ -3180,16 +3161,6 @@ static std::string StaticBlobsSignature(const vk::PhysicalDeviceProperties& prop
 	return "KytyPCBlobs1" + ShaderInputDeviceSignature(properties);
 }
 
-// KYTY_STATIC_BLOBS_FROM_CACHE=1 (the precompile): blobs made of the static pipeline cache's pipelines (loaded as a
-// source), compiled only where the driver cannot give them otherwise.
-static bool StaticBlobsFromCache() {
-	static const bool on = [] {
-		const char* value = std::getenv("KYTY_STATIC_BLOBS_FROM_CACHE");
-		return value != nullptr && std::string_view(value) == "1";
-	}();
-	return on;
-}
-
 // A static pipeline cache of this GPU and driver exists (its file begins with their signature).
 static bool StaticCacheFileMatches(const vk::PhysicalDeviceProperties& properties) {
 	const auto    signature = StaticCacheSignature(properties);
@@ -3206,7 +3177,7 @@ static bool StaticBlobsMode(GraphicContext& graphics) {
 	if (graphics.pipeline_binaries_enabled || !StaticBlobsEnabled()) return false;
 	static const bool mode = [&] {
 		std::error_code error;
-		return std::filesystem::exists(StaticBlobsPath(), error) || StaticBlobsFromCache() ||
+		return std::filesystem::exists(StaticBlobsPath(), error) ||
 		       !StaticCacheFileMatches(graphics.GetPhysicalDeviceProperties());
 	}();
 	return mode;
@@ -3240,7 +3211,13 @@ void PipelineCache::InitializeStaticCache(bool create) {
 	// features it translated with, and offers itself again until then (StaticCacheCurrent).
 	if (!create) {
 		namespace Translate = ShaderRecompiler::Frontend;
-		Translate::SetTranslatorFeatures(ReadStaticFeatures());
+		// No store at all (none of its files): no pipeline of one to miss, the translation keeps all of this GPU's
+		// features, as the precompile translates.
+		std::error_code error;
+		const auto      exists = [&](const std::filesystem::path& path) { return std::filesystem::exists(path, error); };
+		if (exists(StaticFeaturesPath()) || exists(StaticCachePath()) || exists(StaticBinariesPath()) ||
+		    exists(StaticBlobsPath()))
+			Translate::SetTranslatorFeatures(ReadStaticFeatures());
 		if (const auto off = Translate::TranslatorDeviceFeatures() & ~Translate::TranslatorFeatureSet(); off != 0)
 			PipelineCacheLog("Translation features {:#x} off: the static pipeline store was made without them (precompile "
 			                 "again to use them)",
@@ -3262,19 +3239,12 @@ void PipelineCache::InitializeStaticCache(bool create) {
 			                 m_static_blobs->DataBytes() >> 20u, Common::PathToString(StaticBlobsPath()),
 			                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin)
 			                     .count());
-#ifdef KYTY_STATIC_PRECOMPILE
-			// A conversion (StaticBlobsFromCache) takes what the blobs lack from the static pipeline cache too.
-			if (!StaticBlobsFromCache()) return;
-			create = false;
-#else
 			return;
-#endif
 		}
-		// None yet: the precompile makes them (and loads no static cache: every shard process would hold one whole,
-		// unless it converts one: StaticBlobsFromCache); the emulator takes a static cache from before them.
+		// None yet: the precompile makes them (and loads no static cache: every shard process would hold one whole); the
+		// emulator takes a static cache from before them.
 #ifdef KYTY_STATIC_PRECOMPILE
-		if (!StaticBlobsFromCache()) return;
-		create = false;
+		return;
 #else
 		if (create) return;
 #endif
@@ -3323,14 +3293,27 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
 		return;
 	}
+#ifdef KYTY_STATIC_PRECOMPILE
+	// None in the precompile program: its shards compile into caches of their own. With the releases' key built in
+	// (83bc14df) it loaded the game's, whose data holds the compression dictionary NVIDIA's driver trained in play: every
+	// shard then compressed its pipelines with that from the first one on, kept none and split without end (issue #107).
+	PipelineCacheLog("Vulkan pipeline cache: none in the precompile program");
+	return;
+#endif
 	const std::string_view git_hash     = KYTY_GIT_HASH;
 	const std::string_view git_revision = KYTY_GIT_REVISION;
-	if (const auto* key = std::getenv("KYTY_DRIVER_CACHE_KEY"); key && *key) {
-		if (!IsBinaryDriverCacheKey(key)) {
+	// The key of the driver pipeline cache (_PipelineCache/local/<key>), one for every build: the driver finds a
+	// pipeline by its whole input (SPIR-V and state), so a new build reuses the pipelines of the shaders it left
+	// alone. Keyed by the executable, every update compiled the ~3700 warmup pipelines again (2-2.5 minutes); it also
+	// enables the shader warmup, which a modified source tree runs without otherwise. KYTY_DRIVER_CACHE_KEY: another.
+	const char* cache_key = std::getenv("KYTY_DRIVER_CACHE_KEY");
+	if (cache_key == nullptr) cache_key = "1f3c29b70e536c8f5a5e812e793b33ac2eb6858b4810ed98ca2a51b9fa5eed97";
+	if (*cache_key != '\0') {
+		if (!IsBinaryDriverCacheKey(cache_key)) {
 			PipelineCacheLog("Vulkan pipeline cache: disabled (invalid executable fingerprint)");
 			return;
 		}
-		m_driver_cache_key = key;
+		m_driver_cache_key = cache_key;
 	}
 	if (git_hash == "unknown" || git_revision == "unknown") {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");

@@ -14,11 +14,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace Libs::Graphics {
 
@@ -97,6 +100,36 @@ SDL_Keycode NormalizeKey(SDL_Keycode key) {
 	}
 }
 
+// A key by its SDL name ("Left Shift"; case does not matter), or by that name without its spaces ("LeftShift") or a
+// usual short one (Spacebar, Esc, Enter, Shift, Ctrl, Alt, LShift, RCtrl...): issue #91's list used those.
+SDL_Keycode KeyFromName(std::string_view name) {
+	if (const auto key = SDL_GetKeyFromName(std::string(name).c_str()); key != SDLK_UNKNOWN) {
+		return key;
+	}
+	std::string compact;
+	for (const char c: name) {
+		if (c != ' ' && c != '_' && c != '-') {
+			compact += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		}
+	}
+	static constexpr std::array aliases = {
+	    std::pair {std::string_view("spacebar"), SDLK_SPACE},     std::pair {std::string_view("esc"), SDLK_ESCAPE},
+	    std::pair {std::string_view("enter"), SDLK_RETURN},       std::pair {std::string_view("shift"), SDLK_LSHIFT},
+	    std::pair {std::string_view("leftshift"), SDLK_LSHIFT},   std::pair {std::string_view("lshift"), SDLK_LSHIFT},
+	    std::pair {std::string_view("rightshift"), SDLK_RSHIFT},  std::pair {std::string_view("rshift"), SDLK_RSHIFT},
+	    std::pair {std::string_view("ctrl"), SDLK_LCTRL},         std::pair {std::string_view("control"), SDLK_LCTRL},
+	    std::pair {std::string_view("leftctrl"), SDLK_LCTRL},     std::pair {std::string_view("lctrl"), SDLK_LCTRL},
+	    std::pair {std::string_view("leftcontrol"), SDLK_LCTRL},  std::pair {std::string_view("rightctrl"), SDLK_RCTRL},
+	    std::pair {std::string_view("rctrl"), SDLK_RCTRL},        std::pair {std::string_view("rightcontrol"), SDLK_RCTRL},
+	    std::pair {std::string_view("alt"), SDLK_LALT},           std::pair {std::string_view("leftalt"), SDLK_LALT},
+	    std::pair {std::string_view("lalt"), SDLK_LALT},          std::pair {std::string_view("rightalt"), SDLK_RALT},
+	    std::pair {std::string_view("ralt"), SDLK_RALT},
+	};
+	const auto alias = std::find_if(aliases.begin(), aliases.end(),
+	                                [&compact](const auto& item) { return item.first == compact; });
+	return alias != aliases.end() ? alias->second : SDL_GetKeyFromName(compact.c_str());
+}
+
 uint8_t MouseButtonFromName(std::string_view name) {
 	static constexpr std::array buttons = {
 	    std::pair {std::string_view("Mouse:Left"), uint8_t {SDL_BUTTON_LEFT}},
@@ -137,16 +170,22 @@ public:
 				const auto host_input = entry.substr(split + 1);
 				binding.mouse_button  = MouseButtonFromName(host_input);
 				if (binding.mouse_button == 0) {
-					binding.key = NormalizeKey(SDL_GetKeyFromName(std::string(host_input).c_str()));
+					binding.key = NormalizeKey(KeyFromName(host_input));
 				}
 			}
 
-			const bool reserved = binding.key == SDLK_ESCAPE || binding.key == SDLK_SPACE ||
-			                      binding.key == SDLK_F7 || binding.key == SDLK_F8 ||
+			// The emulator's own keys: F7 the mouse camera, F8 its overlay, F9 a debug snapshot, F11 full screen.
+			// (Space pauses unless a mapping takes it, the Pause key then; the system's dialogs see Esc first.)
+			const bool reserved = binding.key == SDLK_F7 || binding.key == SDLK_F8 || binding.key == SDLK_F9 ||
 			                      binding.key == SDLK_F11;
 			if (binding.control == INVALID_CONTROL || reserved ||
 			    (binding.key == SDLK_UNKNOWN && binding.mouse_button == 0)) {
-				EXIT("Invalid input mapping: %s\n", value.c_str());
+				// (Skipped, not the end of the start-up: the other mappings still work.)
+				std::printf("Input mapping skipped: %s (%s)\n", value.c_str(),
+				            binding.control == INVALID_CONTROL ? "no such control"
+				            : reserved                         ? "one of the emulator's own keys"
+				                                               : "no such key or mouse button");
+				continue;
 			}
 			Add(binding);
 		}
@@ -358,6 +397,11 @@ void HostInputKey(int key_code, bool down) {
 	} else {
 		DefaultKeyboardInput(key_code, down);
 	}
+}
+
+bool HostInputMapsKey(int key_code) {
+	const auto& map = GetInputMap();
+	return map.Custom() && map.FindKey(key_code) != INVALID_CONTROL;
 }
 
 void HostInputMouseButton(uint8_t mouse_button, bool down) {

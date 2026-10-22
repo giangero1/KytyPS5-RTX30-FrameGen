@@ -1,5 +1,6 @@
 // Sony's PS5 Pro super resolution as Demon's Souls dispatches it (graphics/guest_gpu/superResolution.h), done here:
-// DLSS (KYTY_UPSCALER=dlss, frame-gen.h) where Streamline offers it, else a linear stretch of the input.
+// DLSS (KYTY_UPSCALER=dlss, frame-gen.h) where Streamline offers it, FSR 3 (KYTY_UPSCALER=fsr, fsr-native.h: Linux,
+// any GPU), else a linear stretch of the input.
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/superResolution.h"
@@ -17,8 +18,8 @@
 #include "graphics/shader/shaderBindings.h"
 #include "common/assert.h"
 #include "frame-gen.h"
+#include "fsr-native.h"
 #include "gpu_tiler_shaders/sr_exposure_spv.h"
-#include "speculation-state.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
@@ -133,6 +134,8 @@ struct UpscaleRecord {
 	uint32_t                exposure_index = 0;
 	struct Timing*          timing         = nullptr;     // (KYTY_SR_TIMING)
 	uint32_t                timing_entry   = 0;
+	GraphicContext*         graphics       = nullptr;     // FSR 3 (fsr-native.h) in place of DLSS
+	bool                    fsr            = false;
 };
 
 // The output (general) multiplied by the exposure in place, after the upscale's writes (compute or transfer); left
@@ -279,14 +282,15 @@ void RunUpscale(const UpscaleRecord& record, const vk::detail::DispatchLoaderDyn
 		record.command.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, record.timing->pool, first + index, dispatch);
 	};
 	stamp(0);
-	const bool upscaled = FrameGen::Upscale(record.command, record.inputs);
-	// Count actual evaluations, including the stretch fallback; availability alone is not success.
+	const bool upscaled = record.fsr ? FsrNative::Upscale(*record.graphics, record.command, record.inputs)
+	                                 : FrameGen::Upscale(record.command, record.inputs, dispatch);
 	static uint64_t attempts = 0, successes = 0, failures = 0;
 	++attempts;
 	upscaled ? ++successes : ++failures;
 	if (attempts == 1 || attempts % 300 == 0) {
 		std::printf("Super resolution evaluations: attempts=%" PRIu64 " successful=%" PRIu64
-		            " failed=%" PRIu64 " stretch_fallbacks=%" PRIu64 " (%ux%u -> %ux%u)\n",
+		            " failed=%" PRIu64 " stretch_fallbacks=%" PRIu64 " (%ux%u -> %ux%u)
+",
 		            attempts, successes, failures, failures, record.inputs.color.extent.width,
 		            record.inputs.color.extent.height, record.inputs.output.extent.width, record.inputs.output.extent.height);
 		std::fflush(stdout);
@@ -315,8 +319,6 @@ void ReplayUpscale(std::span<const LocalVulkanRecording::Segment> segments, cons
 
 void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolution::Packet& packet) {
 	EXIT_IF(buffer.IsInvalid());
-	// (A hole of a speculative translation: the commit, on the GPU thread, runs it - as DispatchDirect.)
-	if (Spec::Current() != nullptr) return Report("a speculative translation reached a dispatch: skipped");
 	m_context.GetCommandScheduler().PopPendingOperations();
 	RenderLockGuard lock(m_context.GetMutex());
 	// Give the DLSS runtimes room before they record work. These images were already
@@ -399,9 +401,12 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		const char* value = std::getenv("KYTY_SR_EXPOSURE");
 		return value == nullptr || *value != '0';
 	}();
-	const bool dlss         = FrameGen::UpscalerReady() && !stretch;
-	const auto depth_layout = depth.info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-	                                               : vk::ImageLayout::eShaderReadOnlyOptimal;
+	const bool fsr          = FsrNative::UpscalerRequested() && !stretch;
+	const bool dlss         = FrameGen::UpscalerReady() && !stretch && !fsr;
+	const bool upscaler     = dlss || fsr;
+	// (FSR's backend reads a depth image in the shader-read layout, as the TAA's depth copy is.)
+	const auto depth_layout = depth.info.IsDepth() && !fsr ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+	                                                       : vk::ImageLayout::eShaderReadOnlyOptimal;
 	const auto upscale_image = [&](const TextureBinding& binding, const Image& image, vk::ImageLayout layout) {
 		FrameGen::UpscaleImage out;
 		out.image  = image.backing.image;
@@ -410,10 +415,15 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		out.format = binding.desc.view_info.format;
 		out.extent = extent(binding, image);
 		out.usage  = image.backing.usage;
+		out.base_level = binding.desc.view_info.base_level;
+		out.base_layer = binding.desc.view_info.base_layer;
+		out.image_format = image.backing.format;
 		return out;
 	};
 	UpscaleRecord record;
 	record.command        = vk_buffer;
+	record.graphics       = &m_context.GetGraphics();
+	record.fsr            = fsr;
 	record.color_level    = bindings[0].desc.view_info.base_level;
 	record.color_layer    = bindings[0].desc.view_info.base_layer;
 	record.output_level   = bindings[3].desc.view_info.base_level;
@@ -453,18 +463,32 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 			record.output_sampled = output.FindView(view_info);
 		}
 	}
+	if (static std::atomic<uint32_t> images {0}; images.fetch_add(1, std::memory_order_relaxed) < 1) {
+		// (What the images are made as, beside the views the bindings ask for: an upscaler making its own views needs it.)
+		const auto describe = [](const char* name, const Image& image, const TextureBinding& binding) {
+			std::printf("Super resolution: %s image %s %ux%u levels %u layers %u flags %s, view %s level %u layer %u\n", name,
+			            vk::to_string(image.backing.format).c_str(), image.backing.extent.width, image.backing.extent.height,
+			            image.info.resources.levels, image.info.resources.layers,
+			            vk::to_string(image.backing.flags).c_str(), vk::to_string(binding.desc.view_info.format).c_str(),
+			            binding.desc.view_info.base_level, binding.desc.view_info.base_layer);
+		};
+		describe("color", color, bindings[0]);
+		describe("motion", motion, bindings[1]);
+		describe("depth", depth, bindings[2]);
+		describe("output", output, bindings[3]);
+	}
 	if (static std::atomic<uint32_t> reports {0}; reports.fetch_add(1, std::memory_order_relaxed) < 2) {
-		std::printf("Super resolution: %s, the game's exposure %s\n", dlss ? "DLSS" : "stretch",
+		std::printf("Super resolution: %s, the game's exposure %s\n", dlss ? "DLSS" : fsr ? "FSR 3" : "stretch",
 		            record.exposure_pass.pipeline != nullptr ? "applied" : "not applied");
 		std::fflush(stdout);
 	}
-	if (auto* timing = SrTiming(m_context.GetGraphics()); timing != nullptr && dlss) {
+	if (auto* timing = SrTiming(m_context.GetGraphics()); timing != nullptr && upscaler) {
 		ReadTiming(*timing);
 		record.timing       = timing;
 		record.timing_entry = static_cast<uint32_t>(timing->written++ % Timing::Entries);
 	}
-	if (dlss) {
-		FrameGen::PrepareUpscale(inputs);
+	if (upscaler) {
+		if (dlss) FrameGen::PrepareUpscale(inputs);
 		color.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, range(bindings[0]), vk_buffer);
 		motion.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, range(bindings[1]), vk_buffer);
 		depth.Transit(depth_layout, vk::AccessFlagBits2::eShaderRead, range(bindings[2]), vk_buffer);

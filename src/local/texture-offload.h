@@ -17,8 +17,7 @@
 // SendCommandSync); the image going (UnregisterImage: the collector retires images no draw used for 20 s) has them
 // written back by the offload worker when the GPU is done, touches waiting till then. A host overwrite of all of them or
 // an unmap only drops them. A touch by a thread that cannot wait for the render thread (the upload worker, deferred GPU
-// work, a speculation's recorder) is a miss: counted and logged, the bytes it sees zeros, and the render thread restores
-// them after (Drain).
+// work) is a miss: counted and logged, the bytes it sees zeros, and the render thread restores them after (Drain).
 //
 // Read watchers go at once after a touch by game code (a guest thread holds no lock of the emulator's) or a host write or
 // unmap (normal context); after one by the emulator's own code the fault handler only gives the pages a protection that
@@ -135,12 +134,14 @@ struct State {
 	std::atomic<Restore>         restore {nullptr};
 	std::atomic<CanWait>         can_wait {nullptr};
 	std::atomic<uint64_t>        guest_lo {~uint64_t {0}}, guest_hi {0}, backing_lo {~uint64_t {0}}, backing_hi {0};
+	std::atomic<uint64_t>        restoring {0}; // ranges whose restore runs (BeginRestore to EndRestore)
 	// Statistics.
 	uint64_t now = 0, peak = 0, total = 0, ranges_total = 0;
 	uint64_t touches[static_cast<int>(Touch::Count)] {}, touch_bytes[static_cast<int>(Touch::Count)] {};
 	uint64_t ages[4] {}; // <1 s, <10 s, <60 s, later
 	uint64_t restores = 0, restore_bytes = 0, restore_us = 0, restore_us_max = 0, lost = 0, missed = 0, missed_bytes = 0;
 	uint64_t checked = 0, checked_bytes = 0, check_failed = 0;
+	uint64_t read_waits = 0, read_wait_bytes = 0; // buffer uploads that waited for an asynchronous restore
 	std::unordered_map<uint64_t, uint64_t> rips;    // the emulator's instructions -> touches
 	std::unordered_map<uint64_t, uint64_t> callers; // their callers (one frame unwound) -> touches
 };
@@ -274,6 +275,21 @@ inline void WaitRestores(uint64_t vaddr, uint64_t size) {
 	while (IsRestoring(vaddr, size)) std::this_thread::yield();
 }
 
+// Whether a read of [vaddr, vaddr + size) through the backing view waits for a restore first (cheap while none runs). An
+// image that goes is restored asynchronously (RestoreOffloaded): its backing pieces are readable at once and its bytes land
+// when the GPU's download is done, so a reader of the backing view in between (a buffer upload) reads the discarded pages'
+// zeros. Image uploads wait already.
+[[nodiscard]] inline bool MustWaitBeforeRead(uint64_t vaddr, uint64_t size) {
+	return Get().restoring.load(std::memory_order_acquire) != 0 && IsRestoring(vaddr, size);
+}
+
+inline void NoteReadWait(uint64_t size) {
+	auto&           state = Get();
+	std::lock_guard lock(state.mutex);
+	state.read_waits++;
+	state.read_wait_bytes += size;
+}
+
 // (state.mutex held) Counted as touched by `touch`.
 inline void CountLocked(State& state, std::map<uint64_t, Range>::iterator it, Touch touch, uint64_t rip = 0, uint64_t caller = 0) {
 	auto&      range = it->second;
@@ -348,6 +364,7 @@ inline std::vector<Restoring> BeginRestore(uint64_t vaddr, uint64_t size, Touch 
 		range.restorer  = async ? std::thread::id {} : std::this_thread::get_id();
 		ranges.push_back({it->first, range.guest_end, range.serial, range.image, range.pieces});
 	}
+	state.restoring.fetch_add(ranges.size(), std::memory_order_acq_rel);
 	return ranges;
 }
 
@@ -362,6 +379,7 @@ inline void EndRestore(const std::vector<Restoring>& ranges, uint64_t bytes, uin
 		state.guest.erase(range);
 	}
 	std::erase_if(state.pending, [&](uint64_t begin) { return state.guest.find(begin) == state.guest.end(); });
+	state.restoring.fetch_sub(ranges.size(), std::memory_order_acq_rel);
 	state.restores++;
 	state.restore_bytes += bytes;
 	state.restore_us += us;
@@ -573,11 +591,12 @@ inline void Report(bool force) {
 	            static_cast<unsigned long long>(state.ages[3]));
 	if (offload) {
 		std::printf("Texture offload: checked %llu images (%.0f MiB, %llu differ); %llu restores (%.0f MiB, %.1f ms, at most %.1f ms), "
-		            "%llu lost, %llu missed (%.0f MiB)\n",
+		            "%llu lost, %llu missed (%.0f MiB); %llu buffer uploads waited for a restore (%.0f MiB)\n",
 		            static_cast<unsigned long long>(state.checked), state.checked_bytes / MiB,
 		            static_cast<unsigned long long>(state.check_failed), static_cast<unsigned long long>(state.restores),
 		            state.restore_bytes / MiB, state.restore_us / 1000.0, state.restore_us_max / 1000.0,
-		            static_cast<unsigned long long>(state.lost), static_cast<unsigned long long>(state.missed), state.missed_bytes / MiB);
+		            static_cast<unsigned long long>(state.lost), static_cast<unsigned long long>(state.missed), state.missed_bytes / MiB,
+		            static_cast<unsigned long long>(state.read_waits), state.read_wait_bytes / MiB);
 	}
 #if defined(_WIN32)
 	const auto exe  = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
