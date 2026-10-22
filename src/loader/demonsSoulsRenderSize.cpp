@@ -187,8 +187,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (automatic != 0) {
 		uint32_t window_width = 0, window_height = 0;
 		Libs::Graphics::WindowOutputSize(&window_width, &window_height);
-		std::printf("Demon's Souls render size: automatic for the %ux%u window: %s 3D at height %u%s
-", window_width,
+		std::printf("Demon's Souls render size: automatic for the %ux%u window: %s 3D at height %u%s\n", window_width,
 		            window_height, hd ? "HD output (1920x1080)," : trinity ? "PS5 Pro output (3840x2160)," : "4K output,",
 		            std::min(requested, hd ? DemonsSoulsHdOutput::HdHeight : requested),
 		            hd && window_height == DemonsSoulsHdOutput::HdHeight ? " (pixel-exact)"
@@ -197,8 +196,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 		if (hd && requested > DemonsSoulsHdOutput::HdHeight) requested = DemonsSoulsHdOutput::HdHeight;
 	}
 	if (hd && requested > DemonsSoulsHdOutput::HdHeight && requested <= OutputHeight) {
-		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is above the HD output's 1080; 1080 instead
-",
+		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is above the HD output's 1080; 1080 instead\n",
 		            requested);
 		requested = DemonsSoulsHdOutput::HdHeight;
 	}
@@ -284,11 +282,9 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (!patches.Apply()) return false;
 	if (aspect_store) g_wide_aspect = static_cast<double>(size.width) / size.height;
 	if (trinity) g_output = output;
-	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation
-",
+	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
 	                        output.width, output.height, OutputWidth, OutputHeight);
-	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s
-",
+	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s\n",
 	            hd ? "HD" : "performance", size.width, size.height, game_width, game_height,
 	            output.width, output.height,
 	            trinity        ? ", DLSS output follows launcher resolution"
