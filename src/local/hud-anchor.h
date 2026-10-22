@@ -713,7 +713,6 @@ inline Rect Widened(const Rect& rect) {
 	const float k = static_cast<float>(WideWidth()) / CanvasWidth();
 	return {static_cast<int>(std::floor(rect.left * k)), rect.top, static_cast<int>(std::ceil(rect.right * k)), rect.bottom};
 }
-}
 
 // For the length of one draw into the wide output's interface canvas that is not the HUD's (menus, fades, markers over
 // the world): widened from the layout at the left edge to the canvas - the viewport, a scissor narrower than
