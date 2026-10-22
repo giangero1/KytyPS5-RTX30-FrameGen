@@ -66,7 +66,7 @@ function Create-SafetyBackup {
         return $backupDir
     }
 
-    New-Item -ItemType Directory -LiteralPath $backupDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     $itemsToPreserve = @(
         'kyty_emulator.exe',
         'kyty_shader_precompile.exe',
