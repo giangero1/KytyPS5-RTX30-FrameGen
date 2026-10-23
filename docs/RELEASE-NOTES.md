@@ -1,3 +1,31 @@
+# v2026.10.23-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and gameplay-verified `e29f3100` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the updated official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261023)** (`235e9fea`) and its contributors. Merged in `3487b568`:
+
+- **DLSS CNN Model (Preset E):** Option in launcher under Graphics > DLSS Model (Automatic, Transformer Preset K, or CNN Preset E). The CNN model is significantly lighter on RTX 20 and 30 series GPUs.
+- **Sound crackle & session-drift fix:** Resolved audio buffer desynchronization and crackle over extended gameplay sessions.
+- **1080p Equipment & Character Creator 3D rendering fix:** Corrected rendering passes in menus and creation screen when running at 1080p.
+- **Defender false-positive prevention:** Cleaned internal metadata and version strings to eliminate false positives in Windows Defender.
+- **Steam `--play` argument support:** Launcher passes game arguments directly when launched via Steam shortcut.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas**, shared SR/FG frame tokens with distinct viewport IDs, and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+The user tested and verified gameplay, DLSS, sound, menus, and 2× FG on RTX 3070 with zero observed regressions, confirming solid performance with driver 617.42 precompiled shaders.
+
+**Automated validation:** Focused tests passed: `demons_souls_output_tests`, `demons_souls_output_integration_tests`, and `LauncherCommandTests.ps1`. The binary pair is hash-identical to the verified build output.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.10.22-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and gameplay-verified `f075b460` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.

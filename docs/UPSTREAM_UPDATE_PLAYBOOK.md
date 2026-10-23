@@ -3,14 +3,14 @@
 This is the maintenance guide for [giangero1/KytyPS5-RTX30-FrameGen](https://github.com/giangero1/KytyPS5-RTX30-FrameGen).
 Use a candidate branch and candidate binaries first. A successful merge/build alone does not establish working DLSS or frame generation.
 
-## Known-good baseline: 22 October 2026
+## Known-good baseline: 23 October 2026
 
-- Upstream: [chenxiao07/KytyPS5 v20261022](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261022), commit `bfa6558f41d3f5d706f59e86bf04dcc74ace9d02`.
-- Verified binary source: `f075b460`; upstream merge: `598219f9`; retained test branch: `test/upstream-v20261022-merge`.
-- Promoted release: `v2026.10.22-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
-- Emulator SHA256: `af817c4325dd90fc11c98d1d4e2651d05e3927b81b7d9f8ff68c37dea5085842` (23,539,712 bytes).
-- Precompiler SHA256: `61d434f42c69ca5a5f022c448c1de473210ffb6971f82469f406663edffad720` (12,115,968 bytes).
-- Launcher: `KytyLauncher.exe` built with MSBuild .NET 4.7.2 (`_Build/launcher/KytyLauncher.exe`, 146,944 bytes).
+- Upstream: [chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261023), commit `235e9fea15ed575e41e79426f0d64cf235675b72`.
+- Verified binary source: `e29f3100`; upstream merge: `3487b568`; retained test branch: `test/upstream-v20261023-merge`.
+- Promoted release: `v2026.10.23-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
+- Emulator SHA256: `cc9f0344e2eeed0924561c566f8a1232c4bb2120dd17f4a8accd00e307c05564` (24,998,912 bytes).
+- Precompiler SHA256: `72663e4e7bf748bc15024e804a0a6b22a16bdbac449eca18b3d7a0d10965af20` (12,145,664 bytes).
+- Launcher: `KytyLauncher.exe` built with MSBuild .NET 4.7.2 (`_Build/launcher/KytyLauncher.exe`, 168,960 bytes).
 - Windows x64, Clang-CL 19, ThinLTO, `KYTY_MARCH=x86-64-v3`, NVIDIA Streamline headers enabled.
 - User validated gameplay, save backups, DLSS and OpenDLSSG 2x FG on RTX 3070 with driver 617.42 shader precompilation. Boletaria 85–95+ displayed FPS is a user observation, not a controlled benchmark or a guarantee. Existing screenshots show 43 base / 85 displayed FPS.
 

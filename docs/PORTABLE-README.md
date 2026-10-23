@@ -1,10 +1,10 @@
 # KytyPS5 portable test build (Windows)
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
-**Demon's Souls (the PS5 remake)**. This `v2026.10.22-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `f075b460` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
+**Demon's Souls (the PS5 remake)**. This `v2026.10.23-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `e29f3100` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
 https://github.com/giangero1/KytyPS5-RTX30-FrameGen. `BUILD-INFO.txt` identifies both the binary source and final release commit; verify the external ZIP checksum and internal `SHA256-MANIFEST.txt`.
 
-Thanks to [chenxiao07/KytyPS5 v20261022](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261022) and its contributors for save flushing, four rotating backup generations (five-minute spacing), recovery of detected zero-filled saves, PageManager fixes, memory-management crash/BSOD mitigations, optional `KYTY_FG_HUDLESS=1` and F9 debug snapshot/pause. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
+Thanks to [chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261023) and its contributors for save flushing, four rotating backup generations (five-minute spacing), recovery of detected zero-filled saves, PageManager fixes, memory-management crash/BSOD mitigations, optional `KYTY_FG_HUDLESS=1` and F9 debug snapshot/pause. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
 
 The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. The user reports 85–95+ displayed FPS in Boletaria; the earlier screenshot observations below remain unchanged. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
