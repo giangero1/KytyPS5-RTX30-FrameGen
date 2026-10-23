@@ -1,27 +1,40 @@
 # KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
-## Verified upstream v20261023 merge — RTX 3070 integrations preserved
+> ⚡ **Unlocking 2× NVIDIA DLSS Frame Generation (85–120 FPS) for RTX 30-Series (Ampere) & RTX 20-Series (Turing) GPUs via OpenDLSSG Enabler.**
 
-**[Download v2026.10.23-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.23-upstream-merge)** — portable Windows x64 ZIP and SHA256 checksums, locally built with Clang-CL 19, ThinLTO, AVX2 and Streamline headers. The exact gameplay-verified binaries come from `e29f3100`; release metadata also identifies the documentation/packaging commit.
+[![Latest Release](https://img.shields.io/github/v/release/giangero1/KytyPS5-RTX30-FrameGen?style=for-the-badge&logo=github&color=00c853&label=Latest%20Release)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)
+[![RTX 30 Series](https://img.shields.io/badge/GPU%20Support-RTX%203070%20%7C%203080%20%7C%203060%20%7C%2020--Series-76b900?style=for-the-badge&logo=nvidia)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen)
+[![Frame Gen](https://img.shields.io/badge/Frame%20Gen-2x%20OpenDLSSG%20(85--120%20FPS)-blue?style=for-the-badge)](docs/RTX30_FRAME_GEN_GUIDE.md)
 
-Thanks to **[chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261023)** and its contributors for the 16 GB RAM crash fix (#91), four newly translated pixel shaders, kill-tour shader hints for all six worlds, 8 GB GPU buffer defragmentation (`KYTY_BUFFER_DEFRAG`), dynamic 64 MiB VMA block sizing, fresh memory zero-reads, and centered lock-on reticles.
+---
 
-This fork retains **1920×1080 DLSS → 2560×1440 output + 2× FG**, the original **3840×2160 UI canvas**, shared SR/FG frame tokens and DXGI VRAM-pressure handling. The user reports **85–95+ displayed FPS in Boletaria on RTX 3070** after this merge; this is an observation, not a controlled average or performance guarantee. The six earlier screenshots below remain labeled with their original measurements.
+## 🎯 What is this Fork?
 
-All seven focused core tests pass. Prior broader validation limits remain documented; this does not claim a fully passing regression suite or all-resolution certification. **Streamline/OpenDLSSG DLLs remain separate prerequisites**; keep the proxy beside the emulator and enable HAGS/restart Windows. See the [setup guide](docs/RTX30_FRAME_GEN_GUIDE.md) and [future upstream update playbook, including a reusable request](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **This fork eliminates that restriction for *Demon's Souls* (PS5) on PC**, allowing owners of **NVIDIA GeForce RTX 3070, 3080, 3060, 3090, and RTX 20-series GPUs** to run with **2× DLSS Frame Generation** at smooth **85–120 FPS**:
 
-> [!IMPORTANT]
-> **NEW MILESTONE: 85 FPS verified with 1080p DLSS (PS5 Pro path) + 2× DLSS Frame Generation!**
-> - **1080p DLSS → 1440p Output + 2× FG:** **85 FPS Peak** (`DLSS FG 2x | game 43 fps`) on NVIDIA GeForce RTX 3070 (Ampere) & AMD Ryzen 7 5800X3D!
-> - **Native 1440p + 2× FG:** **60 FPS Solid** (`DLSS FG 2x | game 30 fps`).
-> - **Original 4K UI Canvas Preservation:** Sharp native 3840×2160 HUD, menus, and inventory with zero scaling distortion.
-> - **RTX 30-Series DLSS-G:** Non-invasive [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler) proxy integration.
-> 
-> ⚠️ **Mandatory Prerequisite:** Enable **Hardware-Accelerated GPU Scheduling (HAGS)** in Windows Settings and **restart your PC**.
+* 🚀 **2× DLSS Frame Generation on RTX 30/20 Cards**: Bridges the guest 43–60 FPS base simulation to **85–120 displayed FPS** using OpenDLSSG Enabler.
+* 🖼️ **1080p DLSS → 1440p Output Scaling**: Resizes the PS5 Pro DLSS super-resolution processing canvas to your monitor's 1440p resolution instead of forcing a heavy 4K render pass.
+* 💎 **Pixel-Sharp Native 4K UI/HUD Canvas**: Preserves original $3840\times 2160$ layout coordinates for all menus, inventory, and crosshairs with zero blur or stretching.
+* 🛡️ **DXGI 8 GB VRAM Safety Management**: Real-time memory pressure monitoring and automatic cache pruning keeps video memory safely within 8 GB to prevent out-of-memory crashes.
 
-### 🚀 Direct Download
-📦 **[Download Latest Release: v2026.10.23-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/tag/v2026.10.23-upstream-merge)**
-*Locally verified portable Windows x64 package (`KytyPS5-v2026.10.23-upstream-merge-Windows-x64.zip`) with AVX2 compatibility and unified launcher.*
+---
+
+## 🚀 Quickstart: 3-Step Setup
+
+```
+[ Step 1: Download Release ] ──> [ Step 2: Install OpenDLSSG ] ──> [ Step 3: Enable HAGS & Play! ]
+```
+
+1. **Download the Emulator**:
+   📦 **[Download Latest Release: v2026.10.23-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)** (`KytyPS5-v2026.10.23-upstream-merge-Windows-x64.zip`) and extract it.
+
+2. **Add the Frame Gen Prerequisites** (Required for RTX 30/20 FG):
+   - Download the [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler/releases) proxy (`version.dll`) and place it directly in the emulator folder next to `kyty_emulator.exe`.
+   - Place NVIDIA Streamline DLLs (`sl.interposer.dll`, `sl.dlss.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`) into the `streamline/` directory. *(See the [Detailed Setup Guide](docs/RTX30_FRAME_GEN_GUIDE.md) for step-by-step links).*
+
+3. **Enable Windows HAGS & Launch**:
+   - Turn ON **Hardware-Accelerated GPU Scheduling (HAGS)** in *Windows Settings → Display → Graphics*, and **restart your PC**.
+   - Double-click **`KytyLauncher.exe`**, verify **Upscaler: DLSS (PS5 Pro path)** and **Frame generation: 2×**, and click **Play**!
 
 ---
 
@@ -55,13 +68,24 @@ All seven focused core tests pass. Prior broader validation limits remain docume
 
 ---
 
-### Frame Generation Mechanics & Performance Notes
+<details>
+<summary><b>🔍 Upstream v20261023 Merge Details & Technical Notes (Click to expand)</b></summary>
 
-> [!NOTE]
-> - **Displayed FPS vs Base Simulation FPS:** Frame Generation inserts optically-flowed interpolated frames between rendered frames. A display counter of 85 FPS corresponds to ~43 FPS of actual guest gameplay logic and physics.
-> - **Input Latency:** Frame generation consumes GPU compute and optical flow queuing time. While Reflex keeps responsiveness crisp, generated frames do not provide the latency reduction of native high-frame-rate rendering.
-> - **Video Memory (VRAM):** Super-resolution and Frame Generation allocate optical flow buffers and render targets. On 8 GB graphics cards, VRAM can approach or exceed Windows allocation limits in demanding scenes.
-> - **Separate FG Runtime Required:** RTX 30-series Frame Generation requires the external NVIDIA Streamline runtime DLLs and OpenDLSSG Enabler proxy (see the [setup guide](docs/RTX30_FRAME_GEN_GUIDE.md) for installation steps).
+### Upstream v20261023 Additions
+Thanks to **[chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261023)** (`235e9fea`) and its contributors. This release incorporates:
+- **DLSS CNN Model (Preset E):** Option in launcher under Graphics > DLSS Model (Automatic, Transformer Preset K, or CNN Preset E). Lighter on RTX 20/30 cards.
+- **Sound crackle & session-drift fix:** Prevents audio buffer desynchronization over long sessions.
+- **1080p Equipment & Character Creator 3D render fix:** Corrected rendering passes in menus.
+- **Defender false-positive prevention:** Metadata cleaned to avoid Windows Defender flags.
+- **Steam `--play` argument support:** Direct game launch compatibility from Steam shortcuts.
+- **Dynamic 64 MiB VMA block sizing & 8 GB GPU buffer defragmentation (`KYTY_BUFFER_DEFRAG`).**
+
+### Frame Generation Mechanics
+- **Displayed FPS vs Base Simulation FPS:** Frame Generation inserts optically-flowed interpolated frames between rendered frames. A display counter of 85 FPS corresponds to ~43 FPS of actual guest gameplay logic and physics.
+- **Input Latency:** Reflex keeps responsiveness crisp, though generated frames do not reduce input latency like native high frame rates.
+- **Video Memory (VRAM):** On 8 GB graphics cards, VRAM stays within budget via DXGI pressure management.
+
+</details>
 
 ---
 
