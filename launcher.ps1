@@ -390,9 +390,6 @@ function Get-PlayCommand {
 	if ($fsrOn) { $arguments += '-Fsr' }
 	if (!$fsrOn -and $frameGenAvailable -and [int]$settings.framegen -ge 2) { $arguments += @('-FrameGen', ([int]$settings.framegen - 1)) }
 	if ($dlss) { $arguments += @('-Upscaler', 'dlss') } elseif ($fsrUpscaler) { $arguments += @('-Upscaler', 'fsr') }
-		$arguments += @('-FrameGen', ([int]$settings.framegen - 1))
-	}
-	if ($dlss) { $arguments += @('-Upscaler', 'dlss') }
 	# (DLSS makes the 4K output: the 1080p output only with the game's own upscale.)
 	if (Test-HdOutput) { $arguments += '-HdOutput' }
 	if ($frameGenAvailable -and ((!$fsrOn -and [int]$settings.framegen -ge 2) -or $dlss)) { $arguments += @('-StreamlineDir', "`"$streamline`"") }

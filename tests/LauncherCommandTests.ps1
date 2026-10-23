@@ -2,8 +2,10 @@ param([string]$EmulatorExe = (Join-Path $PSScriptRoot '../_Build/windows/kyty_em
 $ErrorActionPreference = 'Stop'
 $launcher = Join-Path $PSScriptRoot '../launcher.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
-$function = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PlayCommand' }, $true)
-Invoke-Expression $function.Extent.Text
+foreach ($name in @('Test-AutoHdOutput', 'Test-HdOutput', 'Get-ExtraOptions', 'Get-GpuArguments', 'Get-PlayCommand')) {
+    $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    if ($fn) { Invoke-Expression $fn[0].Extent.Text }
+}
 $root = Split-Path (Split-Path $launcher -Parent) -Parent
 $powershellCommand = 'powershell'
 $EmulatorExe = [IO.Path]::GetFullPath($EmulatorExe)

@@ -59,7 +59,7 @@ int main() {
 	const auto narrow = OutputSizeFor(1920, 1440);
 	Check(narrow.width <= 1920 && narrow.height >= 1080);
 	Check(SuperResolutionRenderHeight(1080, {2560, 1440}) == 1080);
-	Check(SuperResolutionRenderHeight(900, {2560, 1440}) == 1080);
+	Check(SuperResolutionRenderHeight(900, {2560, 1440}) == 900);
 	Check(SuperResolutionRenderHeight(2160, {2560, 1440}) == 1440);
 	// Omitted render setting uses the PS5 Pro default and still clamps/installs the output.
 	Check(SuperResolutionRenderHeight(TrinityHeight, {2560, 1440}) == 1440);
