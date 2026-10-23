@@ -21,13 +21,22 @@ uint32_t Word(uint64_t address) { uint32_t v; std::memcpy(&v, reinterpret_cast<v
 // Isolate the loader from the renderer and guest execution; discovery/patching use production code.
 namespace Libs::Graphics {
 bool HostMemoryRangeIsReadable(uint64_t a, uint64_t n) { return a >= begin_address && a <= end_address && n <= end_address-a; }
+void WindowOutputSize(uint32_t* width, uint32_t* height) { if (width) *width = screen_width; if (height) *height = screen_height; }
 namespace DemonsSouls { bool IsSupportedGame() { return true; } }
 }
 namespace Loader {
 Program::Program() = default;
 Program::~Program() = default;
 ThreadLocalStorage::~ThreadLocalStorage() = default;
-namespace DemonsSoulsSuperResolution { bool Active() { return false; } }
+namespace DemonsSoulsSuperResolution {
+bool Active() { return false; }
+bool HdOutput() { return false; }
+bool SetLeastHeight(Program*, uint32_t) { return true; }
+}
+namespace DemonsSoulsHdOutput {
+bool Active() { return false; }
+void SetMode(int) {}
+}
 }
 
 int main(int argc, char** argv) {
