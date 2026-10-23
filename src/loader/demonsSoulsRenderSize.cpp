@@ -27,33 +27,56 @@ namespace {
 double g_wide_aspect = 0.0;
 Size   g_output {OutputWidth, OutputHeight};
 
-std::optional<uint64_t> FindUniqueData(const Program& program, std::span<const uint8_t> bytes) {
-	const auto sites = GuestCode::Find(program, GuestCode::Pattern(bytes), 8);
-	if (sites.size() != 1) return std::nullopt;
-	return sites[0];
+bool Readable(uint64_t address, uint64_t size) {
+	return Libs::Graphics::HostMemoryRangeIsReadable(address, size);
 }
 
-bool HoldsPair(uint64_t site, uint32_t first, uint32_t second) {
+bool HoldsPair(uint64_t address, uint32_t width, uint32_t height) {
 	uint32_t pair[2] {};
-	std::memcpy(pair, reinterpret_cast<const void*>(site), sizeof(pair));
-	return pair[0] == first && pair[1] == second;
+	if (!Readable(address, sizeof(pair))) return false;
+	std::memcpy(pair, reinterpret_cast<const void*>(address), sizeof(pair));
+	return pair[0] == width && pair[1] == height;
 }
 
-std::optional<uint64_t> FindRenderConstant(const Program& program, std::string_view pattern,
-                                           uint32_t width, uint32_t height,
-                                           uint32_t out_width = OutputWidth,
-                                           uint32_t out_height = OutputHeight) {
-	const auto sites = GuestCode::Find(program, GuestCode::Pattern(pattern), 8);
-	for (const auto site: sites) {
-		int32_t out_disp = 0, render_disp = 0;
-		std::memcpy(&out_disp, reinterpret_cast<const void*>(site + 4), sizeof(out_disp));
-		std::memcpy(&render_disp, reinterpret_cast<const void*>(site + 12), sizeof(render_disp));
-		const uint64_t out_site    = site + 8 + static_cast<int64_t>(out_disp);
-		const uint64_t render_site = site + 16 + static_cast<int64_t>(render_disp);
-		if (HoldsPair(out_site, out_width, out_height) && HoldsPair(render_site, width, height))
-			return render_site;
+// The one address of a mode's render size the mode cases (pattern) load (both cases load the same constant), after
+// their output (output_width x output_height: the 4K modes' unless given).
+std::optional<uint64_t> FindRenderConstant(const Program& program, std::string_view pattern, uint32_t width,
+                                           uint32_t height, uint32_t output_width = OutputWidth,
+                                           uint32_t output_height = OutputHeight) {
+	std::vector<uint64_t> constants;
+	for (const auto site: GuestCode::Find(program, GuestCode::Pattern(pattern), 64)) {
+		int32_t output_displacement = 0, render_displacement = 0;
+		std::memcpy(&output_displacement, reinterpret_cast<const void*>(site + 4), sizeof(int32_t));
+		std::memcpy(&render_displacement, reinterpret_cast<const void*>(site + 12),
+		            sizeof(int32_t));
+		const uint64_t output = site + 8 + static_cast<int64_t>(output_displacement);
+		const uint64_t render = site + 16 + static_cast<int64_t>(render_displacement);
+		if (HoldsPair(output, output_width, output_height) && HoldsPair(render, width, height) &&
+		    std::find(constants.begin(), constants.end(), render) == constants.end())
+			constants.push_back(render);
 	}
-	return std::nullopt;
+	return constants.size() == 1 ? std::optional(constants[0]) : std::nullopt;
+}
+
+// The one place \ytes\ is in the program's loaded segments.
+std::optional<uint64_t> FindUniqueData(const Program& program, std::span<const uint8_t> bytes) {
+	const auto* elf = program.elf.get();
+	if (elf == nullptr || elf->GetEhdr() == nullptr || elf->GetPhdr() == nullptr)
+		return std::nullopt;
+	std::vector<uint64_t> found;
+	const auto*           phdr = elf->GetPhdr();
+	for (size_t i = 0; i < elf->GetEhdr()->e_phnum && found.size() < 2; i++) {
+		if (phdr[i].p_type != PT_LOAD || phdr[i].p_filesz < bytes.size()) continue;
+		const auto address = program.base_vaddr + phdr[i].p_vaddr;
+		if (!Readable(address, phdr[i].p_filesz)) continue;
+		const auto* begin = reinterpret_cast<const uint8_t*>(address);
+		const auto* end   = begin + phdr[i].p_filesz;
+		for (const auto* at = std::search(begin, end, bytes.begin(), bytes.end());
+		     at != end && found.size() < 2;
+		     at = std::search(at + 1, end, bytes.begin(), bytes.end()))
+			found.push_back(reinterpret_cast<uint64_t>(at));
+	}
+	return found.size() == 1 ? std::optional(found[0]) : std::nullopt;
 }
 
 uint64_t RipTarget(uint64_t site, uint32_t at, uint32_t length) {
