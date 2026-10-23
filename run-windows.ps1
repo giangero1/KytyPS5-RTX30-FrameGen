@@ -17,8 +17,9 @@
 #                                            frame (2x; up to 5, at most what the GPU makes); needs
 #                                            NVIDIA's Streamline runtime (-StreamlineDir)
 #   .\run-windows.ps1 -Upscaler dlss         DLSS super resolution: Demon's Souls' own PS5 Pro path (its 3D at
-#                                            2688x1512 or -RenderHeight, 1080 at least), DLSS in place of Sony's
-#                                            upscaler at the selected output size; the UI retains its 4K canvas
+#                                            2688x1512 or -RenderHeight, 1080 and up or 720), DLSS in place of Sony's
+#                                            upscaler at the selected output size; the UI retains its 4K canvas; NVIDIA's Streamline runtime
+#   .\run-windows.ps1 -Upscaler fsr          the same with AMD's FSR 3 built in (any graphics card, nothing to download)
 #   .\run-windows.ps1 -StreamlineDir <dir>   where NVIDIA's Streamline runtime is (the Streamline SDK
 #                                            or its bin\x64; default: a "streamline" folder next to
 #                                            the emulator)
@@ -83,10 +84,11 @@ param(
 	[switch]$AspectFit,
 	[int]$Language = -1,
 	[int]$FrameGen = 0,
-	[ValidateSet('', 'dlss')][string]$Upscaler = '',
+	[ValidateSet('', 'dlss', 'fsr')][string]$Upscaler = '',
 	[string]$StreamlineDir = '',
 	[switch]$Fsr,
 	[string]$Affinity = '',
+	[string]$Gpu = '',
 	[switch]$Prompt,
 	[switch]$Follow,
 	[switch]$DryRun
@@ -263,6 +265,11 @@ if (!$environment.Contains('KYTY_RENDER_CPUS')) { $environment['KYTY_RENDER_CPUS
 if ($RenderHeight -gt 0) { $environment['KYTY_RENDER_HEIGHT'] = "$RenderHeight" }
 # -HdOutput: the game's 1080p output (src/loader/demonsSoulsHdOutput.h). A 1440 render height (the default) becomes 1080.
 if ($HdOutput) { $environment['KYTY_HD_OUTPUT'] = '1' }
+# -Gpu: the graphics card on a PC with more than one, its number in the log's "Vulkan GPU <n>:" list or a part of its
+# name (-Gpu 4090); without it the first discrete GPU, in the order Windows' graphics settings give (issue #132). Give
+# precompile-windows.ps1 the same -Gpu: the pipelines are compiled for one card.
+# (Set here already: the precompile program's runs below, the prefetch inputs, are made for that card too.)
+if ($Gpu) { $environment['KYTY_GPU'] = $Gpu; $env:KYTY_GPU = $Gpu }
 # -Aspect 21:9 (or 32:9, w:h): the 3D rendered at that aspect, its width at the render height (3416x1440), the game's
 # projection widened to match; the presenter shows every frame at the aspect (movies and menus stretched).
 if ($Aspect -and $Aspect -ne '16:9') { $environment['KYTY_RENDER_ASPECT'] = $Aspect }
@@ -304,13 +311,13 @@ if ($AspectFit) { $environment['KYTY_PRESENT_ASPECT'] = 'fit' }
 # -LowLatency: src/graphics/presentation/videoOut.cpp's FlipQueue (fc1e9cf4).
 if ($LowLatency) { $environment['KYTY_LOW_LATENCY'] = '1' }
 if ($FrameGen -gt 0) { $environment['KYTY_FRAMEGEN'] = "$FrameGen" }
-# -Upscaler dlss: src/loader/demonsSoulsSuperResolution.h.
+# -Upscaler dlss|fsr: src/loader/demonsSoulsSuperResolution.h (fsr: src/local/fsr-native.h).
 if ($Upscaler) { $environment['KYTY_UPSCALER'] = $Upscaler }
 # -Fsr: FSR 3.1 (one generated frame; no Streamline).
 if ($Fsr) { $environment['KYTY_FRAMEGEN'] = '1'; $environment['KYTY_FRAMEGEN_BACKEND'] = 'fsr'; $FrameGen = 0 }
 # Without -StreamlineDir, the Streamline folder chosen in the launcher (launcher-settings.json), as the launcher passes
 # it: run.cmd -FrameGen 1 had started with frame generation off, its runtime not found (issue #38).
-if (!$StreamlineDir -and ($FrameGen -gt 0 -or $Upscaler) -and (Test-Path "$PSScriptRoot\launcher-settings.json")) {
+if (!$StreamlineDir -and ($FrameGen -gt 0 -or $Upscaler -eq 'dlss') -and (Test-Path "$PSScriptRoot\launcher-settings.json")) {
 	$chosen = try { [string](Get-Content "$PSScriptRoot\launcher-settings.json" -Raw | ConvertFrom-Json).streamline } catch { '' }
 	if ($chosen -and (Test-Path $chosen)) { $StreamlineDir = $chosen }
 }
@@ -443,8 +450,13 @@ if ($shaders) {
 	# behind after a merge).
 	# Outdated: made from the seeds of an older precompile program, which listed fewer of the game's shaders.
 	$cacheOutdated = $status -match 'static cache outdated'
-	$cacheReady = $status -match 'static cache current' -and
-		!(Get-ChildItem "$PSScriptRoot\_PipelineCache\static\*.shard*" -ErrorAction SilentlyContinue | Where-Object Length -gt 1MB)
+	# A shard older than its store is left from an earlier run, not an unfinished one: another graphics driver's, which
+	# no merge takes (issue #126: six of them made every start offer the precompile again).
+	$unfinished = Get-ChildItem "$PSScriptRoot\_PipelineCache\static\*.shard*" -ErrorAction SilentlyContinue | Where-Object {
+		$store = Join-Path $_.DirectoryName ($_.Name -replace '\.shard.*$', '')
+		$_.Length -gt 1MB -and !((Test-Path -LiteralPath $store) -and (Get-Item -LiteralPath $store).LastWriteTime -gt $_.LastWriteTime)
+	}
+	$cacheReady = $status -match 'static cache current' -and !$unfinished
 	Write-Host "shaders:  prefetch inputs $(if ($inputsReady) { 'ready' } else { 'to be made' }), static pipeline cache $(if ($cacheReady) { 'ready' } elseif ($cacheOutdated) { 'out of date (precompile-windows.ps1 compiles what is new)' } else { 'not made (precompile-windows.ps1)' })"
 }
 

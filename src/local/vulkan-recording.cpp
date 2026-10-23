@@ -27,9 +27,14 @@ volatile std::atomic<uint32_t> kyty_local_vulkan_recording_mode {1};
 // 1: queue command-buffer begin/end/submit instead of draining (DeferredSubmitEnabled).
 volatile std::atomic<uint32_t> kyty_local_deferred_submit_mode {1};
 // Pauses the idle worker spins before it blocks (a blocked worker costs the render thread a
-// wake-up system call per publish on Windows).
+// wake-up system call per publish on Windows; Linux the same unless KYTY_LINUX_FAST_LOCKS=0).
 #if defined(_WIN32)
 volatile std::atomic<uint32_t> kyty_local_recording_spin {4000};
+#elif defined(__linux__)
+volatile std::atomic<uint32_t> kyty_local_recording_spin {[] {
+    const char* value = std::getenv("KYTY_LINUX_FAST_LOCKS");
+    return value == nullptr || value[0] != '0' ? 4000u : 0u;
+}()};
 #else
 volatile std::atomic<uint32_t> kyty_local_recording_spin {0};
 #endif
@@ -219,6 +224,19 @@ public:
         Publish();
         if (completed.load(std::memory_order_acquire) == sequence) return;
         const RecordWait waiting;
+#if defined(__linux__)
+        static const bool fast_locks = [] {
+            const char* value = std::getenv("KYTY_LINUX_FAST_LOCKS");
+            return value == nullptr || value[0] != '0';
+        }();
+        // Linux: a short spin first, the same as the worker's (KYTY_LINUX_FAST_LOCKS=0: waits at once).
+        if (fast_locks) {
+            for (uint32_t spin = 0; spin < 4000; ++spin) {
+                if (completed.load(std::memory_order_acquire) == sequence) return;
+                _mm_pause();
+            }
+        }
+#endif
         for (auto done = completed.load(std::memory_order_acquire); done != sequence;
              done = completed.load(std::memory_order_acquire)) completed.wait(done, std::memory_order_acquire);
     }

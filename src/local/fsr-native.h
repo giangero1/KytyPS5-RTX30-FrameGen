@@ -1,17 +1,18 @@
 #ifndef EMULATOR_SRC_LOCAL_FSR_NATIVE_H_
 #define EMULATOR_SRC_LOCAL_FSR_NATIVE_H_
 // AMD FidelityFX FSR 3 built from source (3rdparty/fidelityfx, SDK 1.1.4) on Linux, where AMD ships no runtime for the
-// ffx-api the Windows FSR backend loads (amd_fidelityfx_vk.dll, frame-gen.h). Any Vulkan GPU.
+// ffx-api the Windows FSR frame generation loads (amd_fidelityfx_vk.dll, frame-gen.h), and on Windows for its upscaling
+// (nothing to download). Any Vulkan GPU.
 // - KYTY_UPSCALER=fsr: FSR 3 upscaling in place of Sony's PS5 Pro upscaler the game dispatches, from the inputs DLSS
 //   takes there (renderSuperResolution.cpp: the game's jittered HDR color before its post-processing, its depth and
 //   motion vectors, the jitter and the reset flag), so the HUD and the post-processing are drawn on the upscaled image.
-// - KYTY_FRAMEGEN_BACKEND=fsr (KYTY_FRAMEGEN=1 implied): FSR 3 frame interpolation, one frame between two of the
+// - KYTY_FRAMEGEN_BACKEND=fsr (KYTY_FRAMEGEN=1 implied; Linux): FSR 3 frame interpolation, one frame between two of the
 //   game's, made and shown by the present thread as NGX's DLSS-G frames are (swapchain.cpp PresentGenerated,
 //   FrameGen::Generate).
 // KYTY_FSR_SHARPNESS=<0..1> (default 0.6): FSR's RCAS sharpening of the upscaled image (0: none). At Boletaria's start
 // (1080 -> 2160) 0.8 had a quarter more edge detail than 0.3; the game's jitter as DLSS takes it served FSR as well as
 // any sign change (live switches fsr_jitter_mode, fsr_sharpness_pct, fsr_mv_mode, fsr_debug_view: live-switch.h).
-// Elsewhere (Windows) the functions answer false.
+// Elsewhere (macOS) the functions answer false; on Windows the interpolation's (AMD's runtime makes those frames there).
 #include "local/frame-gen.h"
 
 #include <array>

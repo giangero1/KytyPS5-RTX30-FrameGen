@@ -18,7 +18,9 @@ sealed class LauncherContext {
 	public readonly long EfficiencyMask;  // the efficiency cores of a hybrid CPU as an affinity mask, or 0
 	public readonly List<GpuInfo> Gpus;
 	public readonly bool RtxGpu;          // DLSS (the upscaler and frame generation) needs an NVIDIA RTX graphics card
+	public readonly bool AmdGpu;          // an AMD Radeon graphics card (AMD Anti-Lag)
 	public readonly ulong RamBytes;
+	public readonly int DisplayHeight;    // the primary display's height in pixels (Game output: Automatic), or 0
 	public readonly bool FsrAvailable;    // AMD's signed amd_fidelityfx_vk.dll next to the emulator (FSR 3 frame generation)
 	public string Streamline { get; private set; } // NVIDIA's signed Streamline runtime folder, or null
 	public bool FrameGenAvailable { get { return Streamline != null && RtxGpu; } }
@@ -35,7 +37,9 @@ sealed class LauncherContext {
 		EfficiencyMask = Native.EfficiencyMask();
 		Gpus = GpuInfo.All();
 		RtxGpu = Gpus.Any(g => g.Name.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0 && HasWord(g.Name, "RTX"));
+		AmdGpu = Gpus.Any(g => g.Name.IndexOf("AMD", StringComparison.OrdinalIgnoreCase) >= 0 || g.Name.IndexOf("Radeon", StringComparison.OrdinalIgnoreCase) >= 0);
 		RamBytes = Native.TotalRam();
+		DisplayHeight = Native.DisplayHeight();
 		Streamline = ResolveStreamline();
 		var fsrDll = Path.Combine(Path.GetDirectoryName(EmulatorExe) ?? Root, "amd_fidelityfx_vk.dll");
 		FsrAvailable = Signature.SignedBy(fsrDll, "Advanced Micro Devices");
@@ -230,6 +234,30 @@ static class Native {
 	public static ulong TotalRam() {
 		var status = new MemoryStatus { dwLength = (uint)Marshal.SizeOf(typeof(MemoryStatus)) };
 		return GlobalMemoryStatusEx(ref status) ? status.ullTotalPhys : 0;
+	}
+
+	// DEVMODEW, up to the display frequency (dmSize says how much of it is here).
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct DevMode {
+		[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+		public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+		public uint dmFields;
+		public int dmPositionX, dmPositionY;
+		public uint dmDisplayOrientation, dmDisplayFixedOutput;
+		public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+		[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+		public ushort dmLogPixels;
+		public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+	}
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+	static extern bool EnumDisplaySettingsW(string deviceName, int modeNumber, ref DevMode mode);
+
+	// The primary display's height in pixels, its current mode's (not scaled by Windows' display scaling), or 0
+	// (launcher.ps1's Get-DisplayHeight).
+	public static int DisplayHeight() {
+		var mode = new DevMode { dmSize = (ushort)Marshal.SizeOf(typeof(DevMode)) };
+		return EnumDisplaySettingsW(null, -1, ref mode) ? (int)mode.dmPelsHeight : 0;
 	}
 
 	[DllImport("kernel32.dll", SetLastError = true)]

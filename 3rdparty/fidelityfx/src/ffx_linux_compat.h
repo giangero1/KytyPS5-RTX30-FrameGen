@@ -1,4 +1,5 @@
-// Linux build support for the FidelityFX SDK sources: MSVC library extensions they use.
+// Build support for the FidelityFX SDK sources in the emulator: on Linux the MSVC library extensions they use; on Linux
+// and Windows their few global Vulkan calls routed to the emulator's dispatcher (below).
 #pragma once
 
 #if !defined(_WIN32)
@@ -68,7 +69,9 @@ inline int sprintf_s(char* buffer, size_t size, const char* format, Args... args
 	return std::snprintf(buffer, size, format, args...);
 }
 
-// The emulator loads Vulkan at run time (SDL), so libvulkan's exported entry points do not exist.
+#endif
+
+// The emulator loads Vulkan at run time (SDL), so libvulkan's (vulkan-1.dll's) exported entry points are not linked.
 // The few global calls in the Vulkan backend are routed to the emulator's dispatcher instead.
 #include <vulkan/vulkan.h>
 #ifdef __cplusplus
@@ -91,5 +94,3 @@ PFN_vkVoidFunction kyty_ffx_vkGetDeviceProcAddr(VkDevice device, const char* nam
 #define vkGetPhysicalDeviceMemoryProperties      kyty_ffx_vkGetPhysicalDeviceMemoryProperties
 #define vkEnumerateDeviceExtensionProperties     kyty_ffx_vkEnumerateDeviceExtensionProperties
 #define vkGetDeviceProcAddr                      kyty_ffx_vkGetDeviceProcAddr
-
-#endif

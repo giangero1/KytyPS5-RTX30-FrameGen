@@ -126,8 +126,13 @@ static class ShaderStore {
 			var text = output.ToString();
 			if (text.Contains("static cache outdated")) return StoreState.Outdated;
 			if (text.Contains("static cache current")) {
-				// (A precompile that stopped before its last merge leaves large shard checkpoints.)
-				var unfinished = Directory.Exists(store) && new DirectoryInfo(store).GetFiles("*.shard*").Any(f => f.Length > (1L << 20));
+				// (A precompile that stopped before its last merge leaves large shard checkpoints. One older than its store is
+				// an earlier run's - another graphics driver's, which no merge takes, issue #126 - not an unfinished one.)
+				var unfinished = Directory.Exists(store) && new DirectoryInfo(store).GetFiles("*.shard*").Any(f => {
+					var at = f.Name.IndexOf(".shard", StringComparison.Ordinal);
+					var own = new FileInfo(Path.Combine(f.DirectoryName ?? store, f.Name.Substring(0, at)));
+					return f.Length > (1L << 20) && !(own.Exists && own.LastWriteTimeUtc > f.LastWriteTimeUtc);
+				});
 				return unfinished ? StoreState.Outdated : StoreState.Current;
 			}
 			return StoreState.None;

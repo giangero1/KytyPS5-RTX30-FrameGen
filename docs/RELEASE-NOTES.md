@@ -44,6 +44,53 @@ Full guide and screenshots: https://github.com/giangero1/KytyPS5-RTX30-FrameGen/
 
 ## New in this build
 
+Your precompiled shaders stay valid: the shaders are the same as in v20261022. The release's hints now hold two
+more whole playthroughs, so the launcher offers the precompile once more: only the new part is compiled (minutes).
+
+- **FSR 3 upscaling for every graphics card:** in the launcher, Graphics > Upscaler > **FSR 3 (PS5 Pro path)**
+  (`run.cmd -Upscaler fsr`). AMD's FSR 3 replaces Sony's PS5 Pro upscaler, as DLSS does: AMD, Intel and GeForce GTX
+  cards get a real upscaler, built in, nothing to download. On an RTX 5090 at Boletaria's start, 1080 to 4K looked close
+  to DLSS at the same height.
+- **DLSS and FSR 3 for 1080p screens:** with Game output 1080p they make the 1080p picture directly (no 4K step), from
+  render heights down to 360. Each render height in the launcher shows the mode it runs in (Quality, Balanced,
+  Performance, Ultra Performance, DLAA); with the 4K output, 720 is DLSS's Ultra Performance. Graphics > **DLSS model**:
+  Automatic, Transformer (preset K), or CNN (preset E, lighter on RTX 20 and 30 cards).
+- **Game output "Automatic"** (the new default): the game's own 1080p output for a 16:9 game window (or screen, in
+  full screen) at most 1080 lines high, 4K otherwise. On 1080p screens the picture is pixel for pixel and the graphics
+  card saves the 4K post-processing (RTX 5090: 69.8 -> 78.3 fps; RX 9070 XT on Linux: +4.6%). Choose 4K to keep it
+  (`run.cmd -Set KYTY_HD_OUTPUT=0`).
+- **Every language in every release:** the game's language settings offer the text of all 23 languages (Chinese,
+  Japanese and Korean too) and all 9 voices, whatever the release; no `param.json` edit (a contribution by @noir39,
+  PR #139).
+- **Sound:** no more crackling, and no delay that slowly grew in long sessions (#85).
+- **Launcher:**
+  - Experimental page: **Lock to 30 fps** (steady 30 at the normal game speed, for slower PCs), direct presentation
+    for variable refresh rate displays (#37), **Keep memory resident** (a test against MEMORY_MANAGEMENT blue screens,
+    #50), AMD Anti-Lag (#80).
+  - Advanced: a **Command-line options** box (as after `run.cmd`), and a **Graphics card** choice on PCs with more than
+    one (#132).
+  - `KytyLauncher.exe --play` starts the game with the launcher's settings, without its window: for Steam's "Add a
+    Non-Steam Game" with the Launch Options `--play` (#130).
+  - Export shader hints writes a `.zip`, which GitHub takes as an attachment.
+- **Fixes:**
+  - With the 1080p output at render height 1080, the menus' 3D was black (the character in the equipment menu and in
+    character creation) (#138).
+  - PCs with two graphics cards ran the game on the one Windows' graphics settings did not choose, and the precompile
+    on the other (#132). `run.cmd -Gpu 4090` (a number or part of the name) picks one.
+  - A precompile that hung on an old graphics driver: a pipeline the driver never finishes is now left out after 5
+    minutes, and the files such a run left behind no longer make every start offer the precompile (#126).
+  - `kyty_emulator.exe` carries version information (Microsoft Defender's machine learning took the bare file for a
+    trojan, #135).
+- **Shader hints:** two whole playthroughs added, by @DevList1454 (#124) and @Mvii7 (#134): fewer first-time
+  stutters in places our own recordings missed.
+- **Linux:** the package is built with a Linux PGO profile (+3.4%, @the2ndday, PR #133); the render thread's locks and
+  memory protection are cheaper (`KYTY_LINUX_FAST_LOCKS`, `KYTY_LINUX_COALESCE_MPROTECT`, on by default; +8% on an
+  i5-14400, @the2ndday, PR #125); the texture offload for 16 GB PCs runs on Linux too (@Bios2000, PRs #136 and #137);
+  FSR 3 upscaling is as sharp as it should be (@Bios2000, PR #131).
+- **Thanks** to @noir39, @the2ndday, @Bios2000, @DevList1454, @Mvii7 and everyone who reported problems and tested.
+
+## New in v20261022
+
 ![KytyLauncher.exe](https://raw.githubusercontent.com/chenxiao07/KytyPS5/v20261022/docs/images/launcher.png)
 
 With an NVIDIA graphics card the shaders are the same as in v20261021b: your precompiled store stays valid. With an AMD
@@ -81,26 +128,30 @@ are compiled).
 - **Thanks** to @Bios2000 (PRs #113 to #122), @Tutuzaooo, @intellq and the todojuegos67-bot fork for their
   contributions, and to everyone who reported problems and tested.
 
-## New in v20261021b
-
-A hotfix for v20261021's precompile. The shaders are the same as in v20261021: your precompiled store stays valid.
-
-- **A precompile that never finished (issue #107):** on PCs where the game had been played before, v20261021's
-  precompile split its shards without end, and its "waiting" count kept growing. It loaded the game's own pipeline
-  cache (`_PipelineCache\local`), whose data holds the compression dictionary NVIDIA's driver trained in play, and with
-  that no pipeline could be kept. The precompile no longer loads that cache, and its shards are smaller (about 100
-  pipelines each, at most 160). If you stopped a v20261021 precompile, run it again: what it finished is kept.
-- **1080p output in the launcher:** "Game output" picks 4K (as on the PS5) or 1080p, the game's own HD mode, also
-  `run.cmd -HdOutput`. In it the souls counter's backdrop is now right (a contribution by @intellq, PR #106), and FSR 3.1
-  frame generation keeps the HUD sharp.
-- **Cheats one by one:** the launcher's "Cheats" checkbox applies `_Patches\<title id>.json`, and "Select..." picks
-  which of its cheats are on (a contribution by @Myoko, PR #105).
-- **Linux:** source builds with clang can use profile-guided optimization, and the README explains how to make a
-  profile (+7.5% on an i5-14400 with an RX 9060 XT; contributions by @the2ndday, PRs #108 and #109).
-
-Earlier changes are on the release pages of v20261021 and before.
-
 ## 本版本的变化
+
+已经预编译的着色器继续有效：着色器与 v20261022 相同。发布包的提示新增了两份完整通关的记录，所以启动器会再提示一次预编译：只编译新增的部分（几分钟）。
+
+- **FSR 3 超分，任何显卡都可用：** 启动器「画质」>「超分辨率」>「FSR 3（PS5 Pro 路径）」（`run.cmd -Upscaler fsr`）。和 DLSS 一样，用 AMD 的 FSR 3 替代索尼的 PS5 Pro 超分：AMD、Intel 和 GeForce GTX 显卡也有了真正的超分，已内置，无需下载。在 RTX 5090 上的波雷塔利亚起点，从 1080 到 4K 的画面接近同高度的 DLSS。
+- **1080p 屏幕的 DLSS 和 FSR 3：** 游戏输出选 1080p 时，它们直接生成 1080p 画面（不再经过 4K），渲染高度最低可到 360。启动器中每个渲染高度都标出对应的模式（质量、平衡、性能、超级性能、DLAA）；4K 输出时 720 是 DLSS 的超级性能模式。「画质」>「DLSS 模型」：自动、Transformer（预设 K）或 CNN（预设 E，在 RTX 20/30 系显卡上更轻）。
+- **游戏输出「自动」**（新的默认）：16:9 且游戏窗口（全屏时为屏幕）高度不超过 1080 时使用游戏自己的 1080p 输出，否则 4K。1080p 屏幕上画面逐像素显示，显卡也省掉了 4K 后处理（RTX 5090：69.8 → 78.3 fps；Linux 上的 RX 9070 XT：+4.6%）。想保持 4K 请选 4K（`run.cmd -Set KYTY_HD_OUTPUT=0`）。
+- **所有版本都能选所有语言：** 无论哪个区服版本，游戏的语言设置都提供全部 23 种文字（包括中文、日文、韩文）和全部 9 种语音，不再需要修改 `param.json`（@noir39 的贡献，PR #139）。
+- **声音：** 不再有爆音，长时间游玩时声音逐渐延迟的问题也已修正（#85）。
+- **启动器：**
+  - 「实验性」页：**锁定 30 帧**（稳定 30 帧、游戏速度正常，适合较慢的电脑）、可变刷新率显示器的直接呈现（#37）、**保持内存常驻**（针对 MEMORY_MANAGEMENT 蓝屏的测试，#50）、AMD Anti-Lag（#80）。
+  - 「高级」：**命令行参数**输入框（写法同 `run.cmd` 后面的参数），以及多显卡电脑上的**显卡**选择（#132）。
+  - `KytyLauncher.exe --play` 用启动器的设置直接启动游戏、不显示启动器窗口：适合在 Steam「添加非 Steam 游戏」里使用，启动选项填 `--play`（#130）。
+  - 导出着色器提示会生成 `.zip`，可以直接作为 GitHub 附件上传。
+- **修正：**
+  - 1080p 输出且渲染高度为 1080 时，菜单里的 3D 是黑的（装备菜单和捏人界面里的角色）（#138）。
+  - 装有两块显卡的电脑上，游戏用的不是 Windows 图形设置选择的那块，预编译却用了另一块（#132）。可用 `run.cmd -Gpu 4090`（编号或名称的一部分）指定。
+  - 旧显卡驱动导致预编译卡住：驱动始终编译不完的管线现在 5 分钟后跳过，这类运行留下的文件也不会再让每次启动都提示预编译（#126）。
+  - `kyty_emulator.exe` 带上了版本信息（微软 Defender 的机器学习曾把没有版本信息的文件误判为木马，#135）。
+- **着色器提示：** 加入了 @DevList1454（#124）和 @Mvii7（#134）的两份完整通关记录：在我们自己的录制没有覆盖到的地方，首次出现的卡顿更少。
+- **Linux：** 发布包用 Linux 的 PGO 配置文件构建（+3.4%，@the2ndday，PR #133）；渲染线程的锁和内存保护更省（`KYTY_LINUX_FAST_LOCKS`、`KYTY_LINUX_COALESCE_MPROTECT`，默认开启；i5-14400 上 +8%，@the2ndday，PR #125）；面向 16 GB 电脑的纹理卸载在 Linux 上也启用了（@Bios2000，PR #136 和 #137）；FSR 3 超分恢复了应有的清晰度（@Bios2000，PR #131）。
+- **感谢** @noir39、@the2ndday、@Bios2000、@DevList1454、@Mvii7 以及所有报告问题和帮忙测试的玩家。
+
+## v20261022 的变化
 
 NVIDIA 显卡：着色器与 v20261021b 相同，已经预编译的存储继续有效。AMD 显卡：启动器会提示预编译一次，用于下面更快的浮点 min/max（只编译受影响的着色器）。
 
@@ -119,14 +170,3 @@ NVIDIA 显卡：着色器与 v20261021b 相同，已经预编译的存储继续�
   - KDE Plasma（Wayland）上每秒只显示 1–2 帧的问题已修正（PR #113）。AMD（RADV）上首次遇到的管线卡顿更少（PR #115）。高于 60 Hz 时不需要 Windows 脚本的设置，游戏速度也保持正常（PR #116）。
   - 发布包中加入了 `precompile-linux.sh`（着色器预编译）和 `get-dlss-linux.sh`（用 NVIDIA 的 SDK 在你的电脑上构建 DLSS）（@Tutuzaooo 的贡献，PR #110）。
 - **感谢** @Bios2000（PR #113 至 #122）、@Tutuzaooo、@intellq 以及 todojuegos67-bot 的 fork 的贡献，也感谢所有报告问题和帮忙测试的玩家。
-
-## v20261021b 的变化
-
-这是针对 v20261021 预编译问题的修复版本。着色器与 v20261021 相同：你已经预编译的存储继续有效。
-
-- **预编译一直无法结束（issue #107）：** 在之前已经玩过游戏的电脑上，v20261021 的预编译会不停地拆分分片，"waiting" 的数量越来越多。原因是它读取了游戏自己的管线缓存（`_PipelineCache\local`），其中包含 NVIDIA 驱动在游玩时训练出的压缩字典，结果一个管线都无法保存。现在预编译不再读取这个缓存，分片也更小了（每个约 100 个管线，最多 160 个）。如果你中断过 v20261021 的预编译，重新运行即可：已经完成的部分会保留。
-- **启动器中的 1080p 输出：** "Game output" 可以选择 4K（与 PS5 相同）或 1080p（游戏自带的高清模式），也可以用 `run.cmd -HdOutput`。这个模式下魂数旁边的深色条现在显示正常（@intellq 的贡献，PR #106），FSR 3.1 帧生成时 HUD 也保持清晰。
-- **逐个选择作弊项：** 启动器的 "Cheats" 复选框会应用 `_Patches\<title id>.json`，"Select..." 可以选择启用其中哪些作弊项（@Myoko 的贡献，PR #105）。
-- **Linux：** 用 clang 从源码构建时可以使用配置文件引导优化（PGO），README 说明了如何生成配置文件（i5-14400 + RX 9060 XT 上 +7.5%；@the2ndday 的贡献，PR #108 和 #109）。
-
-更早的变化见 v20261021 及之前版本的发布页面。

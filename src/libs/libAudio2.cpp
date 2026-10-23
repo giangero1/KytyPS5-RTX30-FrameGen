@@ -178,6 +178,7 @@ struct AudioOut2ContextState {
 	uint32_t               queued      = 0;
 	uint32_t               num_grains  = 512;
 	uint64_t               last_update = 0;
+	uint32_t               last_update_sixths = 0; // past last_update, in sixths of a us (a grain: num_grains * 125)
 	uint64_t               drained_at  = 0; // (KYTY_AUDIO_LOG) the device time its queue ran out, until the next push
 };
 
@@ -340,18 +341,23 @@ static void audioout2_update_context_locked(AudioOut2ContextState* state) {
 		const char* value = std::getenv("KYTY_AUDIO_CATCHUP_MS");
 		return static_cast<uint64_t>(value != nullptr ? std::clamp(std::atoi(value), 0, 1000) : 0) * 1000u;
 	}();
-	const auto grain_micros = static_cast<uint64_t>(audioout2_grain_micros(state->num_grains));
+	// A grain lasts num_grains / 48000 s = num_grains * 125/6 us: counted in sixths of a microsecond, as the device
+	// plays it. (In whole microseconds, 5333 for 256 samples' 5333.33, the game handed over 62.5 grains a million too
+	// many: the device queue, and with it the sound's delay, grew by about 0.2 s an hour of play.)
+	const uint64_t grain_sixths = static_cast<uint64_t>(state->num_grains == 0 ? 512u : state->num_grains) * 125u;
 	// With the queue drained: the device time since last_update the game missed is dropped beyond catchup_us
 	// (last_update = now), as before with catchup_us 0.
 	const auto drained_queue = [&](uint64_t now) {
 		if (now - state->last_update > catchup_us) {
-			state->last_update = now;
+			state->last_update        = now;
+			state->last_update_sixths = 0;
 		}
 	};
 
 	const auto now = LibKernel::KernelGetProcessTime();
 	if (state->last_update == 0 || now < state->last_update) {
-		state->last_update = now;
+		state->last_update        = now;
+		state->last_update_sixths = 0;
 		return;
 	}
 	if (state->queued == 0) {
@@ -359,18 +365,19 @@ static void audioout2_update_context_locked(AudioOut2ContextState* state) {
 		return;
 	}
 
-	if (now == state->last_update || grain_micros == 0) {
+	const auto elapsed_sixths = (now - state->last_update) * 6u;
+	if (elapsed_sixths <= state->last_update_sixths) {
 		return;
 	}
-
-	const auto elapsed = now - state->last_update;
-	const auto drained = std::min<uint64_t>(state->queued, elapsed / grain_micros);
+	const auto drained = std::min<uint64_t>(state->queued, (elapsed_sixths - state->last_update_sixths) / grain_sixths);
 	if (drained == 0) {
 		return;
 	}
 
 	state->queued -= static_cast<uint32_t>(drained);
-	state->last_update += drained * grain_micros;
+	const auto advanced       = state->last_update_sixths + drained * grain_sixths;
+	state->last_update       += advanced / 6u;
+	state->last_update_sixths = static_cast<uint32_t>(advanced % 6u);
 	if (state->queued == 0) {
 		if (state->drained_at == 0) {
 			state->drained_at = state->last_update;

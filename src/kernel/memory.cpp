@@ -1194,6 +1194,10 @@ uint64_t BackingMappingEnd(uint64_t vaddr) {
 	return g_guest_address_space != nullptr ? g_guest_address_space->BackingMappingEnd(vaddr) : 0;
 }
 
+bool DiscardBacking(uint64_t address, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->DiscardBacking(address, size);
+}
+
 void TrimGuestRange(uint64_t vaddr, uint64_t size) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	if (size != 0) ParkedRangeTrimmer::Trim(vaddr, size);
@@ -1431,6 +1435,21 @@ void PrepareHostOverwrite(uint64_t vaddr, uint64_t size) {
 		end   = std::min(end, vaddr + size);
 		(void)g_gpu_resources->InvalidateMemoryForWrite(first, end - first);
 	}
+#elif defined(__linux__)
+	// Linux the same, with KYTY_LINUX_COALESCE_MPROTECT (on unless 0): the tracked span made writable in one go, its
+	// pages' protection changes coalesced (ProtectMappedUnlocked), instead of a fault for each page the store reaches.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_LINUX_COALESCE_MPROTECT");
+		return value == nullptr || value[0] != '0';
+	}();
+	if (enabled) {
+		uint64_t first = 0, end = 0;
+		if (g_gpu_resources->WatchedSpan(vaddr, size, &first, &end)) {
+			first = std::max(first, vaddr);
+			end   = std::min(end, vaddr + size);
+			(void)g_gpu_resources->InvalidateMemoryForWrite(first, end - first);
+		}
+	}
 #endif
 }
 
@@ -1583,8 +1602,32 @@ static bool SelfTestSub64SharedPlaceholderAlias() {
 
 static bool ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size);
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// KYTY_RESIDENT_MB=<n> (a test, off by default; the launcher's Experimental "Keep memory resident", with
+// KYTY_WORKING_SET_TRIM=0): Windows keeps at least n MiB of the emulator in RAM (a hard minimum working set, at most 2/5
+// of the RAM). A fork's measure against the MEMORY_MANAGEMENT blue screen (0x1A/0x41202, issues #5 and #50), whose stack
+// is a protection change of a guest page Windows had taken out of the working set under memory pressure; unverified,
+// and the RAM it keeps the rest of the PC does without.
+static void KeepResident() {
+	const char* value = std::getenv("KYTY_RESIDENT_MB");
+	uint64_t    floor = value != nullptr ? std::strtoull(value, nullptr, 10) << 20u : 0;
+	if (floor == 0) return;
+	MEMORYSTATUSEX status {sizeof(status)};
+	if (!GlobalMemoryStatusEx(&status)) return;
+	floor          = std::min<uint64_t>(floor, status.ullTotalPhys / 5 * 2);
+	const bool set = SetProcessWorkingSetSizeEx(GetCurrentProcess(), floor, status.ullTotalPhys,
+	                                            QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE) != 0;
+	std::printf("Memory: %llu MiB of the emulator kept in RAM at least (KYTY_RESIDENT_MB)%s\n",
+	            static_cast<unsigned long long>(floor >> 20u), set ? "" : ": refused by Windows");
+	if (!set) std::printf("Memory: SetProcessWorkingSetSizeEx failed (error %lu)\n", GetLastError());
+}
+#endif
+
 void Initialize() {
 	g_flexible_memory_size_frozen = true;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	KeepResident();
+#endif
 	VirtualMemory::Init();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
 	g_physical_memory     = std::make_unique<PhysicalMemory>();

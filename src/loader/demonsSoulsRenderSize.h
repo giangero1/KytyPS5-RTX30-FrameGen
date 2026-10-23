@@ -78,15 +78,18 @@ inline constexpr float            FloatWidths[2] {1920.0f, 3840.0f};
 // The render size query's per-mode tables (modes 1-5): widths, heights.
 inline constexpr uint32_t ModeWidths[5] {1600, 1920, 2560, 3840, 2688};
 inline constexpr uint32_t ModeHeights[5] {900, 1080, 1440, 2160, 1512};
-inline constexpr int      PerformanceMode = 2, TrinityMode = 4; // (indexes in the tables)
-// The HD output's display mode with another render size than its 1920x1080 (loader/demonsSoulsHdOutput.h): mode 1,
-// whose case loads its 3D size (1600x900) after the 1920x1080 output, as mode 3's after the 4K one.
+inline constexpr int      PerformanceMode = 2; // (mode 3: 2560x1440)
+inline constexpr int      TrinityMode     = 4; // (mode 5: 2688x1512)
+// Its HD mode: mode 1 (1600x900 upscaled to 1920x1080, loader/demonsSoulsHdOutput.h).
 inline constexpr int HdUpscaledMode = 0;
 // The render setup's constructor storing the projection's aspect, 16/9 as a float: mov dword [rbx+4], 0x3fe38e39
 // (01.007.000 0x90090ae7f, 01.005.000 0x9008ef287; the only such store either build has).
 inline constexpr std::string_view AspectStore  = "c7 43 04 39 8e e3 3f";
 inline constexpr double           GameAspect   = 16.0 / 9.0;
 inline constexpr double           WidestAspect = 32.0 / 9.0;
+
+// The least render height: 360, a third of the 1080p output (DLSS's ultra performance there; issue #129).
+inline constexpr uint32_t LeastRenderHeight = 360;
 
 // The render size for a height and an aspect, its width a multiple of 8; {0, 0} for a height out of
 // range.
@@ -98,7 +101,7 @@ struct Size {
 [[nodiscard]] Size EffectiveOutputSize();
 
 // Fit the game aspect inside the selected launcher resolution, retaining the game's 8-pixel width
-// alignment. Below 1080 the PS5 Pro upscaler cannot run; the caller keeps the original TAA path.
+// alignment. Below LeastRenderHeight the upscaler cannot run; the caller keeps the original TAA path.
 inline Size OutputSizeFor(uint32_t screen_width, uint32_t screen_height,
                           double aspect = GameAspect) {
 	if (screen_width == 0 || screen_height == 0 || !std::isfinite(aspect) || aspect < GameAspect ||
@@ -114,8 +117,8 @@ inline Size OutputSizeFor(uint32_t screen_width, uint32_t screen_height,
 }
 
 inline uint32_t SuperResolutionRenderHeight(uint32_t requested, Size output) {
-	return output.height >= SuperResolutionLeastHeight
-	           ? std::clamp(requested, SuperResolutionLeastHeight, output.height)
+	return output.height >= LeastRenderHeight
+	           ? std::clamp(requested, LeastRenderHeight, output.height)
 	           : 0;
 }
 
@@ -151,7 +154,7 @@ inline InterfaceTransform InterfaceTransformFor(Size output, bool hud = false, f
 	return {hud ? y : x, y, hud ? (output.width - layout.width * y) * (side + 1.0f) * 0.5f : 0.0f};
 }
 inline Size RenderSizeFor(uint32_t height, double aspect = GameAspect) {
-	if (height < 720 || height > OutputHeight) return {};
+	if (height < LeastRenderHeight || height > OutputHeight) return {};
 	const auto width = static_cast<uint32_t>(std::lround(height * aspect / 8.0)) * 8u;
 	return {width, height};
 }
@@ -176,10 +179,10 @@ inline bool FitsRenderTargets(Size size) {
 // The highest render height (a multiple of 8) whose size at `aspect` fits (FitsRenderTargets): 2160 at 16:9, 1832 at
 // 21:9 (4344x1832), 1512 at 32:9 (5376x1512).
 inline uint32_t MaxRenderHeight(double aspect) {
-	for (uint32_t height = OutputHeight; height >= 720; height -= 8) {
+	for (uint32_t height = OutputHeight; height >= LeastRenderHeight; height -= 8) {
 		if (FitsRenderTargets(RenderSizeFor(height, aspect))) return height;
 	}
-	return 720;
+	return LeastRenderHeight;
 }
 
 // KYTY_RENDER_ASPECT's value: "<w>:<h>" or a number; 21:9 is the displays' 64:27. 0 when unset, at most 16:9 or wider

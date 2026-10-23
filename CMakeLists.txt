@@ -441,9 +441,9 @@ if (KYTY_CLANG_CL)
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL2-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak libzstd_static)
-# Linux: AMD FidelityFX FSR 3 built from source (3rdparty/fidelityfx) for KYTY_UPSCALER=fsr
-# (src/local/fsr-native.h); Windows loads AMD's runtime instead (frame-gen.cpp).
-if (LINUX)
+# Linux and Windows: AMD FidelityFX FSR 3 built from source (3rdparty/fidelityfx) for KYTY_UPSCALER=fsr
+# (src/local/fsr-native.h); Windows' FSR frame generation loads AMD's runtime instead (frame-gen.cpp).
+if (LINUX OR WIN32)
 	list(APPEND kyty_emulator_link_libraries kyty_fidelityfx)
 endif()
 
@@ -869,6 +869,26 @@ endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
 configure_macos_guest_address_space(kyty_emulator)
+
+# Windows: the programs' version information (src/kyty.rc.in; a program without any looked more like a trojan to
+# antivirus programs' machine learning, issue #135).
+if(WIN32)
+	string(REPLACE "." "," KYTY_RC_VERSION_COMMAS "${KYTY_VERSION}.0")
+	foreach(program kyty_emulator kyty_shader_precompile)
+		if(TARGET ${program})
+			# (The precompile program runs as the emulator, a link named kyty_emulator.exe - precompile-windows.ps1: AMD's
+			# driver keys its pipelines by the program's name -, so it is named the same here too.)
+			set(KYTY_RC_NAME kyty_emulator)
+			if(program STREQUAL "kyty_emulator")
+				set(KYTY_RC_DESCRIPTION "KytyPS5 PS5 emulator")
+			else()
+				set(KYTY_RC_DESCRIPTION "KytyPS5 shader precompile")
+			endif()
+			configure_file("${KYTY_SOURCE_DIR}/kyty.rc.in" "${PROJECT_BINARY_DIR}/${program}.rc" @ONLY)
+			target_sources(${program} PRIVATE "${PROJECT_BINARY_DIR}/${program}.rc")
+		endif()
+	endforeach()
+endif()
 
 if(LINUX)
 	set_property(SOURCE

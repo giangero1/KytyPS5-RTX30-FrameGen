@@ -51,6 +51,9 @@
 #include <thread>
 #include <unistd.h>
 #include <x86intrin.h>
+#if defined(__linux__)
+#include <linux/membarrier.h>
+#endif
 #endif
 
 namespace LocalPlatform {
@@ -1730,7 +1733,18 @@ double NamedThreadsCpuSeconds(const char* name) {
 }
 
 bool FlushProcessWriteBuffers() {
+#if defined(__linux__)
+	// membarrier's expedited private command: what FlushProcessWriteBuffers does on Windows, so RenderMutex's owner
+	// takes its fast path here too (KYTY_LINUX_FAST_LOCKS=0: false, the mutex always).
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_LINUX_FAST_LOCKS");
+		return (value == nullptr || value[0] != '0') &&
+		       syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
+	}();
+	return enabled && syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) == 0;
+#else
 	return false;
+#endif
 }
 
 bool CurrentThreadStack(uint64_t* low, uint64_t* high) {
@@ -1763,7 +1777,16 @@ void MakeBackgroundThread(const char* avoid_cpus) {
 	AvoidCpuList(avoid_cpus);
 }
 
-void MakeCriticalThread() {}
+void MakeCriticalThread() {
+#if defined(__linux__)
+	// nice -10 where the nice limit allows it (RLIMIT_NICE), else unchanged.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_LINUX_FAST_LOCKS");
+		return value == nullptr || value[0] != '0';
+	}();
+	if (enabled) (void)setpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()), -10);
+#endif
+}
 
 int DisplayRefreshHz(void* /*window*/) {
 	return 0;

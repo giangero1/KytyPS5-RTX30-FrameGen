@@ -1,6 +1,6 @@
 #pragma once
-// Texture offload (Windows). The guest-memory copy of a texture GPU work never wrote, that only shaders sample, uploaded
-// and clean for a while, duplicates its image in video memory: on a PS5 the game's memory holds it once.
+// Texture offload (Windows, Linux). The guest-memory copy of a texture GPU work never wrote, that only shaders sample,
+// uploaded and clean for a while, duplicates its image in video memory: on a PS5 the game's memory holds it once.
 //
 // KYTY_TEXTURE_OFFLOAD_PROBE=1 (diagnostics): such a texture's pages are made inaccessible in both views of guest memory
 // (the guest's mapping: read watchers of the page manager; the backing view the emulator reads and writes: no access) and
@@ -9,8 +9,9 @@
 //
 // KYTY_TEXTURE_OFFLOAD=1 (default with 20 GiB of RAM or less): the same for textures whose download was checked to give
 // their guest bytes back exactly (16 MiB of images a scan: the downloads go with the frame's GPU work), and their pages
-// are dropped by the offload worker (DiscardVirtualMemory in the backing view a MiB at a time, the guest view's pages
-// trimmed: the RAM given back, no pagefile write). On a 16 GB PC with a 1-1 -> Stonefang -> 1-1 route: up to 2 GB of
+// are dropped by the offload worker (Windows: DiscardVirtualMemory in the backing view a MiB at a time, the guest view's
+// pages trimmed; Linux: a hole punched in the backing store's memfd, which frees them in every view: the RAM given back,
+// no pagefile or swap write). On a 16 GB PC with a 1-1 -> Stonefang -> 1-1 route: up to 2 GB of
 // guest memory out of RAM. Whoever needs the bytes again gets them back first, downloaded from the image by the render
 // thread (TextureCache::RestoreOffloaded, waiting for the GPU): an upload of an image over them (InitializeImage), a host
 // write over part of them (InvalidateMemory), the game's code touching them (its fault: the render thread through
@@ -41,6 +42,23 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#elif defined(__linux__)
+#include "common/virtualMemory.h"
+#include "kernel/memory.h"
+
+#include <cstring>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <ucontext.h>
+#endif
+
+// Where it runs: Windows and Linux (macOS: no backing store to drop the pages from).
+#if defined(_WIN32) || defined(__linux__)
+#define KYTY_TEXTURE_OFFLOAD_SUPPORTED 1
+#else
+#define KYTY_TEXTURE_OFFLOAD_SUPPORTED 0
 #endif
 
 namespace TextureOffload {
@@ -50,7 +68,7 @@ enum class Mode { Off, Probe, Offload };
 // KYTY_TEXTURE_OFFLOAD=1|0 (default: on with 20 GiB of RAM or less, where the game's memory and the emulator's caches
 // press on it; with more, its restores' stalls buy nothing).
 inline Mode GetMode() {
-#if defined(_WIN32)
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	static const Mode mode = [] {
 		const char* offload = std::getenv("KYTY_TEXTURE_OFFLOAD");
 		if (offload != nullptr && offload[0] != '\0') {
@@ -82,6 +100,7 @@ enum class Touch : uint8_t {
 	HostOverwrite,
 	Unmap,
 	Upload,
+	BufferUpload,
 	ImageGone,
 	Count
 };
@@ -97,6 +116,7 @@ inline const char* TouchName(Touch touch) {
 	                              "host write over all",
 	                              "unmap",
 	                              "image upload over it",
+	                              "buffer upload over it",
 	                              "image gone"};
 	return names[static_cast<int>(touch)];
 }
@@ -151,9 +171,14 @@ inline State& Get() {
 	return state;
 }
 
+enum class Access { None, Read, ReadWrite };
+
 #if defined(_WIN32)
-inline bool Protect(uint64_t address, uint64_t size, DWORD protection) {
-	DWORD old = 0;
+inline bool Protect(uint64_t address, uint64_t size, Access access) {
+	const DWORD protection = access == Access::None   ? PAGE_NOACCESS
+	                         : access == Access::Read ? PAGE_READONLY
+	                                                  : PAGE_READWRITE;
+	DWORD       old        = 0;
 	return VirtualProtect(reinterpret_cast<void*>(address), size, protection, &old) != 0;
 }
 
@@ -173,6 +198,28 @@ inline uint64_t CallerOf(const void* native_context) {
 	DWORD64 establisher  = 0;
 	RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context, &handler_data, &establisher, nullptr);
 	return context.Rip;
+}
+#elif defined(__linux__)
+// (Through the emulator's record of protections, as the page manager's changes of the guest view.)
+inline bool Protect(uint64_t address, uint64_t size, Access access) {
+	using Common::VirtualMemory::Mode;
+	return Common::VirtualMemory::Protect(address, size,
+	                                      access == Access::None   ? Mode::NoAccess
+	                                      : access == Access::Read ? Mode::Read
+	                                                               : Mode::ReadWrite);
+}
+
+// The emulator's code or a library's (guest code lies in no loaded object).
+inline bool IsHostCode(uint64_t rip) {
+	Dl_info info {};
+	return dladdr(reinterpret_cast<const void*>(rip), &info) != 0;
+}
+
+// The return address at the stack top: a leaf's caller (memcpy's), else the faulting function's own
+// return address or a stack slot (no unwind of the faulting frame here).
+inline uint64_t CallerOf(const void* native_context) {
+	const auto* context = static_cast<const ucontext_t*>(native_context);
+	return *reinterpret_cast<const uint64_t*>(context->uc_mcontext.gregs[REG_RSP]);
 }
 #endif
 
@@ -203,8 +250,8 @@ inline void Add(uint64_t vaddr, uint64_t size, std::vector<Piece> pieces, uint64
 	state.ranges_total++;
 }
 
-#if defined(_WIN32)
-// The worker thread's drop of range `begin`'s pages (discarded in the backing view, then no access there): unless it was
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
+// The worker thread's drop of range `begin`'s pages (discarded in the backing view and no access there): unless it was
 // touched, restored or dropped since it was taken. Under the state's lock: no touch or restore of it meanwhile.
 inline bool DiscardRange(uint64_t begin) {
 	auto&           state = Get();
@@ -215,12 +262,24 @@ inline bool DiscardRange(uint64_t begin) {
 	// protection change of the game's threads waits for (whole ranges: frames of 30-60 ms after each scan).
 	constexpr uint64_t Chunk = uint64_t {1} << 20u;
 	for (const auto& piece: it->second.pieces) {
+#if defined(_WIN32)
 		// (A discard is refused on pages without access.)
 		for (uint64_t at = 0; at < piece.size; at += Chunk) {
 			(void)DiscardVirtualMemory(reinterpret_cast<void*>(piece.backing + at), std::min(Chunk, piece.size - at));
 			SwitchToThread();
 		}
-		(void)Protect(piece.backing, piece.size, PAGE_NOACCESS);
+		(void)Protect(piece.backing, piece.size, Access::None);
+#else
+		// (Linux: no access first, then the hole, which frees the pages in every view: a touch in
+		// between would have read zeros. A MiB at a time too: faults on the memfd's pages wait for
+		// a punch over them.)
+		(void)Protect(piece.backing, piece.size, Access::None);
+		for (uint64_t at = 0; at < piece.size; at += Chunk) {
+			(void)Libs::LibKernel::Memory::DiscardBacking(piece.backing + at,
+			                                              std::min(Chunk, piece.size - at));
+			sched_yield();
+		}
+#endif
 	}
 	return true;
 }
@@ -311,9 +370,10 @@ inline void TouchLocked(State& state, std::map<uint64_t, Range>::iterator it, To
 	if (range.touched) return;
 	range.touched = true;
 	CountLocked(state, it, touch, rip, caller);
-#if defined(_WIN32)
-	for (const auto& piece: range.pieces) (void)Protect(piece.backing, piece.size, PAGE_READWRITE);
-	(void)Protect(it->first, range.guest_end - it->first, PAGE_READONLY);
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
+	for (const auto& piece: range.pieces)
+		(void)Protect(piece.backing, piece.size, Access::ReadWrite);
+	(void)Protect(it->first, range.guest_end - it->first, Access::Read);
 #endif
 	state.pending.push_back(it->first);
 }
@@ -395,8 +455,9 @@ inline void NoteCheck(uint64_t images, uint64_t bytes, uint64_t failed) {
 	state.check_failed += failed;
 }
 
-#if defined(_WIN32)
-// The exception filter's probe handler (any thread): a touch of a taken range, either view.
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
+// The exception filter's (Linux: the SIGSEGV handler's) probe handler (any thread): a touch of a
+// taken range, either view.
 inline bool OnFault(uint64_t address, uint64_t rip, const void* native_context, bool write) {
 	auto&      state      = Get();
 	const bool in_guest   = address >= state.guest_lo.load(std::memory_order_relaxed) && address < state.guest_hi.load(std::memory_order_relaxed);
@@ -404,10 +465,23 @@ inline bool OnFault(uint64_t address, uint64_t rip, const void* native_context, 
 	if (!in_guest && !in_backing) return false;
 	// A fault raised while its range was still taken, served after another thread's touch gave the pages back (and the
 	// range left the maps): the access goes again. (Only this protects the backing view.)
+#if defined(_WIN32)
 	const auto stale = [address] {
 		MEMORY_BASIC_INFORMATION info {};
 		return VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == sizeof(info) && info.Protect == PAGE_READWRITE;
 	};
+#else
+	// (Linux has no cheap query: only the offload takes the backing view's access, and gives it
+	// back before a range leaves the maps, so a fault there outside them is such a race. Again and
+	// again on one address it is none: not ours.)
+	const auto stale = [address] {
+		thread_local uint64_t last    = 0;
+		thread_local uint32_t repeats = 0;
+		repeats                       = address == last ? repeats + 1 : 0;
+		last                          = address;
+		return repeats < 64;
+	};
+#endif
 	std::vector<std::pair<uint64_t, uint64_t>> now;
 	uint64_t restore_begin = 0, restore_size = 0, wait_begin = 0, wait_size = 0;
 	Touch    restore_touch = Touch::GameRead;
@@ -443,9 +517,10 @@ inline bool OnFault(uint64_t address, uint64_t rip, const void* native_context, 
 			// (Its protection came back before its watchers went, or this thread restores it.)
 			if (host) {
 				if (backing_hit) {
-					for (const auto& piece: range.pieces) (void)Protect(piece.backing, piece.size, PAGE_READWRITE);
+					for (const auto& piece: range.pieces)
+						(void)Protect(piece.backing, piece.size, Access::ReadWrite);
 				} else {
-					(void)Protect(it->first, range.guest_end - it->first, PAGE_READONLY);
+					(void)Protect(it->first, range.guest_end - it->first, Access::Read);
 				}
 				return true;
 			}
@@ -487,6 +562,16 @@ inline bool OnFault(uint64_t address, uint64_t rip, const void* native_context, 
 		return true;
 	}
 	if (restore_size != 0) {
+#if defined(__linux__)
+		// (The signal handler runs with its signal blocked: a fault in the restore, which runs here
+		// on the render thread, would end the process. Unblocked till the handler returns, which
+		// gives the thread its mask back.)
+		sigset_t faults;
+		sigemptyset(&faults);
+		sigaddset(&faults, SIGSEGV);
+		sigaddset(&faults, SIGBUS);
+		pthread_sigmask(SIG_UNBLOCK, &faults, nullptr);
+#endif
 		state.restore.load(std::memory_order_acquire)(restore_begin, restore_size, restore_touch);
 		return true;
 	}
@@ -613,6 +698,30 @@ inline void Report(bool force) {
 			std::printf("Texture offload:   %s %llu touches at %ls+0x%llx%s\n", what, static_cast<unsigned long long>(top[i].second),
 			            base != nullptr ? base + 1 : name, static_cast<unsigned long long>(top[i].first - reinterpret_cast<uint64_t>(module)),
 			            reinterpret_cast<uint64_t>(module) == exe ? " (the emulator)" : "");
+		}
+	};
+	list(state.rips, "at");
+	list(state.callers, "called from");
+#elif defined(__linux__)
+	Dl_info self {};
+	(void)dladdr(reinterpret_cast<const void*>(&Report), &self);
+	const auto list = [&self](const std::unordered_map<uint64_t, uint64_t>& addresses,
+	                          const char*                                   what) {
+		std::vector<std::pair<uint64_t, uint64_t>> top(addresses.begin(), addresses.end());
+		std::sort(top.begin(), top.end(),
+		          [](const auto& a, const auto& b) { return a.second > b.second; });
+		for (size_t i = 0; i < std::min<size_t>(top.size(), 10); i++) {
+			Dl_info     info {};
+			const bool  found = dladdr(reinterpret_cast<const void*>(top[i].first), &info) != 0 &&
+			                    info.dli_fname != nullptr;
+			const char* name  = found ? info.dli_fname : "?";
+			const char* base  = std::strrchr(name, '/');
+			std::printf(
+			    "Texture offload:   %s %llu touches at %s+0x%llx%s\n", what,
+			    static_cast<unsigned long long>(top[i].second), base != nullptr ? base + 1 : name,
+			    static_cast<unsigned long long>(
+			        top[i].first - (found ? reinterpret_cast<uint64_t>(info.dli_fbase) : 0)),
+			    found && info.dli_fbase == self.dli_fbase ? " (the emulator)" : "");
 		}
 	};
 	list(state.rips, "at");

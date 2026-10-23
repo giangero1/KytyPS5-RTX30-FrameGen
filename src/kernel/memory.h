@@ -129,6 +129,9 @@ uint64_t               BackingMappingEnd(uint64_t vaddr);
 // Windows: the pages of a guest range taken out of the working set later, by Kyty.Trim's thread (as parked ranges: no map
 // or unmap runs in their page-table pages meanwhile). A page touched again faults back in.
 void                   TrimGuestRange(uint64_t vaddr, uint64_t size);
+// Linux, the texture offload: the pages of [address, address + size) of the backing view freed, in
+// every view of them (a later read gets zeros). False elsewhere.
+bool DiscardBacking(uint64_t address, uint64_t size);
 // The backing view (every guest mapping's bytes, at their backing offset): its base and size; false when there is none.
 bool                   BackingView(uint64_t* base, uint64_t* size);
 // Diagnostics (live `ranges`): the guest's virtual ranges (start, size, direct memory offset, protection, memory type,

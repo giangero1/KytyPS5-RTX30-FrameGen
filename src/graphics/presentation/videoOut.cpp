@@ -487,11 +487,11 @@ static int DeleteVideoOutEvent(int handle, EventQueue::KernelEqueue eq, VideoOut
 }
 
 // KYTY_FLIP_RATE=1 or 2: at least 2 or 3 vblanks between flips (30 or 20 fps at 60 Hz), a steady
-// frame rate, e.g. for recordings with frame generation. The vblanks keep their rate, and so does
-// the game's clock in play. Unlike the game's own sceVideoOutSetFlipRate (flips only on every 2nd
-// vblank), a late frame waits for the next vblank, not for the next even one (50 ms, not 67).
-// Movies advance a frame per flip (the intro played at half speed): with frame generation only
-// frames of the game's 3D view are capped (Presenter::FlipRateApplies).
+// frame rate: the launcher's Experimental "Lock to 30 fps", recordings with frame generation. The
+// vblanks keep their rate, and so does the game's clock in play. Unlike the game's own
+// sceVideoOutSetFlipRate (flips only on every 2nd vblank), a late frame waits for the next vblank,
+// not for the next even one (50 ms, not 67). Movies advance a frame per flip (the intro played at
+// half speed): only frames of the game's 3D view are capped (Presenter::FlipRateApplies).
 static int FlipRateFloor() {
 	static const int floor = [] {
 		const char* value = std::getenv("KYTY_FLIP_RATE");

@@ -1938,6 +1938,16 @@ void BufferCache::UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		m_scheduler.Flush();
 		TextureOffload::WaitRestores(vaddr, size);
 	}
+	// Texture bytes dropped from RAM that the upload reads (a buffer over an offloaded texture's
+	// memory, its pages CPU-dirty since the buffer was registered) come back first, on this thread:
+	// the upload worker cannot wait for a restore and would read the dropped pages' zeros (a
+	// 4096x4096x5 texture array of 320 MiB while Boletaria loaded).
+	if (GuestGpu::IsGpuThread() && !CommandScheduler::InDeferredOperation() &&
+	    TextureOffload::Overlaps(vaddr, size)) {
+		if (const auto restore = TextureOffload::Get().restore.load(std::memory_order_acquire);
+		    restore != nullptr)
+			restore(vaddr, size, TextureOffload::Touch::BufferUpload);
+	}
 	// Reused per thread: the memory tracker refuses a nested upload (CheckNotInUploadCallback).
 	thread_local std::vector<vk::BufferCopy> copies;
 	copies.clear();

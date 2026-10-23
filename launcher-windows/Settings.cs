@@ -18,8 +18,16 @@ sealed class Settings {
 		new object[] {"render", 1440}, new object[] {"ratio", "16:9"}, new object[] {"quality", "standard"},
 		new object[] {"vsync", false}, new object[] {"hdr", false}, new object[] {"framegen", 0}, new object[] {"hud", 0},
 		new object[] {"streamline", ""}, new object[] {"safegpu", false}, new object[] {"upscaler", ""},
-		new object[] {"render_dlss", 1080}, new object[] {"fsr", false}, new object[] {"output", "4k"},
+		new object[] {"render_dlss", 1080}, new object[] {"fsr", false}, new object[] {"output", "auto"},
 		new object[] {"lowlatency", false}, new object[] {"ui_language", ""},
+		// (Experimental page.)
+		new object[] {"present_direct", false}, new object[] {"antilag", false}, new object[] {"keep_resident", false},
+		new object[] {"fps30", false},
+		// (Advanced page.)
+		new object[] {"extra_args", ""}, new object[] {"gpu", ""},
+		// (Graphics page: the DLSS model, a preset letter or the DLSS version's own choice; the file has seen the game output's
+		// Automatic.)
+		new object[] {"dlss_preset", ""}, new object[] {"output_auto", true},
 	};
 
 	readonly string path;
@@ -33,8 +41,12 @@ sealed class Settings {
 			if (File.Exists(path)) {
 				// (UTF-8, with or without a byte order mark.)
 				var parsed = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
-				if (parsed != null)
+				if (parsed != null) {
 					foreach (var pair in parsed) Put(pair.Key, pair.Value);
+					// 4K was the game output's default, written by every save: a file from before Automatic has it as
+					// Automatic once (which keeps 4K above 1080 lines); a 4K chosen since stays.
+					if (!parsed.ContainsKey("output_auto") && Str("output") == "4k") Put("output", "auto");
+				}
 			}
 		} catch (Exception) {
 			// An unreadable file: the defaults (it is written again on the next save).

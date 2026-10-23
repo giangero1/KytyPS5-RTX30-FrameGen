@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -35,7 +36,10 @@ partial class MainWindow : Window {
 		{ "32:9", new[] { "3840x1080", "5120x1440", "7680x2160" } },
 	};
 	// The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
-	static readonly int[] RenderHeights = { 2160, 1800, 1620, 1512, 1440, 1296, 1152, 1080, 900 };
+	static readonly int[] RenderHeights = { 2160, 1800, 1620, 1512, 1440, 1296, 1152, 1080, 900, 720 };
+	// Below 720 with the 1080p output only (issue #129): DLSS's Balanced, Performance and Ultra Performance there; the
+	// game's TAA down to 540 (from 360 its picture is too soft).
+	static readonly int[] LowRenderHeights = { 630, 540, 360 };
 
 	// (--screenshot pictures: no game art, another path shown.)
 	public static bool ScreenshotNoArt;
@@ -51,14 +55,15 @@ partial class MainWindow : Window {
 	DateTime storeCheckedAt = DateTime.MinValue;
 	bool building;      // the controls are being made: their events change nothing
 	bool fillingRender; // the render heights are being listed: a selection is not a choice
-	bool renderForDlss; // the render height row is DLSS's (settings render_dlss) or the game's TAA's (render)
+	bool renderForDlss; // the render height row is the PS5 Pro path's - DLSS's or FSR 3's (settings render_dlss) - or the game's TAA's (render)
 	int renderWanted;   // the height last chosen for the upscaler shown
 	int pageIndex;
 
-	TextBox gamePath;
-	ComboBox resolution, ratio, render, upscaler, output, quality, frameGen, language, hud, uiLanguage;
-	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores;
-	TextBlock renderNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
+	TextBox gamePath, extraArgs;
+	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, hud, uiLanguage, gpu;
+	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, antiLag,
+		keepResident, fps30;
+	TextBlock renderNote, outputNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
 	Image banner;
 	Border bannerFallback;
 	StackPanel checkList;
@@ -110,7 +115,7 @@ partial class MainWindow : Window {
 		pages.Clear();
 		PageHost.Children.Clear();
 		Nav.Items.Clear();
-		renderForDlss = context.FrameGenAvailable && S.Str("upscaler") == "dlss";
+		renderForDlss = (context.FrameGenAvailable && S.Str("upscaler") == "dlss") || S.Str("upscaler") == "fsr";
 		renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
 		AddPage("nav.play", BuildPlayPage());
 		AddPage("nav.display", BuildDisplayPage());
@@ -118,6 +123,7 @@ partial class MainWindow : Window {
 		AddPage("nav.game", BuildGamePage());
 		AddPage("nav.shaders", BuildShadersPage());
 		AddPage("nav.advanced", BuildAdvancedPage());
+		AddPage("nav.experimental", BuildExperimentalPage());
 		building = false;
 		Nav.SelectedIndex = Math.Max(0, Math.Min(pageIndex, pages.Count - 1));
 		ShowPage(Nav.SelectedIndex);
@@ -405,18 +411,28 @@ partial class MainWindow : Window {
 		var ratios = new[] { new Choice(T("ratio.169"), "16:9"), new Choice("21:9", "21:9"), new Choice("32:9", "32:9") };
 		ratio = Combo(ratios, Math.Max(0, Array.FindIndex(ratios, c => (string)c.Value == ratioValue)));
 		resolution = new ComboBox();
-		resolution.SelectionChanged += (s, e) => Changed();
+		resolution.SelectionChanged += (s, e) => {
+			Changed();
+			WindowChanged();
+		};
 		UpdateResolutions(S.Str("resolution"));
 		ratio.SelectionChanged += (s, e) => {
 			if (building) return;
 			UpdateResolutions(Value(resolution) as string ?? S.Str("resolution"));
 			SelectRenderHeight();
 			UpdateRenderNote();
+			UpdateOutputNote();
 		};
 		fullscreen = Switch(S.Bool("fullscreen"));
 		aspect = Switch(S.Bool("aspect"), S.Bool("fullscreen"));
-		fullscreen.Checked += (s, e) => aspect.IsEnabled = true;
-		fullscreen.Unchecked += (s, e) => aspect.IsEnabled = false;
+		fullscreen.Checked += (s, e) => {
+			aspect.IsEnabled = true;
+			WindowChanged();
+		};
+		fullscreen.Unchecked += (s, e) => {
+			aspect.IsEnabled = false;
+			WindowChanged();
+		};
 		hdr = Switch(S.Bool("hdr"));
 		fps120 = Switch(S.Bool("fps120"));
 		vsync = Switch(S.Bool("vsync"));
@@ -476,8 +492,11 @@ partial class MainWindow : Window {
 	// ------------------------------------------------------------------ Graphics
 
 	FrameworkElement BuildGraphicsPage() {
-		upscaler = Combo(new[] { new Choice(T("upscaler.game"), ""), new Choice(T("upscaler.dlss"), "dlss") }, renderForDlss ? 1 : 0);
-		upscaler.IsEnabled = context.FrameGenAvailable;
+		// (DLSS where it runs - an NVIDIA RTX card with Streamline -, FSR 3 on any graphics card: built into the emulator.)
+		var upscalers = new List<Choice> { new Choice(T("upscaler.game"), "") };
+		if (context.FrameGenAvailable) upscalers.Add(new Choice(T("upscaler.dlss"), "dlss"));
+		upscalers.Add(new Choice(T("upscaler.fsr"), "fsr"));
+		upscaler = Combo(upscalers, Math.Max(0, upscalers.FindIndex(c => (string)c.Value == S.Str("upscaler"))));
 		upscalerNote = Desc("");
 		render = new ComboBox();
 		renderNote = Desc("");
@@ -486,16 +505,27 @@ partial class MainWindow : Window {
 			UpdateRenderNote();
 			Changed();
 		};
-		output = Combo(new[] { new Choice(T("output.4k"), "4k"), new Choice(T("output.1080"), "1080p") }, S.Str("output") == "1080p" ? 1 : 0);
-		output.IsEnabled = !renderForDlss;
-		output.SelectionChanged += (s, e) => UpdateRenderNote();
+		var outputs = new[] { new Choice(T("output.auto"), "auto"), new Choice(T("output.4k"), "4k"), new Choice(T("output.1080"), "1080p") };
+		output = Combo(outputs, Math.Max(0, Array.FindIndex(outputs, c => (string)c.Value == S.Str("output"))));
+		outputNote = Desc("");
+		output.SelectionChanged += (s, e) => {
+			// (The heights below 720, and DLSS's heights and their modes, follow the output.)
+			SelectRenderHeight();
+			UpdateRenderNote();
+			UpdateOutputNote();
+		};
+		// The DLSS model (KYTY_DLSS_PRESET): the DLSS version's own choice, its transformer or its CNN model.
+		var models = new[] { new Choice(T("dlssmodel.auto"), ""), new Choice(T("dlssmodel.k"), "K"), new Choice(T("dlssmodel.e"), "E") };
+		dlssModel = Combo(models, Math.Max(0, Array.FindIndex(models, c => (string)c.Value == S.Str("dlss_preset"))));
+		dlssModel.IsEnabled = Value(upscaler) as string == "dlss";
 		upscaler.SelectionChanged += (s, e) => {
 			if (building) return;
 			// The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
 			S.Set(renderForDlss ? "render_dlss" : "render", renderWanted);
-			renderForDlss = upscaler.SelectedIndex == 1;
+			renderForDlss = (Value(upscaler) as string ?? "").Length != 0;
 			renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
-			output.IsEnabled = !renderForDlss;
+			dlssModel.IsEnabled = Value(upscaler) as string == "dlss";
+			UpdateUpscalerNote();
 			SelectRenderHeight();
 			UpdateRenderNote();
 			Changed();
@@ -503,6 +533,7 @@ partial class MainWindow : Window {
 		SelectRenderHeight();
 		UpdateRenderNote();
 		UpdateUpscalerNote();
+		UpdateOutputNote();
 
 		var qualityValue = S.Str("quality").ToLowerInvariant();
 		var qualities = new[] { new Choice(T("quality.standard"), "standard"), new Choice(T("quality.low"), "low"), new Choice(T("quality.lowest"), "lowest") };
@@ -524,7 +555,8 @@ partial class MainWindow : Window {
 			Section("graphics.resolution"),
 			Row("upscaler", upscaler, upscalerNote),
 			Row("render", render, renderNote),
-			Row("output", output, Desc(T("output.desc"))),
+			Row("output", output, outputNote),
+			Row("dlssmodel", dlssModel, Desc(T("dlssmodel.desc"))),
 			Section("graphics.detail"),
 			Row("quality", quality, Desc(T("quality.desc"))),
 			Section("graphics.fg"),
@@ -535,12 +567,47 @@ partial class MainWindow : Window {
 	}
 
 	string RenderLabel(int height) {
+		if (renderForDlss) return Paren(height.ToString(), SuperResolutionMode(height));
 		switch (height) {
 			case 2160: return Paren("2160", T("render.native"));
 			case 1512: return Paren("1512", T("render.pro"));
 			case 1440: return Paren("1440", T("render.ps5"));
 			default: return height.ToString();
 		}
+	}
+
+	// The game output shown: 1080p chosen, or Automatic for the game window chosen on the Display page (Commands.AutoHdOutput).
+	bool HdOutputChosen {
+		get {
+			var value = output == null ? S.Str("output") : Value(output) as string;
+			return value == "1080p" || (value == "auto" && Commands.AutoHdOutput(resolution == null ? S.Str("resolution") : Value(resolution) as string,
+			                                                                       fullscreen == null ? S.Bool("fullscreen") : fullscreen.IsChecked == true,
+			                                                                       Ratio(), context.DisplayHeight));
+		}
+	}
+
+	// The output's note, with what Automatic picks for this window.
+	void UpdateOutputNote() {
+		if (outputNote == null || output == null) return;
+		var auto = Value(output) as string == "auto";
+		outputNote.Text = T("output.desc") + (auto ? " " + F("output.autoNow", HdOutputChosen ? "1080p" : "4K") : "");
+	}
+
+	// The Display page's window changed: Automatic may pick the other output, and the render heights follow it.
+	void WindowChanged() {
+		if (building || output == null || render == null) return;
+		SelectRenderHeight();
+		UpdateRenderNote();
+		UpdateOutputNote();
+	}
+
+	// The DLSS mode a render height runs in: the emulator picks it from the height's share of the game's output
+	// (frame-gen.cpp: 95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance).
+	string SuperResolutionMode(int height) {
+		var share = (double)height / (HdOutputChosen ? 1080 : 2160);
+		// (FSR 3 names the same modes; at the output's own size it is FSR's native anti-aliasing.)
+		var native = upscaler != null && Value(upscaler) as string == "fsr" ? "fsr.native" : "dlss.dlaa";
+		return T(share >= 0.95 ? native : share >= 0.62 ? "dlss.quality" : share >= 0.55 ? "dlss.balanced" : share >= 0.45 ? "dlss.performance" : "dlss.ultra");
 	}
 
 	// The highest render height whose 3D at the ratio fits the game's render target memory, made for 3840x2160: no more of
@@ -559,11 +626,13 @@ partial class MainWindow : Window {
 		return 720;
 	}
 
-	// The heights the ratio allows; the one last chosen for this upscaler, a higher one as the highest allowed, an unknown
+	// The heights the ratio allows (with DLSS those its output takes: 1080 and up for 4K, up to 1080 for 1080p; below 720
+	// with the 1080p output only); the one last chosen for this upscaler, a higher one as the highest allowed, an unknown
 	// one as the upscaler's default (DLSS 1080, the game's TAA 1440).
 	void SelectRenderHeight() {
 		var most = MaxRenderHeight();
-		var allowed = RenderHeights.Where(h => h <= most).ToList();
+		var allowed = RenderHeights.Where(h => h <= most && (!renderForDlss || (HdOutputChosen ? h <= 1080 : h >= 1080 || h == 720))).ToList();
+		if (HdOutputChosen) allowed.AddRange(LowRenderHeights.Where(h => renderForDlss || h >= 540));
 		fillingRender = true;
 		var was = building;
 		building = true;
@@ -597,14 +666,19 @@ partial class MainWindow : Window {
 		if (render == null || renderNote == null) return;
 		var h = SelectedRender();
 		// (The 1080p output's 3D is at most 1080 high.)
-		var capped = output != null && output.IsEnabled && output.SelectedIndex == 1 && h > 1080;
+		var capped = HdOutputChosen && h > 1080;
 		if (capped) h = 1080;
+		// (DLSS's 4K output takes 1080 at least, or 720 for its ultra performance: a third of the output.)
+		var raised = renderForDlss && !HdOutputChosen && h < 1080 && h != 720;
+		if (raised) h = 1080;
 		var w = (int)(Math.Floor(h * RatioAspect() / 8.0 + 0.5) * 8);
-		renderNote.Text = F(capped ? "render.capped" : "render.desc", w, h);
+		renderNote.Text = F(capped ? "render.capped" : raised ? "render.raised" : "render.desc", w, h);
 	}
 
 	void UpdateUpscalerNote() {
-		upscalerNote.Text = T(context.FrameGenAvailable ? "upscaler.ok" : !context.RtxGpu ? "upscaler.noRtx" : "upscaler.noStreamline");
+		var chosen = upscaler == null ? S.Str("upscaler") : Value(upscaler) as string;
+		upscalerNote.Text = chosen == "fsr" ? T("upscaler.fsrNote")
+		                    : T(context.FrameGenAvailable ? "upscaler.ok" : !context.RtxGpu ? "upscaler.noRtx" : "upscaler.noStreamline");
 	}
 
 	void UpdateFrameGenNote() {
@@ -706,15 +780,64 @@ partial class MainWindow : Window {
 		var readme = FlatButton("button.readme", (s, e) => OpenReadme());
 		var root = FlatButton("button.root", (s, e) => OpenFolder(context.Root));
 		readme.Margin = root.Margin = new Thickness(10, 0, 0, 0);
-		return Page("advanced.title",
+		// Options for the game's start as on a run.cmd line (Commands.ExtraOptions): saved as typed.
+		extraArgs = new TextBox { Text = S.Str("extra_args"), MinWidth = 420 };
+		extraArgs.TextChanged += (s, e) => Changed();
+		// The graphics card, shown on a PC with more than one (Commands.AddGpu): automatic or one by its name.
+		var gpus = new List<Choice> { new Choice(T("gpu.auto"), "") };
+		foreach (var card in context.Gpus) gpus.Add(new Choice(card.Name, card.Name));
+		gpu = Combo(gpus, Math.Max(0, gpus.FindIndex(c => (string)c.Value == S.Str("gpu"))), 360);
+		var content = new List<UIElement> {
 			Section("advanced.stability"),
 			Row("hud", hud, Desc(T("hud.desc"))),
 			Row("redzone", redzone, Desc(T("redzone.desc"))),
-			Row("safegpu", safeGpu, Desc(T("safegpu.desc"))),
+			Row("safegpu", safeGpu, Desc(T("safegpu.desc"))) };
+		if (context.Gpus.Count > 1) content.AddRange(new UIElement[] { Section("advanced.gpu"), Row("gpu", gpu, Desc(T("gpu.desc"))) });
+		content.AddRange(new UIElement[] {
+			Section("advanced.extra"),
+			Row("extra", extraArgs, Desc(T("extra.desc"))),
 			Section("advanced.launcher"),
 			Row("uilang", uiLanguage),
 			Row(null, Horizontal(logs, readme, root)),
-			Desc(T("credit")));
+			Desc(T("credit")) });
+		return Page("advanced.title", content.ToArray());
+	}
+
+	// ------------------------------------------------------------------ Experimental
+
+	// Options still being tried out (not defaults yet): a player turns one on, and its issue collects how it went.
+	FrameworkElement BuildExperimentalPage() {
+		presentDirect = Switch(S.Bool("present_direct"));
+		antiLag = Switch(S.Bool("antilag") && context.AmdGpu, context.AmdGpu);
+		keepResident = Switch(S.Bool("keep_resident"));
+		fps30 = Switch(S.Bool("fps30"));
+		return Page("experimental.title",
+			Desc(T("experimental.intro")),
+			Section("experimental.framerate"),
+			Row("fps30", fps30, Desc(T("fps30.desc"))),
+			Row(null, Feedback(85)),
+			Section("experimental.display"),
+			Row("presentdirect", presentDirect, Desc(T("presentdirect.desc"))),
+			Row(null, Feedback(37)),
+			Section("experimental.memory"),
+			Row("keepresident", keepResident, Desc(T("keepresident.desc"))),
+			Row(null, Feedback(50)),
+			Section("experimental.amd"),
+			Row("antilag", antiLag, Desc(T(context.AmdGpu ? "antilag.desc" : "antilag.notAmd"))),
+			Row(null, Feedback(80)));
+	}
+
+	TextBlock Feedback(int issue) {
+		var link = new Hyperlink(new Run(F("feedback", issue))) {
+			NavigateUri = new Uri("https://github.com/chenxiao07/KytyPS5/issues/" + issue), Foreground = Res<Brush>("GoldBrush") };
+		link.RequestNavigate += (s, e) => {
+			try {
+				Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+			} catch (Exception) {
+			}
+			e.Handled = true;
+		};
+		return new TextBlock(link) { FontSize = 12, Margin = new Thickness(0, -6, 0, 0) };
 	}
 
 	// ------------------------------------------------------------------ state, summary, actions
@@ -729,6 +852,7 @@ partial class MainWindow : Window {
 	void ReadForm() {
 		if (gamePath == null || render == null) return;
 		S.Set("game", gamePath.Text.Trim());
+		if (extraArgs != null) S.Set("extra_args", extraArgs.Text.Trim());
 		var res = Value(resolution) as string;
 		if (res != null) S.Set("resolution", res);
 		S.Set("fullscreen", fullscreen.IsChecked == true);
@@ -745,21 +869,33 @@ partial class MainWindow : Window {
 		S.Set(renderForDlss ? "render_dlss" : "render", SelectedRender());
 		S.Set("ratio", Ratio());
 		S.Set("quality", Value(quality) as string ?? "standard");
-		S.Set("output", output.SelectedIndex == 1 ? "1080p" : "4k");
+		S.Set("output", Value(output) as string ?? "auto");
 		// (Kept as they were where the DLLs are missing.)
 		if (context.FrameGenAvailable) S.Set("framegen", frameGen.SelectedIndex > 0 ? frameGen.SelectedIndex + 1 : 0);
-		if (context.FrameGenAvailable) S.Set("upscaler", upscaler.SelectedIndex == 1 ? "dlss" : "");
+		// (A DLSS chosen on this PC stays while its runtime is missing: the list then has no DLSS to show.)
+		var chosenUpscaler = Value(upscaler) as string ?? "";
+		if (!(S.Str("upscaler") == "dlss" && !context.FrameGenAvailable && chosenUpscaler.Length == 0)) S.Set("upscaler", chosenUpscaler);
+		S.Set("dlss_preset", Value(dlssModel) as string ?? "");
+		S.Set("gpu", Value(gpu) as string ?? "");
 		if (context.FsrAvailable) S.Set("fsr", fsr.IsChecked == true);
 		S.Set("ecores", ecores.IsChecked == true);
+		S.Set("present_direct", presentDirect.IsChecked == true);
+		S.Set("antilag", antiLag.IsChecked == true && context.AmdGpu);
+		S.Set("keep_resident", keepResident.IsChecked == true);
+		S.Set("fps30", fps30.IsChecked == true);
 		S.Save();
 	}
 
 	void UpdateSummary() {
 		var res = S.Str("resolution").Replace("x", "×");
 		var dlss = commands.Dlss;
-		var hdOutput = !dlss && S.Str("output") == "1080p";
-		var height = dlss ? S.Int("render_dlss") : S.Int("render");
+		var upscaledBy = dlss ? T("summary.dlss") : commands.FsrUpscaler ? T("summary.fsr3") : T("summary.taa");
+		var hdOutput = commands.HdOutput;
+		var superResolution = dlss || commands.FsrUpscaler;
+		var height = superResolution ? S.Int("render_dlss") : S.Int("render");
 		if (hdOutput && height > 1080) height = 1080;
+		// (The PS5 Pro path's 4K output takes 1080 at least, or 720, as its render height list.)
+		if (superResolution && !hdOutput && height < 1080 && height != 720) height = 1080;
 		string frameGeneration;
 		if (context.FsrAvailable && S.Bool("fsr")) frameGeneration = T("summary.fsr");
 		else if (context.FrameGenAvailable && S.Int("framegen") >= 2) frameGeneration = "DLSS " + S.Int("framegen") + "x";
@@ -767,14 +903,19 @@ partial class MainWindow : Window {
 		var qualityKey = "quality." + (S.Str("quality").Length == 0 ? "standard" : S.Str("quality"));
 		var options = new List<string>();
 		if (S.Bool("vsync")) options.Add(T("summary.vsync"));
-		if (S.Bool("fps120")) options.Add(T("summary.fps120"));
+		if (S.Bool("fps30")) options.Add(T("summary.fps30"));
+		else if (S.Bool("fps120")) options.Add(T("summary.fps120"));
 		if (S.Bool("lowlatency")) options.Add(T("lowlatency"));
 		if (S.Bool("hdr")) options.Add(T("summary.hdr"));
 		if (hdOutput) options.Add(T("summary.hd"));
+		if (S.Bool("present_direct")) options.Add(T("summary.presentDirect"));
+		if (S.Bool("antilag")) options.Add(T("summary.antilag"));
+		if (S.Bool("keep_resident")) options.Add(T("summary.keepResident"));
+		if (S.Str("extra_args").Length != 0) options.Add(T("summary.extra"));
 
 		var parts = new List<string> {
 			F(S.Bool("fullscreen") ? "summary.fullscreen" : "summary.window", res), S.Str("ratio"), F("summary.render", height),
-			dlss ? T("summary.dlss") : T("summary.taa") };
+			upscaledBy };
 		if (frameGeneration != T("framegen.off")) parts.Add(frameGeneration);
 		parts.AddRange(options);
 		Summary.Text = string.Join("   ·   ", parts);
@@ -784,7 +925,7 @@ partial class MainWindow : Window {
 		currentSettings.RowDefinitions.Clear();
 		var lines = new[] {
 			new[] { T("nav.display"), F(S.Bool("fullscreen") ? "summary.fullscreen" : "summary.window", res) + "  ·  " + S.Str("ratio") },
-			new[] { "3D", F("summary.render", height) + "  ·  " + (dlss ? T("summary.dlss") : T("summary.taa")) },
+			new[] { "3D", F("summary.render", height) + "  ·  " + upscaledBy },
 			new[] { T("graphics.fg"), frameGeneration },
 			new[] { T("quality"), T(qualityKey) },
 			new[] { T("summary.options"), options.Count == 0 ? "—" : string.Join("  ·  ", options) },
@@ -868,7 +1009,7 @@ partial class MainWindow : Window {
 		var root = (FrameworkElement)Content;
 		var width = (int)Width;
 		var height = (int)Height;
-		var names = new[] { "play", "display", "graphics", "game", "shaders", "advanced" };
+		var names = new[] { "play", "display", "graphics", "game", "shaders", "advanced", "experimental" };
 		for (int i = 0; i < pages.Count; i++) {
 			Nav.SelectedIndex = i;
 			ShowPage(i);

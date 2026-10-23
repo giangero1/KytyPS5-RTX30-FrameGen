@@ -384,7 +384,7 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	// Collection starts where the video memory use reaches the budget less its headroom (GetTotalMemoryBudget):
 	// below it a kept image costs nothing, a deleted one an upload when the game uses it again.
 	m_trigger_gc_memory = m_graphics.GetTotalMemoryBudget();
-#if defined(_WIN32)
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	if (TextureOffload::Enabled()) {
 		const bool offload = TextureOffload::GetMode() == TextureOffload::Mode::Offload;
 		g_offload_cache    = this;
@@ -4031,7 +4031,7 @@ std::unique_ptr<Buffer> TextureCache::StageOffloadDownloads(std::vector<std::pai
 // a row (GPU work never wrote it, no CPU write since its upload, tracked whole) has its whole pages probed, or dropped
 // once a download of it gave its guest bytes back exactly (checked here first, 16 MiB of images a scan by default).
 void TextureCache::OffloadScan(uint64_t tick) {
-#if defined(_WIN32)
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	const bool offload = TextureOffload::GetMode() == TextureOffload::Mode::Offload;
 	TextureOffload::Drain();
 	TextureOffload::Report(false);
@@ -4162,20 +4162,23 @@ void TextureCache::OffloadScan(uint64_t tick) {
 			continue;
 		}
 		mark = Clock::now();
-		for (const auto& piece: pieces) (void)TextureOffload::Protect(piece.backing, piece.size, PAGE_NOACCESS);
+		for (const auto& piece: pieces)
+			(void)TextureOffload::Protect(piece.backing, piece.size, TextureOffload::Access::None);
 		ms[4] += since(mark);
 	}
 	// The pages dropped by the worker thread (DiscardVirtualMemory took 10-90 ms of the render thread a scan): until then
 	// they hold their bytes, and a restore meanwhile has nothing to wait for.
 	if (!discards.empty()) {
 		OffloadWorker::Post([discards = std::move(discards)] {
-			// (KYTY_TEXTURE_OFFLOAD_TRIM=0: the guest view's pages left to Windows.)
+			// (Windows, KYTY_TEXTURE_OFFLOAD_TRIM=0: the guest view's pages left to Windows. Linux:
+			// the hole freed them.)
 			static const bool trim = [] {
 				const char* value = std::getenv("KYTY_TEXTURE_OFFLOAD_TRIM");
 				return value == nullptr || value[0] != '0';
 			}();
 			for (const auto& [begin, size]: discards)
-				if (TextureOffload::DiscardRange(begin) && trim) Libs::LibKernel::Memory::TrimGuestRange(begin, size);
+				if (TextureOffload::DiscardRange(begin) && trim)
+					Libs::LibKernel::Memory::TrimGuestRange(begin, size);
 		});
 	}
 	if (check.empty()) {
@@ -4260,7 +4263,7 @@ void TextureCache::OffloadScan(uint64_t tick) {
 // Render thread: the discarded ranges over [vaddr, vaddr + size) downloaded back from their images in one submission,
 // the render thread waiting for it; their read watchers then go.
 void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch_value, bool async) {
-#if defined(_WIN32)
+#if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	const auto touch  = static_cast<TextureOffload::Touch>(touch_value);
 	auto       ranges = TextureOffload::BeginRestore(vaddr, size, touch, touch == TextureOffload::Touch::Count, async);
 	if (ranges.empty()) return;
@@ -4277,7 +4280,9 @@ void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch
 	uint64_t         total = 0, bytes = 0, lost = 0;
 	for (size_t i = 0; i < ranges.size(); i++) {
 		const auto& range = ranges[i];
-		for (const auto& piece: range.pieces) (void)TextureOffload::Protect(piece.backing, piece.size, PAGE_READWRITE);
+		for (const auto& piece: range.pieces)
+			(void)TextureOffload::Protect(piece.backing, piece.size,
+			                              TextureOffload::Access::ReadWrite);
 		auto* image = m_slot_images.try_get(ImageId {static_cast<uint32_t>(range.image), static_cast<uint32_t>(range.image >> 32u)});
 		auto  plan  = image != nullptr && image->serial == range.serial && image->backing.image != nullptr ? BuildDownload(*image)
 		                                                                                                 : DownloadPlan {};

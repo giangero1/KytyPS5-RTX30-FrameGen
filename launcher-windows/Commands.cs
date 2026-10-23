@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace KytyLauncher {
 
@@ -31,11 +33,41 @@ sealed class Commands {
 	}
 
 	public bool Dlss { get { return context.FrameGenAvailable && S.Str("upscaler") == "dlss"; } }
+	// FSR 3 upscaling, built into the emulator: any graphics card.
+	public bool FsrUpscaler { get { return S.Str("upscaler") == "fsr"; } }
 
-	public string PlayCommand(GameInfo game = null) {
+	// The game window's height in pixels: in full screen the display's, else the chosen size's (a window larger than the
+	// display is shrunk by the emulator); 0 when unknown.
+	public static int WindowHeight(string resolution, bool fullscreen, int display) {
+		if (fullscreen) return display;
+		var parts = (resolution ?? "").Split('x');
+		int height;
+		if (parts.Length < 2 || !int.TryParse(parts[1], out height)) return 0;
+		return display > 0 && height > display ? display : height;
+	}
+
+	// Game output "Automatic": the game's 1080p output for a 16:9 game window (or screen, in full screen) at most 1080
+	// lines high, which shows it pixel for pixel and saves the 4K post-processing; 4K otherwise.
+	public static bool AutoHdOutput(string resolution, bool fullscreen, string ratio, int display) {
+		var height = WindowHeight(resolution, fullscreen, display);
+		return ratio == "16:9" && height > 0 && height <= 1080;
+	}
+
+	public bool HdOutput {
+		get {
+			var output = S.Str("output");
+			return output == "1080p" ||
+			       (output == "auto" && AutoHdOutput(S.Str("resolution"), S.Bool("fullscreen"), S.Str("ratio"), context.DisplayHeight));
+		}
+	}
+
+	// direct (--play, a start from Steam or a shortcut, maybe with only a gamepad at hand): no dialogs (-Prompt) and no
+	// wait for a key after a crash.
+	public string PlayCommand(GameInfo game = null, bool direct = false) {
 		var size = S.Str("resolution").Split('x');
-		var arguments = new List<string> { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Quote(Path.Combine(context.Root, "run-windows.ps1")),
-			"-Prompt", "-Follow", "-Width", size[0], "-Height", size.Length > 1 ? size[1] : "1080", "-Language", Number(S.Int("language")) };
+		var arguments = new List<string> { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Quote(Path.Combine(context.Root, "run-windows.ps1")) };
+		if (!direct) arguments.Add("-Prompt");
+		arguments.AddRange(new[] { "-Follow", "-Width", size[0], "-Height", size.Length > 1 ? size[1] : "1080", "-Language", Number(S.Int("language")) });
 		var ratio = S.Str("ratio");
 		var wide = ratio == "21:9" || ratio == "32:9";
 		// (-AspectFit with 21:9 or 32:9 would keep movies and menus at 16:9: the launcher's wider ratios fill the screen.)
@@ -44,10 +76,12 @@ sealed class Commands {
 			if (S.Bool("aspect") && !wide) arguments.Add("-AspectFit");
 		}
 		if (!S.Bool("redzone")) arguments.Add("-NoRedZone");
-		if (S.Bool("fps120")) arguments.Add("-Fps120");
+		// (The 30 fps lock, Experimental: KYTY_FLIP_RATE=1 below, at 60 Hz: up to 120 fps it would be 60.)
+		if (S.Bool("fps120") && !S.Bool("fps30")) arguments.Add("-Fps120");
 		// Presents wait for the display's refresh (Vulkan FIFO): no tearing, and G-SYNC/FreeSync displays keep adapting.
 		if (S.Bool("vsync")) arguments.AddRange(new[] { "-PresentMode", "Fifo" });
-		if (S.Bool("lowlatency")) arguments.Add("-LowLatency");
+		// (AMD Anti-Lag, an experiment, works on top of low latency.)
+		if (S.Bool("lowlatency") || S.Bool("antilag")) arguments.Add("-LowLatency");
 		if (S.Bool("hdr")) arguments.Add("-Hdr");
 		// The cheats file of this title, when it has one: the emulator applies the mods left enabled in it.
 		if (S.Bool("cheats")) {
@@ -55,8 +89,9 @@ sealed class Commands {
 			if (patch != null) arguments.AddRange(new[] { "-Patch", Quote(patch) });
 		}
 		var dlss = Dlss;
-		// The upscaler's own render height (a chosen height is always passed: without one the game follows the window).
-		var height = dlss ? S.Int("render_dlss") : S.Int("render");
+		// The upscaler's own render height (a chosen height is always passed: without one the game follows the window);
+		// DLSS and FSR 3 share the PS5 Pro path's.
+		var height = dlss || FsrUpscaler ? S.Int("render_dlss") : S.Int("render");
 		if (height > 0) arguments.AddRange(new[] { "-RenderHeight", Number(height) });
 		if (wide) arguments.AddRange(new[] { "-Aspect", ratio });
 		var quality = S.Str("quality").ToLowerInvariant();
@@ -66,9 +101,11 @@ sealed class Commands {
 		var frameGen = S.Int("framegen");
 		if (!fsrOn && context.FrameGenAvailable && frameGen >= 2) arguments.AddRange(new[] { "-FrameGen", Number(frameGen - 1) });
 		if (dlss) arguments.AddRange(new[] { "-Upscaler", "dlss" });
-		// (DLSS makes the 4K output: the 1080p output only with the game's own upscale.)
-		if (!dlss && S.Str("output") == "1080p") arguments.Add("-HdOutput");
+		else if (FsrUpscaler) arguments.AddRange(new[] { "-Upscaler", "fsr" });
+		// (With DLSS too: its PS5 Pro path then makes the 1080p output, the 3D at most 1080 high.)
+		if (HdOutput) arguments.Add("-HdOutput");
 		if (context.FrameGenAvailable && ((!fsrOn && frameGen >= 2) || dlss)) arguments.AddRange(new[] { "-StreamlineDir", Quote(context.Streamline) });
+		AddGpu(arguments);
 		var sets = new List<string>();
 		// The emulator's panel at the top right of the game image: the frame rate and frame times, or with the GPU,
 		// processor and memory too (F8 in the game switches it).
@@ -76,21 +113,98 @@ sealed class Commands {
 		if (hud >= 1) sets.Add("KYTY_FPS_HUD=" + Number(Math.Min(hud, 2)));
 		// Safe GPU mode: Demon's Souls' compute work one dispatch after another (no GPU hangs, ~37% slower).
 		if (S.Bool("safegpu")) sets.Add("KYTY_COMPUTE_CHAIN=0");
+		// Experiments: each frame presented as it is handed over (variable refresh rate displays, issue #37), and AMD Anti-Lag.
+		if (S.Bool("present_direct")) sets.Add("KYTY_PRESENT_DIRECT=1");
+		if (S.Bool("antilag")) sets.Add("KYTY_ANTI_LAG=1");
+		// The game's 3D view at most every 2nd vblank: a steady 30 fps at the same game speed (movies and menus keep 60).
+		if (S.Bool("fps30")) sets.Add("KYTY_FLIP_RATE=1");
+		// Memory kept in RAM against the MEMORY_MANAGEMENT blue screen (issue #50): a 6 GB working-set floor, no trims of its own.
+		if (S.Bool("keep_resident")) sets.AddRange(new[] { "KYTY_RESIDENT_MB=6144", "KYTY_WORKING_SET_TRIM=0" });
+		// The DLSS model chosen on the Graphics page (a preset letter; none: the DLSS version's own choice).
+		var preset = S.Str("dlss_preset");
+		if (dlss && preset.Length == 1 && preset[0] >= 'A' && preset[0] <= 'O') sets.Add("KYTY_DLSS_PRESET=" + preset);
+		// The Advanced page's extra options: their -Set pairs join (or replace) the launcher's own.
+		var extra = ExtraOptions();
+		foreach (var option in extra) {
+			if (!IsSet(option.Key) || option.Value == null) continue;
+			foreach (var pair in Regex.Split(option.Value, ",(?=[A-Za-z_][A-Za-z0-9_]*=)")) {
+				var key = pair.Split('=')[0];
+				sets.RemoveAll(set => string.Equals(set.Split('=')[0], key, StringComparison.OrdinalIgnoreCase));
+				sets.Add(pair);
+			}
+		}
 		if (sets.Count != 0) arguments.AddRange(new[] { "-Set", string.Join(",", sets) });
 		var gamePath = S.Str("game");
 		if (gamePath.Length != 0) arguments.AddRange(new[] { "-Game", Quote(gamePath) });
-		// The console stays for the live log; after a crash it waits for a key.
-		return PowerShell() + " " + string.Join(" ", arguments) + " & if !errorlevel! neq 0 pause";
+		// Their other options in place of the launcher's of the same name (run-windows.ps1 takes each once), else added.
+		foreach (var option in extra) {
+			if (IsSet(option.Key)) continue;
+			var at = arguments.FindIndex(RunArgumentsStart, a => string.Equals(a, option.Key, StringComparison.OrdinalIgnoreCase));
+			if (at >= 0) arguments.RemoveRange(at, at + 1 < arguments.Count && !arguments[at + 1].StartsWith("-") ? 2 : 1);
+			arguments.Add(option.Key);
+			if (option.Value != null) arguments.Add(option.Value.IndexOf(' ') >= 0 ? Quote(option.Value) : option.Value);
+		}
+		// The console stays for the live log; after a crash it waits for a key (not when direct).
+		return PowerShell() + " " + string.Join(" ", arguments) + (direct ? "" : " & if !errorlevel! neq 0 pause");
 	}
 
-	public string PlayArguments(GameInfo game = null) {
-		return "/v:on /s /c \"" + PlayCommand(game) + "\"";
+	// (Where run-windows.ps1's own arguments start: after -NoProfile -ExecutionPolicy Bypass -File <script>.)
+	const int RunArgumentsStart = 5;
+	// Characters cmd would take itself in the command line (/v:on: ! too), and quotes: an option holding one is left out.
+	static readonly char[] CmdCharacters = { '&', '|', '<', '>', '^', '!', '%', '"' };
+
+	// The graphics card chosen on the Advanced page (a PC with more than one), by its name: the game and the precompile
+	// both use it (run-windows.ps1 / precompile-windows.ps1 -Gpu; issue #132).
+	void AddGpu(List<string> arguments) {
+		var gpu = S.Str("gpu");
+		if (gpu.Length != 0 && gpu.IndexOfAny(CmdCharacters) < 0) arguments.AddRange(new[] { "-Gpu", Quote(gpu) });
+	}
+
+	static bool IsSet(string name) {
+		return string.Equals(name, "-Set", StringComparison.OrdinalIgnoreCase);
+	}
+
+	// The Advanced page's extra options (settings extra_args), written as on a run.cmd line: each -Name with its value (the
+	// next part when it does not start with -), "double quotes" keeping spaces in one. A value without a name is left out,
+	// as is an option holding a character cmd would take itself.
+	public List<KeyValuePair<string, string>> ExtraOptions() {
+		var parts = new List<string>();
+		var part = new StringBuilder();
+		bool quoted = false, any = false;
+		foreach (var c in S.Str("extra_args")) {
+			if (c == '"') {
+				quoted = !quoted;
+				any = true;
+			} else if (char.IsWhiteSpace(c) && !quoted) {
+				if (any) parts.Add(part.ToString());
+				part.Clear();
+				any = false;
+			} else {
+				part.Append(c);
+				any = true;
+			}
+		}
+		if (any) parts.Add(part.ToString());
+		var options = new List<KeyValuePair<string, string>>();
+		for (int i = 0; i < parts.Count; i++) {
+			var name = parts[i];
+			if (name.Length < 2 || name[0] != '-') continue;
+			var value = i + 1 < parts.Count && !parts[i + 1].StartsWith("-") ? parts[++i] : null;
+			if (name.IndexOfAny(CmdCharacters) >= 0 || (value != null && value.IndexOfAny(CmdCharacters) >= 0)) continue;
+			options.Add(new KeyValuePair<string, string>(name, value));
+		}
+		return options;
+	}
+
+	public string PlayArguments(GameInfo game = null, bool direct = false) {
+		return "/v:on /s /c \"" + PlayCommand(game, direct) + "\"";
 	}
 
 	public string PrecompileCommand(string option) {
 		var arguments = new List<string> { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Quote(Path.Combine(context.Root, "precompile-windows.ps1")) };
 		if (!string.IsNullOrEmpty(option)) arguments.Add(option);
 		if (S.Bool("ecores") && context.EfficiencyMask != 0) arguments.AddRange(new[] { "-Affinity", context.EfficiencyMask.ToString(CultureInfo.InvariantCulture) });
+		AddGpu(arguments);
 		var gamePath = S.Str("game");
 		if (gamePath.Length != 0) arguments.AddRange(new[] { "-Game", Quote(gamePath) });
 		return PowerShell() + " " + string.Join(" ", arguments) + " & pause";
@@ -100,8 +214,10 @@ sealed class Commands {
 		return "/s /c \"" + PrecompileCommand(option) + "\"";
 	}
 
-	public void Start(string cmdArguments) {
-		Process.Start(new ProcessStartInfo(Cmd(), cmdArguments) { UseShellExecute = true, WorkingDirectory = context.Root });
+	// (--play: the console minimized, so that the game's window is the one in front.)
+	public Process Start(string cmdArguments, bool minimized = false) {
+		return Process.Start(new ProcessStartInfo(Cmd(), cmdArguments) { UseShellExecute = true, WorkingDirectory = context.Root,
+			WindowStyle = minimized ? ProcessWindowStyle.Minimized : ProcessWindowStyle.Normal });
 	}
 
 	static string Quote(string text) {

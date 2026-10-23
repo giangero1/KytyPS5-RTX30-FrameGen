@@ -46,6 +46,15 @@ static void TrimParkedRange(uint64_t vaddr, uint64_t size);
 class ParkedRangeTrimmer {
 public:
 	static void Trim(uint64_t vaddr, uint64_t size) {
+		// KYTY_WORKING_SET_TRIM=0 (a test; the launcher's Experimental "Keep memory resident"): none, parked ranges and the
+		// texture offload's guest pages (TrimGuestRange) left to Windows: ~1.5 GB more in use on a 16 GB PC. These trims
+		// take guest pages out of the working set, as Windows had done with the page of the MEMORY_MANAGEMENT blue screen's
+		// stack (KeepResident, memory.cpp).
+		static const bool off = [] {
+			const char* value = std::getenv("KYTY_WORKING_SET_TRIM");
+			return value != nullptr && value[0] == '0';
+		}();
+		if (off) return;
 		static auto* trimmer = new ParkedRangeTrimmer; // (never destroyed: its thread may outlive static destructors)
 		{
 			std::lock_guard lock(trimmer->m_mutex);
@@ -268,6 +277,21 @@ public:
 			                                              .count()));
 		}
 	};
+
+	// Linux, the texture offload: the pages of [address, address + size) of the backing view freed
+	// (a hole punched in the store's memfd: gone from every view of them, a later read gets zeros).
+	// False elsewhere.
+	bool DiscardPages(uint64_t address, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		const auto base = reinterpret_cast<uint64_t>(m_backing_base);
+		return IsAvailable() && address >= base && RangeOk(address - base, size) &&
+		       fallocate(m_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+		                 static_cast<off_t>(address - base), static_cast<off_t>(size)) == 0;
+#else
+		(void)address, (void)size;
+		return false;
+#endif
+	}
 
 	bool ZeroRange(uint64_t backing_offset, uint64_t size) {
 		GuestBackingMutation mutation;
@@ -1654,6 +1678,9 @@ public:
 
 	const uint8_t* BackingPointer(uint64_t vaddr, uint64_t size) { return m_backing->BackingPointer(vaddr, size); }
 	uint64_t       BackingMappingEnd(uint64_t vaddr) { return m_backing->MappingEndOf(vaddr); }
+	bool           DiscardBacking(uint64_t address, uint64_t size) {
+		return m_backing->DiscardPages(address, size);
+	}
 	bool BackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces) {
 		return m_backing->BackingPieces(vaddr, size, pieces);
 	}
@@ -2074,6 +2101,37 @@ private:
 		if (it != m_mapped.begin()) {
 			--it;
 		}
+#if defined(__linux__)
+		static const bool coalesce = [] {
+			const char* value = std::getenv("KYTY_LINUX_COALESCE_MPROTECT");
+			return value == nullptr || value[0] != '0';
+		}();
+		// Linux: mprotect spans adjacent mappings, so contiguous regions take one call (Windows' VirtualProtect cannot
+		// cross MapViewOfFile3 views, hence one call per region below). KYTY_LINUX_COALESCE_MPROTECT=0: one call per region.
+		if (coalesce) {
+			uint64_t   run_start = 0;
+			uint64_t   run_end   = 0;
+			const auto flush_run = [&]() {
+				if (run_start >= run_end) return true;
+				LiveTrace::SlowOsCallScope slow(LiveTrace::OsProtect, run_start, run_end - run_start);
+				return VirtualMemory::Protect(run_start, run_end - run_start, mode);
+			};
+			for (; it != m_mapped.end() && it->second.vaddr < end; ++it) {
+				const auto& region      = it->second;
+				const auto  range_start = std::max(vaddr, region.vaddr);
+				const auto  range_end   = std::min(end, region.vaddr + region.size);
+				if (range_start >= range_end) continue;
+				if (run_start < run_end && range_start == run_end) {
+					run_end = range_end;
+					continue;
+				}
+				if (!flush_run()) return false;
+				run_start = range_start;
+				run_end   = range_end;
+			}
+			return flush_run();
+		}
+#endif
 		for (; it != m_mapped.end() && it->second.vaddr < end; ++it) {
 			const auto& region      = it->second;
 			const auto  range_start = std::max(vaddr, region.vaddr);

@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -199,11 +200,55 @@ static uint32_t VulkanFindQueueFamily(vk::PhysicalDevice device, vk::SurfaceKHR 
 	return static_cast<uint32_t>(-1);
 }
 
+// The GPU asked for: --gpu (the emulator's command line), else KYTY_GPU (the emulator and the precompile program alike;
+// run-windows.ps1 and precompile-windows.ps1 -Gpu): a device's index in Vulkan's list, or a part of its name ("4090").
+// Empty: automatic, the first discrete GPU in Vulkan's order, which on Windows follows its graphics settings (issue #132).
+static std::string RequestedGpu(int32_t config_index) {
+	if (config_index >= 0) return std::to_string(config_index);
+	const char* value = std::getenv("KYTY_GPU");
+	return value != nullptr ? value : "";
+}
+
+static std::string Lowercase(std::string text) {
+	std::transform(text.begin(), text.end(), text.begin(),
+	               [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+	return text;
+}
+
+// The devices a request leaves (all of them without one, or when it names none), each listed with its index (list). A
+// number below the device count is an index, anything else a part of the name ("4090" in "NVIDIA GeForce RTX 4090").
+static std::vector<vk::PhysicalDevice> GpusAsked(const std::vector<vk::PhysicalDevice>& devices, const std::string& request,
+                                                 bool list) {
+	const bool digits   = !request.empty() && std::all_of(request.begin(), request.end(), [](char c) { return c >= '0' && c <= '9'; });
+	const bool by_index = digits && request.size() < 4 && std::strtoul(request.c_str(), nullptr, 10) < devices.size();
+	std::vector<vk::PhysicalDevice> kept;
+	for (size_t i = 0; i < devices.size(); ++i) {
+		vk::PhysicalDeviceProperties properties {};
+		devices[i].getProperties(&properties);
+		const auto type = properties.deviceType;
+		if (list)
+			std::printf("Vulkan GPU %zu: %s (%s)\n", i, properties.deviceName.data(),
+			            type == vk::PhysicalDeviceType::eDiscreteGpu     ? "discrete"
+			            : type == vk::PhysicalDeviceType::eIntegratedGpu ? "integrated"
+			                                                             : "other");
+		const bool match = request.empty() ||
+		                   (by_index ? std::strtoul(request.c_str(), nullptr, 10) == i
+		                             : Lowercase(properties.deviceName.data()).find(Lowercase(request)) != std::string::npos);
+		if (match) kept.push_back(devices[i]);
+	}
+	if (kept.empty() && !devices.empty()) {
+		std::printf("Vulkan GPU \"%s\" (--gpu or KYTY_GPU): no such GPU; chosen automatically\n", request.c_str());
+		return devices;
+	}
+	return kept;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surface,
                                      const std::vector<const char*>& device_extensions,
                                      SurfaceCapabilities&            out_capabilities,
-                                     vk::PhysicalDevice& out_device, uint32_t& out_queue_family) {
+                                     vk::PhysicalDevice& out_device, uint32_t& out_queue_family,
+                                     bool asked = true) {
 	EXIT_IF(instance == nullptr);
 	EXIT_IF(surface == nullptr);
 
@@ -213,17 +258,14 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 	    });
 	EXIT_NOT_IMPLEMENTED(devices.empty());
 
-	if (Config::GetGpuIndex() >= 0) {
-		if (static_cast<size_t>(Config::GetGpuIndex()) < devices.size()) {
-			devices = {devices[Config::GetGpuIndex()]};
-		} else {
-			LOGF("Vulkan GPU index %d is unavailable; selecting automatically\n",
-			     Config::GetGpuIndex());
-		}
-	}
+	// (asked false: the automatic choice, after the GPU asked for could not run the emulator.)
+	const auto request = asked ? RequestedGpu(Config::GetGpuIndex()) : std::string();
+	const auto count   = devices.size();
+	devices            = GpusAsked(devices, request, asked);
 
 	vk::PhysicalDevice  best_device       = nullptr;
 	uint32_t            best_queue_family = static_cast<uint32_t>(-1);
+	bool                best_discrete     = false;
 	SurfaceCapabilities best_capabilities;
 
 	for (const auto& device: devices) {
@@ -536,18 +578,29 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 			continue;
 		}
 
-		if (best_device == nullptr ||
-		    device_properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu) {
+		// The first discrete GPU, else the first other one (the last discrete GPU before: with two, the one Windows'
+		// graphics settings did not prefer, and not the precompile program's, CreateHeadlessGraphicContext).
+		const bool discrete = device_properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
+		if (best_device == nullptr || (discrete && !best_discrete)) {
 			best_device       = device;
 			best_queue_family = queue_family;
+			best_discrete     = discrete;
 			best_capabilities = std::move(candidate_capabilities);
 		}
 	}
 
+	if (best_device == nullptr && devices.size() != count) {
+		std::printf("Vulkan GPU \"%s\" lacks what the emulator needs; chosen automatically\n", request.c_str());
+		VulkanFindPhysicalDevice(instance, surface, device_extensions, out_capabilities, out_device, out_queue_family, false);
+		return;
+	}
 	out_device       = best_device;
 	out_queue_family = best_queue_family;
 	if (best_device != nullptr) {
 		out_capabilities = std::move(best_capabilities);
+		vk::PhysicalDeviceProperties properties {};
+		best_device.getProperties(&properties);
+		std::printf("Vulkan GPU in use: %s\n", properties.deviceName.data());
 	}
 }
 
@@ -1656,11 +1709,13 @@ bool CreateHeadlessGraphicContext(GraphicContext& graphic_ctx) {
 	device_extensions.push_back(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
 	device_extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 #endif
-	// The first device with the target API and a graphics+compute queue, preferring discrete.
-	auto devices = EnumerateVulkan<vk::PhysicalDevice>(
+	// The first device with the target API and a graphics+compute queue, preferring discrete (as the emulator's choice,
+	// VulkanFindPhysicalDevice, KYTY_GPU too).
+	const auto all = EnumerateVulkan<vk::PhysicalDevice>(
 	    "vkEnumeratePhysicalDevices", [&](uint32_t* count, vk::PhysicalDevice* values) {
 		    return graphic_ctx.instance.enumeratePhysicalDevices(count, values);
 	    });
+	const auto devices = GpusAsked(all, RequestedGpu(-1), false);
 	uint32_t queue_family = static_cast<uint32_t>(-1);
 	for (const bool discrete_only: {true, false}) {
 		for (const auto& device: devices) {
@@ -1691,6 +1746,8 @@ bool CreateHeadlessGraphicContext(GraphicContext& graphic_ctx) {
 	physical_device_properties.pNext = &push_descriptor_properties;
 	graphic_ctx.physical_device.getProperties2(&physical_device_properties);
 	graphic_ctx.physical_device_properties = physical_device_properties.properties;
+	// (With more than one GPU: the one compiled for.)
+	if (all.size() > 1) std::printf("Vulkan GPU in use: %s\n", physical_device_properties.properties.deviceName.data());
 	graphic_ctx.max_push_descriptors       = push_descriptor_properties.maxPushDescriptors;
 	graphic_ctx.physical_device.getMemoryProperties(&graphic_ctx.physical_device_memory_properties);
 	const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info {

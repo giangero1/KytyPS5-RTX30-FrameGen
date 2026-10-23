@@ -169,16 +169,19 @@ def compile_permutation(glslang, sdk, effect_dir, source, defines):
     if key in COMPILE_CACHE:
         return COMPILE_CACHE[key]
     gpu = os.path.join(sdk, "include", "FidelityFX", "gpu")
-    with tempfile.NamedTemporaryFile(suffix=".spv") as output:
+    # (A file in a directory of its own: on Windows glslang cannot write a NamedTemporaryFile this process holds open.)
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "shader.spv")
         command = [glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-Os",
                    "-DFFX_GLSL=1", "-DFFX_GPU=1", "-DFFX_HALF=0", *defines,
                    f"-I{gpu}", f"-I{os.path.join(gpu, effect_dir)}",
                    os.path.join(sdk, "src", "backends", "vk", "shaders", effect_dir, source + ".glsl"),
-                   "-o", output.name]
+                   "-o", output]
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             sys.exit(f"glslang failed for {source} {defines}:\n{result.stdout}{result.stderr}")
-        data = open(output.name, "rb").read()
+        with open(output, "rb") as spirv:
+            data = spirv.read()
         COMPILE_CACHE[key] = data
         return data
 

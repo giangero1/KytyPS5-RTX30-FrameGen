@@ -27,10 +27,10 @@ $resolutionsByRatio = @{
 	'21:9' = '2560x1080', '3440x1440', '3840x1600', '5120x2160'
 	'32:9' = '3840x1080', '5120x1440', '7680x2160' }
 # The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
-$renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900'
+$renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900', '720'
 # What reconstructs the scene (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
 # place of Sony's PS5 Pro upscaler on the game's PS5 Pro path (NVIDIA's Streamline runtime, as frame generation).
-$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)'
+$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)', 'FSR 3 (PS5 Pro path)'
 # The aspect ratio of Demon's Souls' 3D (run-windows.ps1 -Aspect): wider sees more to the sides.
 $ratios = '16:9 (PS5)', '21:9', '32:9'
 # Demon's Souls' own settings for what a frame draws (run-windows.ps1 -Quality): shorter shadows, simpler distant detail;
@@ -54,11 +54,15 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true; cheats = $false;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
-	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; fsr = $false; output = '4k'
-	lowlatency = $false }
+	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; fsr = $false; output = 'auto'
+	lowlatency = $false; present_direct = $false; antilag = $false; keep_resident = $false; fps30 = $false
+	extra_args = ''; dlss_preset = ''; gpu = ''; output_auto = $true }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
+	# 4K was the game output's default, written by every save: a file from before Automatic has it as Automatic once
+	# (KytyLauncher.exe's Settings does the same); a 4K chosen since stays.
+	if (!$saved.PSObject.Properties['output_auto'] -and $settings.output -eq '4k') { $settings.output = 'auto' }
 }
 if (!$settings.game -and (Test-Path "$root\game-path.txt")) { $settings.game = (Get-Content "$root\game-path.txt" -TotalCount 1).Trim() }
 
@@ -96,6 +100,52 @@ public static int[] Query() {
 	return $mask
 }
 $efficiencyMask = Get-EfficiencyMask
+
+# The primary display's height in pixels, its current mode's (not scaled by Windows' display scaling), or 0
+# (KytyLauncher.exe's Native.DisplayHeight).
+function Get-DisplayHeight {
+	Add-Type -Namespace KytyLauncher -Name Display -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct DevMode {
+	[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+	public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+	public uint dmFields;
+	public int dmPositionX, dmPositionY;
+	public uint dmDisplayOrientation, dmDisplayFixedOutput;
+	public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+	[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+	public ushort dmLogPixels;
+	public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+}
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+static extern bool EnumDisplaySettingsW(string deviceName, int modeNumber, ref DevMode mode);
+public static int Height() {
+	var mode = new DevMode();
+	mode.dmSize = (ushort)Marshal.SizeOf(typeof(DevMode));
+	return EnumDisplaySettingsW(null, -1, ref mode) ? (int)mode.dmPelsHeight : 0;
+}
+'@
+	return [KytyLauncher.Display]::Height()
+}
+$displayHeight = Get-DisplayHeight
+
+# Game output "Automatic" (KytyLauncher.exe's Commands.AutoHdOutput): the game's 1080p output for a 16:9 game window (in
+# full screen, the screen) at most 1080 lines high, 4K otherwise. A window larger than the display is shrunk to it.
+function Test-AutoHdOutput([string]$size, [bool]$full, [string]$shape) {
+	$height = 0
+	if ($full) {
+		$height = $displayHeight
+	} else {
+		$parts = $size -split 'x'
+		if ($parts.Count -lt 2 -or ![int]::TryParse($parts[1], [ref]$height)) { $height = 0 }
+		elseif ($displayHeight -gt 0 -and $height -gt $displayHeight) { $height = $displayHeight }
+	}
+	return $shape -eq '16:9' -and $height -gt 0 -and $height -le 1080
+}
+function Test-HdOutput {
+	return $settings.output -eq '1080p' -or
+		($settings.output -eq 'auto' -and (Test-AutoHdOutput ([string]$settings.resolution) ([bool]$settings.fullscreen) ([string]$settings.ratio)))
+}
 # Frame generation needs NVIDIA's Streamline runtime, which no release ships: the Streamline SDK
 # (github.com/NVIDIA-RTX/Streamline/releases) chosen with "Streamline..." (settings: streamline), else a "streamline"
 # folder next to the emulator, else the SDK beside a local build (_Build\deps\streamline\sdk). The emulator loads
@@ -312,11 +362,13 @@ function Get-PlayCommand {
 		if ($settings.aspect -and $settings.ratio -notin '21:9', '32:9') { $arguments += '-AspectFit' }
 	}
 	if (!$settings.redzone) { $arguments += '-NoRedZone' }
-	if ($settings.fps120) { $arguments += '-Fps120' }
+	# (KytyLauncher.exe's 30 fps lock, Experimental: KYTY_FLIP_RATE=1 below, at 60 Hz.)
+	if ($settings.fps120 -and !$settings.fps30) { $arguments += '-Fps120' }
 	# Presents wait for the display's refresh (Vulkan FIFO): no tearing, and G-SYNC/FreeSync displays keep adapting.
 	if ($settings.vsync) { $arguments += @('-PresentMode', 'Fifo') }
 	# One frame queued instead of about two ($lowLatencyTip).
-	if ($settings.lowlatency) { $arguments += '-LowLatency' }
+	# (AMD Anti-Lag, an experiment of KytyLauncher.exe, works on top of low latency.)
+	if ($settings.lowlatency -or $settings.antilag) { $arguments += '-LowLatency' }
 	# HDR10 output when Windows HDR is on for the display; SDR otherwise.
 	if ($settings.hdr) { $arguments += '-Hdr' }
 	# The cheats file of this title, when it has one: the emulator applies the mods left enabled in it.
@@ -325,8 +377,10 @@ function Get-PlayCommand {
 		if ($patch) { $arguments += @('-Patch', "`"$patch`"") }
 	}
 	$dlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
-	# The upscaler's own render height (with DLSS always passed: the PS5 Pro path's own height is 1512).
-	$height = if ($dlss) { [int]$settings.render_dlss } else { [int]$settings.render }
+	# FSR 3 upscaling, built into the emulator: any graphics card (KytyLauncher.exe's Commands.FsrUpscaler).
+	$fsrUpscaler = $settings.upscaler -eq 'fsr'
+	# The upscaler's own render height (with DLSS or FSR 3 always passed: the PS5 Pro path's own height is 1512).
+	$height = if ($dlss -or $fsrUpscaler) { [int]$settings.render_dlss } else { [int]$settings.render }
 	if ($height -gt 0) { $arguments += @('-RenderHeight', $height) }
 	if ($settings.ratio -in '21:9', '32:9') { $arguments += @('-Aspect', $settings.ratio) }
 	if ($settings.quality -in 'low', 'lowest') {
@@ -334,13 +388,15 @@ function Get-PlayCommand {
 	}
 	$fsrOn = $fsrAvailable -and $settings.fsr
 	if ($fsrOn) { $arguments += '-Fsr' }
-	if (!$fsrOn -and $frameGenAvailable -and [int]$settings.framegen -ge 2) {
+	if (!$fsrOn -and $frameGenAvailable -and [int]$settings.framegen -ge 2) { $arguments += @('-FrameGen', ([int]$settings.framegen - 1)) }
+	if ($dlss) { $arguments += @('-Upscaler', 'dlss') } elseif ($fsrUpscaler) { $arguments += @('-Upscaler', 'fsr') }
 		$arguments += @('-FrameGen', ([int]$settings.framegen - 1))
 	}
 	if ($dlss) { $arguments += @('-Upscaler', 'dlss') }
 	# (DLSS makes the 4K output: the 1080p output only with the game's own upscale.)
-	if (!$dlss -and $settings.output -eq '1080p') { $arguments += '-HdOutput' }
+	if (Test-HdOutput) { $arguments += '-HdOutput' }
 	if ($frameGenAvailable -and ((!$fsrOn -and [int]$settings.framegen -ge 2) -or $dlss)) { $arguments += @('-StreamlineDir', "`"$streamline`"") }
+	$arguments += @(Get-GpuArguments)
 	# Switches of the config, one -Set argument (run-windows.ps1 splits it at the commas).
 	$sets = @()
 	# The emulator's panel (KYTY_FPS_HUD) at the top right of the game image: the frame rate and frame times, or with
@@ -348,15 +404,78 @@ function Get-PlayCommand {
 	if ([int]$settings.hud -ge 1) { $sets += "KYTY_FPS_HUD=$([Math]::Min([int]$settings.hud, 2))" }
 	# Safe GPU mode: no overlapping compute dispatches ($safeGpuTip).
 	if ($settings.safegpu) { $sets += 'KYTY_COMPUTE_CHAIN=0' }
+	# KytyLauncher.exe's experiments: direct presentation (issue #37), AMD Anti-Lag and memory kept resident (issue #50).
+	if ($settings.present_direct) { $sets += 'KYTY_PRESENT_DIRECT=1' }
+	if ($settings.antilag) { $sets += 'KYTY_ANTI_LAG=1' }
+	if ($settings.fps30) { $sets += 'KYTY_FLIP_RATE=1' }
+	if ($settings.keep_resident) { $sets += @('KYTY_RESIDENT_MB=6144', 'KYTY_WORKING_SET_TRIM=0') }
+	# KytyLauncher.exe's DLSS model (a preset letter; none: the DLSS version's own choice).
+	if ($dlss -and "$($settings.dlss_preset)" -cmatch '^[A-O]$') { $sets += "KYTY_DLSS_PRESET=$($settings.dlss_preset)" }
+	# KytyLauncher.exe's extra options (Advanced page): their -Set pairs join (or replace) the launcher's own.
+	$extra = Get-ExtraOptions
+	foreach ($option in $extra) {
+		if ($option[0] -ne '-Set' -or $null -eq $option[1]) { continue }
+		foreach ($pair in ($option[1] -split ',(?=[A-Za-z_][A-Za-z0-9_]*=)')) {
+			$key = ($pair -split '=')[0]
+			$sets = @($sets | Where-Object { ($_ -split '=')[0] -ne $key })
+			$sets += $pair
+		}
+	}
 	if ($sets.Count) { $arguments += @('-Set', ($sets -join ',')) }
 	if ($settings.game) { $arguments += @('-Game', "`"$($settings.game)`"") }
+	# Their other options in place of the launcher's of the same name (run-windows.ps1 takes each once), else added
+	# (its own arguments from the 6th on: after -NoProfile -ExecutionPolicy Bypass -File <script>).
+	foreach ($option in $extra) {
+		if ($option[0] -eq '-Set') { continue }
+		$list = [System.Collections.Generic.List[string]]@($arguments | ForEach-Object { [string]$_ })
+		$at = -1
+		for ($j = 5; $j -lt $list.Count; $j++) { if ($list[$j] -eq $option[0]) { $at = $j; break } }
+		if ($at -ge 0) { $list.RemoveRange($at, $(if ($at + 1 -lt $list.Count -and !$list[$at + 1].StartsWith('-')) { 2 } else { 1 })) }
+		$list.Add($option[0])
+		if ($null -ne $option[1]) { $list.Add($(if ($option[1].Contains(' ')) { "`"$($option[1])`"" } else { $option[1] })) }
+		$arguments = $list.ToArray()
+	}
 	# The console stays for the live log; after a crash it waits for a key.
 	return "$powershellCommand " + ($arguments -join ' ') + ' & if !errorlevel! neq 0 pause'
+}
+# KytyLauncher.exe's extra options (extra_args), as on a run.cmd line (its Commands.ExtraOptions): each -Name with its
+# value (the next part when it does not start with -), "double quotes" keeping spaces in one; a value without a name,
+# or an option holding a character cmd would take itself, is left out.
+$cmdCharacters = [char[]]@('&', '|', '<', '>', '^', '!', '%', '"')
+function Get-ExtraOptions {
+	$parts = New-Object System.Collections.Generic.List[string]
+	$part = New-Object System.Text.StringBuilder
+	$quoted = $false
+	$any = $false
+	foreach ($c in ([string]$settings.extra_args).ToCharArray()) {
+		if ($c -eq [char]'"') { $quoted = !$quoted; $any = $true }
+		elseif ([char]::IsWhiteSpace($c) -and !$quoted) { if ($any) { $parts.Add($part.ToString()) }; [void]$part.Clear(); $any = $false }
+		else { [void]$part.Append($c); $any = $true }
+	}
+	if ($any) { $parts.Add($part.ToString()) }
+	$options = @()
+	for ($i = 0; $i -lt $parts.Count; $i++) {
+		$name = $parts[$i]
+		if ($name.Length -lt 2 -or $name[0] -ne [char]'-') { continue }
+		$value = $null
+		if ($i + 1 -lt $parts.Count -and !$parts[$i + 1].StartsWith('-')) { $i++; $value = $parts[$i] }
+		if ($name.IndexOfAny($cmdCharacters) -ge 0 -or ($null -ne $value -and $value.IndexOfAny($cmdCharacters) -ge 0)) { continue }
+		$options += , @($name, $value)
+	}
+	return , $options
+}
+# KytyLauncher.exe's graphics card (Advanced page, a PC with more than one), by its name, for the game and the precompile
+# alike (issue #132); one holding a character cmd would act on is left out.
+function Get-GpuArguments {
+	$gpu = "$($settings.gpu)"
+	if ($gpu -and $gpu.IndexOfAny([char[]]'&|<>^!%"') -lt 0) { return @('-Gpu', "`"$gpu`"") }
+	return @()
 }
 function Get-PrecompileCommand([string]$switch = '') {
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\precompile-windows.ps1`"")
 	if ($switch) { $arguments += $switch }
 	if ($settings.ecores -and $efficiencyMask -ne 0) { $arguments += @('-Affinity', $efficiencyMask) }
+	$arguments += @(Get-GpuArguments)
 	if ($settings.game) { $arguments += @('-Game', "`"$($settings.game)`"") }
 	return "$powershellCommand " + ($arguments -join ' ') + ' & pause'
 }
@@ -366,6 +485,7 @@ if ($DryRun) {
 	"precompile: cmd /s /c `"$(Get-PrecompileCommand)`""
 	"hints:      cmd /s /c `"$(Get-PrecompileCommand '-ExportHints')`""
 	"efficiency cores: 0x{0:X}" -f $efficiencyMask
+	"display: $displayHeight lines"
 	"frame generation: $(if ($frameGenAvailable) { "NVIDIA's Streamline runtime in $streamline" } elseif (!$rtxGpu) { 'no NVIDIA RTX graphics card (DLSS off)' } else { "no NVIDIA-signed Streamline runtime (settings: '$($settings.streamline)')" })"
 	return
 }
@@ -481,19 +601,28 @@ function Select-RenderHeight {
 	}
 }
 $renderNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+# The game output shown: 1080p chosen, or Automatic for the window chosen above (Test-AutoHdOutput).
+function Test-HdOutputShown {
+	if (!$output) { return $false }
+	return $output.SelectedIndex -eq 2 -or ($output.SelectedIndex -eq 0 -and
+		(Test-AutoHdOutput ([string]$resolution.SelectedItem) ([bool]($fullscreen -and $fullscreen.Checked)) (Get-Ratio)))
+}
 function Update-RenderNote {
 	$h = [int](([string]$render.SelectedItem -split ' ')[0])
 	# (The 1080p output's 3D is at most 1080 high: $output below.)
-	$capped = $output -and $output.Enabled -and $output.SelectedIndex -eq 1 -and $h -gt 1080
+	$capped = (Test-HdOutputShown) -and $h -gt 1080
 	if ($capped) { $h = 1080 }
+	# (DLSS's 4K output takes 1080 at least.)
+	$raised = $upscaler.SelectedIndex -ge 1 -and !(Test-HdOutputShown) -and $h -lt 1080 -and $h -ne 720
+	if ($raised) { $h = 1080 }
 	$w = [Math]::Floor($h * (Get-RatioAspect) / 8.0 + 0.5) * 8
-	$renderNote.Text = if ($capped) { "Demon's Souls' 3D at ${w}x${h} (1080 at most with the 1080p output)" } else { "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU" }
+	$renderNote.Text = if ($capped) { "Demon's Souls' 3D at ${w}x${h} (1080 at most with the 1080p output)" } elseif ($raised) { "Demon's Souls' 3D at ${w}x${h} (1080 at least with DLSS's 4K output)" } else { "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU" }
 }
 $render.Add_SelectedIndexChanged({
 	if (!$script:fillingRender) { $script:renderWanted = [int](([string]$render.SelectedItem -split ' ')[0]) }
 	Update-RenderNote
 })
-$renderForDlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
+$renderForDlss = ($frameGenAvailable -and $settings.upscaler -eq 'dlss') -or $settings.upscaler -eq 'fsr'
 $renderWanted = [int]$(if ($renderForDlss) { $settings.render_dlss } else { $settings.render })
 Select-RenderHeight
 Update-RenderNote
@@ -502,9 +631,9 @@ $ratio.Add_SelectedIndexChanged({
 	Select-RenderHeight
 	Update-RenderNote
 })
-$upscaler = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205; Enabled = $frameGenAvailable }
+$upscaler = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
 $upscaler.Items.AddRange($upscalers)
-$upscaler.SelectedIndex = if ($frameGenAvailable -and $settings.upscaler -eq 'dlss') { 1 } else { 0 }
+$upscaler.SelectedIndex = if ($frameGenAvailable -and $settings.upscaler -eq 'dlss') { 1 } elseif ($settings.upscaler -eq 'fsr') { 2 } else { 0 }
 $upscalerNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 function Update-UpscalerNote {
 	$upscalerNote.Text = if ($frameGenAvailable) { 'DLSS: NVIDIA RTX; 1440 = Quality, 1080 = Performance, 2160 = DLAA' }
@@ -522,7 +651,7 @@ Update-UpscalerNote
 $upscaler.Add_SelectedIndexChanged({
 	# The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
 	if ($script:renderForDlss) { $settings.render_dlss = $script:renderWanted } else { $settings.render = $script:renderWanted }
-	$script:renderForDlss = $upscaler.SelectedIndex -eq 1
+	$script:renderForDlss = $upscaler.SelectedIndex -ge 1
 	$script:renderWanted = [int]$(if ($script:renderForDlss) { $settings.render_dlss } else { $settings.render })
 	Select-RenderHeight
 	Update-RenderNote
@@ -532,21 +661,22 @@ Add-Row 'Aspect ratio' @($ratio, $ratioNote)
 Add-Row 'Render height' @($render, $renderNote)
 Add-Row 'Upscaler' @($upscaler, $upscalerNote)
 # The game's output (run-windows.ps1 -HdOutput, src/loader/demonsSoulsHdOutput.h): 4K, or the game's own 1080p mode, its
-# post-processing and HUD at 1920x1080 and its 3D at most 1080 high. DLSS makes the 4K output: the row is off with it.
+# post-processing and HUD at 1920x1080 and its 3D at most 1080 high (with DLSS: DLSS upscales the 3D to that 1080p).
 $output = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
-$output.Items.AddRange(@('4K (PS5)', '1080p'))
-$output.SelectedIndex = if ($settings.output -eq '1080p') { 1 } else { 0 }
+$output.Items.AddRange(@('Automatic', '4K (PS5)', '1080p'))
+$output.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@('auto', '4k', '1080p'), [string]$settings.output))
 $outputNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
-	Text = '1080p: the game''s own HD mode, effects and HUD at 1920x1080; less GPU work; not with DLSS' }
-$output.Enabled = $upscaler.SelectedIndex -ne 1
+	Text = 'Automatic: 1080p for a 16:9 window (full screen: the screen) up to 1080 lines, else 4K. 1080p: the game''s HD layout, effects and HUD at 1920x1080; less GPU work; with DLSS, DLSS makes the 1080p picture' }
 $output.Add_SelectedIndexChanged({ Update-RenderNote })
-$upscaler.Add_SelectedIndexChanged({ $output.Enabled = $upscaler.SelectedIndex -ne 1; Update-RenderNote })
+$upscaler.Add_SelectedIndexChanged({ Update-RenderNote })
 Add-Row 'Game output' @($output, $outputNote)
+# (Automatic follows the window's size.)
+$resolution.Add_SelectedIndexChanged({ Update-RenderNote })
 Update-RenderNote
 $fullscreen = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Fullscreen'; AutoSize = $true; Checked = [bool]$settings.fullscreen }
 $aspect = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Keep the aspect ratio (black bars)'; AutoSize = $true; Checked = [bool]$settings.aspect }
 $aspect.Enabled = $fullscreen.Checked
-$fullscreen.Add_CheckedChanged({ $aspect.Enabled = $fullscreen.Checked })
+$fullscreen.Add_CheckedChanged({ $aspect.Enabled = $fullscreen.Checked; Update-RenderNote })
 Add-Row '' @($fullscreen, $aspect)
 $language = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 320 }
 $language.Items.AddRange($languages)
@@ -628,7 +758,6 @@ $frameGenFolder.Add_Click({
 	# (Without an NVIDIA RTX graphics card the folder is kept, the rows stay off.)
 	$script:frameGenAvailable = $rtxGpu
 	$frameGen.Enabled = $rtxGpu
-	$upscaler.Enabled = $rtxGpu
 	Update-FrameGenNote
 	Update-UpscalerNote
 })
@@ -652,7 +781,7 @@ $buttons = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{ AutoSize
 $play = New-Object System.Windows.Forms.Button -Property @{ Text = 'Play'; AutoSize = $true; Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold) }
 $precompile = New-Object System.Windows.Forms.Button -Property @{ Text = 'Precompile shaders'; AutoSize = $true }
 $share = New-Object System.Windows.Forms.Button -Property @{ Text = 'Export shader hints'; AutoSize = $true }
-(New-Object System.Windows.Forms.ToolTip).SetToolTip($share, ('The shaders your play recorded, without the game''s code, as my-hints-<game>.hints: ' +
+(New-Object System.Windows.Forms.ToolTip).SetToolTip($share, ('The shaders your play recorded, without the game''s code, as my-hints-<game>.hints.zip: ' +
 	'attached to a GitHub issue, the next packages precompile them for everyone.'))
 $logs = New-Object System.Windows.Forms.Button -Property @{ Text = 'Logs folder'; AutoSize = $true }
 $readme = New-Object System.Windows.Forms.Button -Property @{ Text = 'README'; AutoSize = $true }
@@ -683,10 +812,13 @@ function Read-Form {
 	if ($renderForDlss) { $settings.render_dlss = $height } else { $settings.render = $height }
 	$settings.ratio      = ([string]$ratio.SelectedItem -split ' ')[0]
 	$settings.quality    = ([string]$quality.SelectedItem -split ' ')[0].ToLowerInvariant()
-	$settings.output     = if ($output.SelectedIndex -eq 1) { '1080p' } else { '4k' }
+	$settings.output     = @('auto', '4k', '1080p')[[Math]::Max(0, $output.SelectedIndex)]
 	# (Kept as it was where the DLLs are missing.)
 	if ($frameGenAvailable) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
-	if ($frameGenAvailable) { $settings.upscaler = if ($upscaler.SelectedIndex -eq 1) { 'dlss' } else { '' } }
+	# (DLSS kept as it was where its DLLs are missing; FSR 3 and the game's own anywhere.)
+	if ($upscaler.SelectedIndex -eq 2) { $settings.upscaler = 'fsr' }
+	elseif ($upscaler.SelectedIndex -eq 1) { if ($frameGenAvailable) { $settings.upscaler = 'dlss' } }
+	elseif ($frameGenAvailable -or $settings.upscaler -ne 'dlss') { $settings.upscaler = '' }
 	if ($fsrAvailable) { $settings.fsr = $fsr.Checked }
 	$settings.ecores     = $ecores.Checked
 	Save-Settings

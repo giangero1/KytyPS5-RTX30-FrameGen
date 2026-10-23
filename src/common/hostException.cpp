@@ -373,6 +373,12 @@ static void SignalHandler(int sig, siginfo_t* si, void* uctx) {
 constexpr uint64_t PAGE_FAULT_ERROR_WRITE       = 0x02;
 constexpr uint64_t PAGE_FAULT_ERROR_INSTRUCTION = 0x10;
 
+static std::atomic<ProbeHandler> g_probe_handler {nullptr};
+
+void SetProbeHandler(ProbeHandler handler) {
+	g_probe_handler.store(handler, std::memory_order_release);
+}
+
 // Let the kernel handle an unresolved fault on retry.
 static void ChainToDefault(int signal_number) noexcept {
 	struct sigaction restore {};
@@ -394,6 +400,12 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
 	if (signal_number == SIGSEGV || signal_number == SIGBUS) {
 		info.type             = ExceptionType::AccessViolation;
 		const auto error_code = static_cast<uint64_t>(gregs[REG_ERR]);
+		// The texture offload's pages first, as on Windows: true runs the access again.
+		if (const auto probe = g_probe_handler.load(std::memory_order_acquire);
+		    probe != nullptr && probe(reinterpret_cast<uint64_t>(signal_info->si_addr),
+		                              static_cast<uint64_t>(gregs[REG_RIP]), context,
+		                              (error_code & PAGE_FAULT_ERROR_WRITE) != 0))
+			return;
 		if ((error_code & PAGE_FAULT_ERROR_INSTRUCTION) != 0) {
 			info.access_violation_type = AccessViolationType::Execute;
 		} else if ((error_code & PAGE_FAULT_ERROR_WRITE) != 0) {
@@ -496,7 +508,7 @@ bool InstallHandler(Handler handler) {
 	return true;
 }
 
-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#if defined(__APPLE__)
 void SetProbeHandler(ProbeHandler /*handler*/) {}
 #endif
 

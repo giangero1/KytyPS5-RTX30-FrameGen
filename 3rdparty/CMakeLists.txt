@@ -120,8 +120,8 @@ add_library(spirv-tools-opt ALIAS SPIRV-Tools-opt)
 
 add_subdirectory(xxHash/build/cmake)
 
-# AMD FidelityFX SDK 1.1.4 sources (FSR 3 upscaling and frame interpolation) for Linux builds.
-if (LINUX)
+# AMD FidelityFX SDK 1.1.4 sources (FSR 3 upscaling, and frame interpolation on Linux) for Linux and Windows builds.
+if (LINUX OR WIN32)
 	add_subdirectory(fidelityfx)
 endif()
 

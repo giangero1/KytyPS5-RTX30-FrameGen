@@ -401,8 +401,13 @@ The CMake source root is the repository root.
 #### PGO on Linux
 
 `tools/pgo/kyty.profdata` is made by clang-cl and matches almost nothing in a Linux build (MSVC-mangled names), so
-a Linux PGO build needs its own profile. Use fresh build directories: `KYTY_CMAKE_ARGS` only applies to the first
-configure.
+Linux has its own: `tools/pgo/kyty-linux.profdata`, which the Linux package is built with
+(`KYTY_CMAKE_ARGS=-DKYTY_PGO_USE=$PWD/tools/pgo/kyty-linux.profdata ./build-linux.sh` does the same). It is made with
+clang 18 (Ubuntu 24.04's, the CI's compiler): clang 18 can't read a profile written by a newer `llvm-profdata`, and a
+newer clang may match it less well. Like the Windows profile, it goes stale as the code changes: retrain it before
+releases. Use fresh build directories: `KYTY_CMAKE_ARGS` only applies to the first configure.
+
+To make one (with clang 18 for the shipped profile):
 
 1. An instrumented build: `KYTY_BUILD_DIR=_Build/linux-pgogen KYTY_CMAKE_ARGS=-DKYTY_PGO_GENERATE=ON ./build-linux.sh`
 2. Play with it for 10-15 minutes (it runs slower). The emulator exits without writing a profile, so write it with
@@ -412,6 +417,10 @@ configure.
    writes to the same file. Set it in a small wrapper script passed as `KYTY_BIN` instead.
 3. Merge and build: `llvm-profdata merge -o kyty-linux.profdata *.profraw`, then
    `KYTY_BUILD_DIR=_Build/linux-pgo KYTY_CMAKE_ARGS=-DKYTY_PGO_USE=$PWD/kyty-linux.profdata ./build-linux.sh`
+
+The shipped profile was made without playing, by [kyty-bench-linux](https://gist.github.com/the2ndday/5a3f2681a7f61081faee483f47c42b5c)'s
+`train` command: 8 scenes (1-1 twice, 1-2, the Nexus, 2-1, 3-1, 4-1, 5-1), each a launch warped to a spawn point
+with 3 minutes of walking, camera turns and fights, then `pgo`.
 
 ### Building on macOS
 

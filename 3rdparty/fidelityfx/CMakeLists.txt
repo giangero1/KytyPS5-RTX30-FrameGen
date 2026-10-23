@@ -40,7 +40,10 @@ target_include_directories(kyty_fidelityfx
 	        "${ffx_dir}/src/shared")
 target_compile_definitions(kyty_fidelityfx PRIVATE FFX_FI FFX_OF FFX_FSR3UPSCALER)
 target_link_libraries(kyty_fidelityfx PUBLIC Vulkan::Headers)
-if(NOT WIN32)
+# (ffx_linux_compat.h: the Vulkan calls routed to the emulator's dispatcher, and on Linux the MSVC library extensions.)
+if(WIN32)
+	target_compile_options(kyty_fidelityfx PRIVATE "/FI${ffx_dir}/src/ffx_linux_compat.h" /w)
+else()
 	target_compile_options(kyty_fidelityfx PRIVATE
 		-include "${ffx_dir}/src/ffx_linux_compat.h" -w)
 endif()

@@ -53,6 +53,9 @@ jobs:
       - name: Build
         env:
           KYTY_MARCH: x86-64-v3
+          # The Linux PGO profile (README.md, "PGO on Linux"): made with this runner's clang 18, which can't read a
+          # profile from a newer llvm-profdata.
+          KYTY_CMAKE_ARGS: -DKYTY_PGO_USE=${{ github.workspace }}/tools/pgo/kyty-linux.profdata
         run: |
           ./build-linux.sh kyty_emulator
           ./build-linux.sh kyty_shader_precompile

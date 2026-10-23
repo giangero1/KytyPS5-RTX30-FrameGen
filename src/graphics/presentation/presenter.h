@@ -49,8 +49,8 @@ public:
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
-	// KYTY_FLIP_RATE caps the frame's flip. With frame generation only frames carrying its inputs
-	// are capped (the game's 3D view): movies and menus keep a flip per vblank.
+	// KYTY_FLIP_RATE caps the frame's flip: frames of the game's 3D view only (IsSceneFrame; with frame generation, the
+	// frames carrying its inputs), movies and menus keep a flip per vblank.
 	[[nodiscard]] static bool FlipRateApplies(const Frame& frame) noexcept;
 	// The frame shows the game's 3D view (its TAA pass ran): above 60 Hz the others (movies, menus, loading screens)
 	// keep 60 (videoOut.cpp).
