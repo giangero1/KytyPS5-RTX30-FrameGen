@@ -1,10 +1,14 @@
-#include "demonsSoulsRenderSize.h"
+#include "loader/demonsSoulsRenderSize.h"
+#include "loader/demonsSoulsHdOutput.h"
+#include "loader/demonsSoulsSuperResolution.h"
 
-#include "demonsSoulsHdOutput.h"
-#include "demonsSoulsSuperResolution.h"
-#include "emulator/src/graphics/guest_gpu/superResolution.h"
-#include "emulator/src/libs/graphics.h"
-#include "guestCode.h"
+#include "common/emulatorConfig.h"
+#include "graphics/host_gpu/hostMemory.h"
+#include "graphics/presentation/window.h"
+#include "graphics/host_gpu/renderer/demonsSouls.h"
+#include "loader/elf.h"
+#include "loader/guestCode.h"
+#include "loader/runtimeLinker.h"
 
 #include <algorithm>
 #include <cmath>
@@ -158,16 +162,14 @@ static bool InstallSettings(Program* program, bool trinity) {
 	                                : game_height;
 	if (hd_pro && requested > DemonsSoulsHdOutput::HdHeight) {
 		std::printf("Demon's Souls render size: %u is above the 1080p output's 1080 (the HD output with the upscaler); "
-		            "1080 instead
-",
+		            "1080 instead\n",
 		            requested);
 		requested = DemonsSoulsHdOutput::HdHeight;
 	}
 	if (automatic != 0) {
 		uint32_t window_width = 0, window_height = 0;
 		Libs::Graphics::WindowOutputSize(&window_width, &window_height);
-		std::printf("Demon's Souls render size: automatic for the %ux%u window: %s 3D at height %u%s
-", window_width,
+		std::printf("Demon's Souls render size: automatic for the %ux%u window: %s 3D at height %u%s\n", window_width,
 		            window_height, hd ? "HD output (1920x1080)," : trinity ? "PS5 Pro output (3840x2160)," : "4K output,",
 		            std::min(requested, hd ? DemonsSoulsHdOutput::HdHeight : requested),
 		            hd && window_height == DemonsSoulsHdOutput::HdHeight ? " (pixel-exact)"
@@ -176,21 +178,18 @@ static bool InstallSettings(Program* program, bool trinity) {
 		if (hd && requested > DemonsSoulsHdOutput::HdHeight) requested = DemonsSoulsHdOutput::HdHeight;
 	}
 	if (hd && requested > DemonsSoulsHdOutput::HdHeight && requested <= OutputHeight) {
-		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is above the HD output's 1080; 1080 instead
-",
+		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is above the HD output's 1080; 1080 instead\n",
 		            requested);
 		requested = DemonsSoulsHdOutput::HdHeight;
 	}
 	auto aspect = wide != nullptr && *wide != 0 ? ParseAspect(wide) : 0.0;
 	if (wide != nullptr && *wide != 0 && aspect == 0.0)
 		std::printf("Demon's Souls render size: KYTY_RENDER_ASPECT=%s is not wider than 16:9 and "
-		            "at most 32:9; 16:9 kept
-",
+		            "at most 32:9; 16:9 kept\n",
 		            wide);
 	if (hd_pro && aspect != 0.0) {
 		std::printf("Demon's Souls render size: a wider aspect is not with the 1080p output (the HD output with the "
-		            "upscaler); 16:9
-");
+		            "upscaler); 16:9\n");
 		aspect = 0.0;
 	}
 	Size output {OutputWidth, OutputHeight};
@@ -204,8 +203,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 		if (output.height == 0) {
 			std::printf("Demon's Souls super resolution: selected output %ux%u cannot fit a "
 			            "1080-line PS5 Pro canvas; "
-			            "the game's own TAA kept
-",
+			            "the game's own TAA kept\n",
 			            Config::GetScreenWidth(), Config::GetScreenHeight());
 			return false;
 		}
@@ -213,8 +211,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 			const auto clamped = SuperResolutionRenderHeight(requested, output);
 			if (clamped != requested)
 				std::printf("Demon's Souls render size: requested %u lines clamped to %u for the "
-				            "%ux%u DLSS output
-",
+				            "%ux%u DLSS output\n",
 				            requested, clamped, output.width, output.height);
 			requested = clamped;
 		}
@@ -224,15 +221,13 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (const auto most = MaxRenderHeight(aspect != 0.0 ? aspect : GameAspect); size.height > most) {
 		const auto lower = RenderSizeFor(most, aspect != 0.0 ? aspect : GameAspect);
 		std::printf("Demon's Souls render size: %ux%u does not fit the game's render target memory (made for 3840x2160: "
-		            "a red or broken picture, or a crash); %ux%u instead
-",
+		            "a red or broken picture, or a crash); %ux%u instead\n",
 		            size.width, size.height, lower.width, lower.height);
 		size = lower;
 	}
 	if (size.height == 0) {
 		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%s is not %u-2160; the game's "
-		            "%ux%u kept
-",
+		            "%ux%u kept\n",
 		            setting, LeastRenderHeight, game_width, game_height);
 		return false;
 	}
@@ -249,16 +244,14 @@ static bool InstallSettings(Program* program, bool trinity) {
 	}
 	if (!constant || !widths || !heights || (aspect != 0.0 && !aspect_store)) {
 		std::printf("Demon's Souls render size: the video settings of a known build not found; the "
-		            "game's %ux%u kept
-",
+		            "game's %ux%u kept\n",
 		            game_width, game_height);
 		return false;
 	}
 	GuestCode::PatchBatch patches;
 	if (trinity && !PrepareOutput(*program, output, patches)) {
 		std::printf("Demon's Souls super resolution: complete output patch not found; the game's "
-		            "own TAA kept
-");
+		            "own TAA kept\n");
 		return false;
 	}
 	// Installation occurs before module initializers or guest threads run; program memory is
@@ -279,11 +272,9 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (trinity && (hd_pro || size.height < SuperResolutionLeastHeight)) {
 		(void)DemonsSoulsSuperResolution::SetLeastHeight(program, size.height);
 	}
-	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation
-",
+	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
 	                        output.width, output.height, OutputWidth, OutputHeight);
-	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s
-",
+	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s\n",
 	            hd ? "HD" : "performance", size.width, size.height, hd ? ModeWidths[mode] : game_width,
 	            hd ? ModeHeights[mode] : game_height,
 	            output.width, output.height,

@@ -1,12 +1,12 @@
-#include "demonsSoulsSuperResolution.h"
+#include "loader/demonsSoulsSuperResolution.h"
+#include "loader/demonsSoulsHdOutput.h"
+#include "loader/demonsSoulsRenderSize.h"
 
-#include "demonsSoulsHdOutput.h"
-#include "demonsSoulsRenderSize.h"
-#include "emulator/src/graphics/guest_gpu/superResolution.h"
-#include "emulator/src/libs/graphics.h"
-#include "emulator/src/local/frame-gen.h"
-#include "emulator/src/local/fsr-native.h"
-#include "guestCode.h"
+#include "graphics/host_gpu/renderer/demonsSouls.h"
+#include "loader/guestCode.h"
+#include "loader/runtimeLinker.h"
+#include "local/frame-gen.h"
+#include "local/fsr-native.h"
 
 #include <cstdio>
 #include <cstring>
@@ -52,14 +52,12 @@ void Install(Program* program) {
 	// (The device exists by now: without DLSS on it, the game's own TAA rather than a stretch without anti-aliasing.)
 	if (!fsr && !Libs::Graphics::FrameGen::UpscalerReady()) {
 		std::printf("Demon's Souls super resolution: DLSS is not available here (an NVIDIA RTX GPU and NVIDIA's DLSS "
-		            "runtime: Streamline on Windows, libkyty_dlss.so on Linux); the game's own TAA kept
-");
+		            "runtime: Streamline on Windows, libkyty_dlss.so on Linux); the game's own TAA kept\n");
 		return;
 	}
 	const auto site = GuestCode::FindUnique(*program, GuestCode::Pattern(CreateCheck));
 	if (!site) {
-		std::printf("Demon's Souls super resolution: this build has no PS5 Pro path (01.007.000 has); the game's own TAA kept
-");
+		std::printf("Demon's Souls super resolution: this build has no PS5 Pro path (01.007.000 has); the game's own TAA kept\n");
 		return;
 	}
 	// Validate every render/output site while the original constants still exist. A failure leaves
@@ -71,8 +69,7 @@ void Install(Program* program) {
 	g_active = true;
 	// (Its 1920x1080 output: DemonsSoulsHdOutput::Install takes the interface's part, DemonsSoulsRenderSize the sizes.)
 	g_hd = DemonsSoulsHdOutput::Requested();
-	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, %s in place of the TAA) is on%s
-",
+	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, %s in place of the TAA) is on%s\n",
 	            fsr ? "FSR 3" : "DLSS", g_hd ? ", its output 1920x1080 (KYTY_HD_OUTPUT)" : "");
 }
 
