@@ -686,10 +686,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// A compute shader the normal path dispatched before (TableDispatchSeen) whose program allows table mode (an
 	// indirect dispatch of threads: the normal path reads its counts).
 	const bool thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+#ifdef KYTY_LOCAL_VULKAN_RECORDING
 	if (kyty_local_table_dispatch_mode.load(std::memory_order_relaxed) != 0 && (!thread_dimensions || indirect_args == 0) &&
 	    (indirect_args != 0 || (thread_group_x != 0 && thread_group_y != 0 && thread_group_z != 0)) &&
 	    TableDispatch(buffer, thread_group_x, thread_group_y, thread_group_z, indirect_args, thread_dimensions))
 		return;
+#endif
 	// A direct dispatch of no thread groups (with thread dimensions: no threads) runs nothing: skipped before its
 	// program is prepared (about 60 a frame at 1-1, each evaluating its resource tables first).
 	if (indirect_args == 0 && (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0)) return;
@@ -729,7 +731,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		    .thread_dimensions  = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0};
 		if (DemonsSouls::TryLinearCopy(dispatch, m_context.GetBufferCache(), thread_group_x, thread_group_y,
 		                               thread_group_z, mode)) {
+			#ifdef KYTY_LOCAL_VULKAN_RECORDING
 			TableDispatchSeen(sh_ctx.GetCs(), "dispatch: linear copy", thread_dimensions);
+#endif
 			ResetBindings();
 			return;
 		}
@@ -809,21 +813,27 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		if (FrameCapture::Active()) FrameCapture::g_call.consumed = "linear_copy";
 		m_linear_copy_shader     = sh_ctx.GetCs().cs_regs.data_addr;
 		m_linear_copy_generation = shader_generation;
+		#ifdef KYTY_LOCAL_VULKAN_RECORDING
 		TableDispatchSeen(sh_ctx.GetCs(), "dispatch: linear copy", use_thread_dimensions);
+#endif
 		ResetBindings();
 		return;
 	}
 	if (indirect_args == 0 && TryConsumeComputeMetaClear(input_info, buffer, thread_group_x,
 	                                                     thread_group_y, thread_group_z, mode)) {
 		if (FrameCapture::Active()) FrameCapture::g_call.consumed = "meta_clear";
+		#ifdef KYTY_LOCAL_VULKAN_RECORDING
 		TableDispatchSeen(sh_ctx.GetCs(), "dispatch: meta clear", use_thread_dimensions);
+#endif
 		ResetBindings();
 		return;
 	}
 	if (indirect_args == 0 && TryConsumeComputeImageClear(input_info, buffer, thread_group_x,
 	                                                      thread_group_y, thread_group_z, mode)) {
 		if (FrameCapture::Active()) FrameCapture::g_call.consumed = "image_clear";
+		#ifdef KYTY_LOCAL_VULKAN_RECORDING
 		TableDispatchSeen(sh_ctx.GetCs(), "dispatch: image clear", use_thread_dimensions);
+#endif
 		ResetBindings();
 		return;
 	}
@@ -932,7 +942,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	phase.emplace(LiveCensus::DispatchPhase, census_shader, 2);
+	#ifdef KYTY_LOCAL_VULKAN_RECORDING
 	TableDispatchSeen(sh_ctx.GetCs(), nullptr, use_thread_dimensions);
+#endif
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().CreateComputePipeline(input_info, compute_program);
