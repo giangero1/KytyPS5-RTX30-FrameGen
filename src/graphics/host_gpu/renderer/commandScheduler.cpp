@@ -7,9 +7,9 @@
 #include "graphics/host_gpu/regionManager.h"
 #include "anti-lag.h"
 #include "async-upload.h"
+#include "device-fault.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
-#include "device-fault.h"
 #endif
 #include "live-trace-gpu.h"
 #include "local-platform.h"
