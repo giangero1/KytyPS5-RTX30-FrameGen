@@ -1,18 +1,18 @@
 # KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
-> ⚡ **Unlocking 2× NVIDIA DLSS Frame Generation (85–120 FPS) for GeForce RTX 30-Series (Ampere) GPUs via OpenDLSSG Enabler.**
+> ⚡ **Unlocking 2× NVIDIA DLSS Frame Generation (60–120 FPS depending on resolution & GPU) for GeForce RTX 30-Series (Ampere) GPUs via OpenDLSSG Enabler.**
 
 [![Latest Release](https://img.shields.io/github/v/release/giangero1/KytyPS5-RTX30-FrameGen?style=for-the-badge&logo=github&color=00c853&label=Latest%20Release)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)
 [![RTX 30 Series](https://img.shields.io/badge/GPU%20Support-RTX%203060%20%7C%203070%20%7C%203080%20%7C%203090-76b900?style=for-the-badge&logo=nvidia)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen)
-[![Frame Gen](https://img.shields.io/badge/Frame%20Gen-2x%20OpenDLSSG%20(85--120%20FPS)-blue?style=for-the-badge)](docs/RTX30_FRAME_GEN_GUIDE.md)
+[![Frame Gen](https://img.shields.io/badge/Frame%20Gen-2x%20OpenDLSSG%20(60--120%20FPS)-blue?style=for-the-badge)](docs/RTX30_FRAME_GEN_GUIDE.md)
 
 ---
 
 ## 🎯 What is this Fork?
 
-NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **This fork eliminates that restriction for *Demon's Souls* (PS5) on PC**, allowing owners of **GeForce RTX 30-Series (Ampere) GPUs (RTX 3060, 3060 Ti, 3070, 3070 Ti, 3080, 3080 Ti, 3090)** to run with **2× DLSS Frame Generation** at smooth **85–120 FPS**:
+NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **This fork eliminates that restriction for *Demon's Souls* (PS5) on PC**, allowing owners of **GeForce RTX 30-Series (Ampere) GPUs (RTX 3060, 3060 Ti, 3070, 3070 Ti, 3080, 3080 Ti, 3090)** to run with **2× DLSS Frame Generation** at smooth **60 to 120 FPS** (depending on resolution & GPU model):
 
-* 🚀 **2× DLSS Frame Generation on RTX 30-Series (Ampere) Cards**: Bridges the guest 43–60 FPS base simulation to **85–120 displayed FPS** using OpenDLSSG Enabler.
+* 🚀 **2× DLSS Frame Generation on RTX 30-Series (Ampere) Cards**: Bridges the guest 30–60 FPS base simulation to **60–120 displayed FPS** using OpenDLSSG Enabler (tested on RTX 3070: **60 FPS solid at native 1440p** and **85–120 FPS peak with 1080p DLSS**).
 * 🖼️ **1080p DLSS → 1440p Output Scaling**: Resizes the PS5 Pro DLSS super-resolution processing canvas to your monitor's 1440p resolution instead of forcing a heavy 4K render pass.
 * 💎 **Pixel-Sharp Native 4K UI/HUD Canvas**: Preserves original $3840\times 2160$ layout coordinates for all menus, inventory, and crosshairs with zero blur or stretching.
 * 🛡️ **DXGI 8 GB VRAM Safety Management**: Real-time memory pressure monitoring and automatic cache pruning keeps video memory safely within 8 GB to prevent out-of-memory crashes.
