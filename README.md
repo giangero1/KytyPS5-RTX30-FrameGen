@@ -1,21 +1,24 @@
 # KytyPS5: Demon's Souls PC — RTX 30 Series DLSS & Frame Generation Edition
 
-> ⚡ **Unlocking 2× NVIDIA DLSS Frame Generation (85–120 FPS) for RTX 30-Series (Ampere) & RTX 20-Series (Turing) GPUs via OpenDLSSG Enabler.**
+> ⚡ **Unlocking 2× NVIDIA DLSS Frame Generation (85–120 FPS) for GeForce RTX 30-Series (Ampere) GPUs via OpenDLSSG Enabler.**
 
 [![Latest Release](https://img.shields.io/github/v/release/giangero1/KytyPS5-RTX30-FrameGen?style=for-the-badge&logo=github&color=00c853&label=Latest%20Release)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)
-[![RTX 30 Series](https://img.shields.io/badge/GPU%20Support-RTX%203070%20%7C%203080%20%7C%203060%20%7C%2020--Series-76b900?style=for-the-badge&logo=nvidia)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen)
+[![RTX 30 Series](https://img.shields.io/badge/GPU%20Support-RTX%203060%20%7C%203070%20%7C%203080%20%7C%203090-76b900?style=for-the-badge&logo=nvidia)](https://github.com/giangero1/KytyPS5-RTX30-FrameGen)
 [![Frame Gen](https://img.shields.io/badge/Frame%20Gen-2x%20OpenDLSSG%20(85--120%20FPS)-blue?style=for-the-badge)](docs/RTX30_FRAME_GEN_GUIDE.md)
 
 ---
 
 ## 🎯 What is this Fork?
 
-NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **This fork eliminates that restriction for *Demon's Souls* (PS5) on PC**, allowing owners of **NVIDIA GeForce RTX 3070, 3080, 3060, 3090, and RTX 20-series GPUs** to run with **2× DLSS Frame Generation** at smooth **85–120 FPS**:
+NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **This fork eliminates that restriction for *Demon's Souls* (PS5) on PC**, allowing owners of **GeForce RTX 30-Series (Ampere) GPUs (RTX 3060, 3060 Ti, 3070, 3070 Ti, 3080, 3080 Ti, 3090)** to run with **2× DLSS Frame Generation** at smooth **85–120 FPS**:
 
-* 🚀 **2× DLSS Frame Generation on RTX 30/20 Cards**: Bridges the guest 43–60 FPS base simulation to **85–120 displayed FPS** using OpenDLSSG Enabler.
+* 🚀 **2× DLSS Frame Generation on RTX 30-Series (Ampere) Cards**: Bridges the guest 43–60 FPS base simulation to **85–120 displayed FPS** using OpenDLSSG Enabler.
 * 🖼️ **1080p DLSS → 1440p Output Scaling**: Resizes the PS5 Pro DLSS super-resolution processing canvas to your monitor's 1440p resolution instead of forcing a heavy 4K render pass.
 * 💎 **Pixel-Sharp Native 4K UI/HUD Canvas**: Preserves original $3840\times 2160$ layout coordinates for all menus, inventory, and crosshairs with zero blur or stretching.
 * 🛡️ **DXGI 8 GB VRAM Safety Management**: Real-time memory pressure monitoring and automatic cache pruning keeps video memory safely within 8 GB to prevent out-of-memory crashes.
+
+> [!NOTE]
+> **GPU Compatibility:** OpenDLSSG Frame Generation specifically targets **GeForce RTX 30-series (Ampere)** cards. RTX 20-series (Turing) cards cannot run DLSS Frame Generation via OpenDLSSG yet, but fully benefit from the fork's 1080p DLSS CNN model (Preset E) upscaling, 4K UI canvas, and built-in FSR 3.1 frame generation.
 
 ---
 
@@ -28,7 +31,7 @@ NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **Th
 1. **Download the Emulator**:
    📦 **[Download Latest Release: v2026.10.23-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)** (`KytyPS5-v2026.10.23-upstream-merge-Windows-x64.zip`) and extract it.
 
-2. **Add the Frame Gen Prerequisites** (Required for RTX 30/20 FG):
+2. **Add the Frame Gen Prerequisites** (Required for RTX 30-Series FG):
    - Download the [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler/releases) proxy (`version.dll`) and place it directly in the emulator folder next to `kyty_emulator.exe`.
    - Place NVIDIA Streamline DLLs (`sl.interposer.dll`, `sl.dlss.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`) into the `streamline/` directory. *(See the [Detailed Setup Guide](docs/RTX30_FRAME_GEN_GUIDE.md) for step-by-step links).*
 
