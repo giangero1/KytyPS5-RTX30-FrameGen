@@ -1020,7 +1020,9 @@ if((LINUX OR WIN32) AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 	endforeach()
 	add_executable(vulkan_recording_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/VulkanRecordingTests.cpp"
-		"${KYTY_SOURCE_DIR}/local/vulkan-recording.cpp" "${recording_generated}")
+		"${KYTY_SOURCE_DIR}/local/vulkan-recording.cpp"
+		"${KYTY_SOURCE_DIR}/local/local-platform.cpp"
+		"${recording_generated}")
 	target_include_directories(vulkan_recording_tests PRIVATE ${inc_headers} "${CMAKE_CURRENT_BINARY_DIR}")
 	target_link_libraries(vulkan_recording_tests PRIVATE Threads::Threads Vulkan::Headers)
 
