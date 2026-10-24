@@ -1,3 +1,4 @@
+#define SDL_MAIN_HANDLED
 #include "SDL.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
