@@ -661,6 +661,10 @@ bool RestoreGuestWritable(uint64_t /*vaddr*/, uint64_t /*size*/) {
   return false;
 }
 
+bool RestoreGuestProtection(uint64_t /*vaddr*/, uint64_t /*size*/) {
+  return false;
+}
+
 } // namespace Libs::LibKernel::Memory
 
 int main(int argc, char **argv) {
