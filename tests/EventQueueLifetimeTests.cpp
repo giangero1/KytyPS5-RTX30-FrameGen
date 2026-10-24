@@ -10,6 +10,25 @@
 #include <thread>
 #include <vector>
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace LocalPlatform {
+uint32_t ThreadId() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return static_cast<uint32_t>(GetCurrentThreadId());
+#else
+	return static_cast<uint32_t>(gettid());
+#endif
+}
+} // namespace LocalPlatform
+
 namespace {
 
 namespace EventQueue = Libs::LibKernel::EventQueue;
