@@ -1,3 +1,31 @@
+# v2026.10.24-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and gameplay-verified `fc248f60` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261024](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261024)** (`251112bc`) and its contributors. Merged in `0f3ea191`:
+
+- **RAM Guard Page Protection & Blue Screen Prevention (<=20 GB RAM)** (#157, #158, #159, #174): Locked GPU-readback pages in RAM under no-access while preserving guard pages on remaining tracked memory, resolving flickering, missing lighting, and black tile glitches while eliminating `MEMORY_MANAGEMENT` (0x1A) blue screens.
+- **DualSense Bluetooth Speaker Crash Fix & Haptics Tuning**: Resolved crash on launch when initializing the controller speaker over Bluetooth (PR #160, #168). Added controller speaker switch and configurable haptic vibration parameters (`dualsense-haptics.txt`).
+- **1440p Output Option & Squeezed Ultrawide**: Upstream 1440p output support (`run.cmd -OutputHeight 1440`) and experimental squeezed 21:9 aspect ratio handling (`KYTY_WIDE_OUTPUT=0`).
+- **Previous-World Pipeline Sweep Retention** (#85): Retains pipelines for the world just left when transitioning between regions (e.g. Nexus round trips), eliminating pipeline rebuild stutters on 6–8 GB GPUs.
+- **Intel Arc & Fullscreen Improvements**: FSR 3 frame generation queue fallback on single-queue GPUs (#170), automatic mouse cursor hiding after 3 seconds of inactivity, and `KYTY_FULLSCREEN_EXCLUSIVE` toggling.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas (`InterfaceScope`)**, shared SR/FG frame tokens (`g_upscale_token`), and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+The user tested and verified gameplay, DLSS, menus/inventory, and 2× FG on RTX 3070 with zero observed regressions, confirming solid performance with driver 617.42 precompiled shaders.
+
+**Automated validation:** Focused tests passed: `demons_souls_output_tests`, `page_manager_tests`, `save_data_backup_tests`, and `LauncherCommandTests.ps1`. The binary pair is hash-identical to the verified build output.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.10.23-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and gameplay-verified `e29f3100` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the updated official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.

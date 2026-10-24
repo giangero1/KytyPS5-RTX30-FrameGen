@@ -29,7 +29,7 @@ NVIDIA officially restricts DLSS 3 Frame Generation to RTX 40-series cards. **Th
 ```
 
 1. **Download the Emulator**:
-   📦 **[Download Latest Release: v2026.10.23-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)** (`KytyPS5-v2026.10.23-upstream-merge-Windows-x64.zip`) and extract it.
+   📦 **[Download Latest Release: v2026.10.24-upstream-merge](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/releases/latest)** (`KytyPS5-v2026.10.24-upstream-merge-Windows-x64.zip`) and extract it.
 
 2. **Add the Frame Gen Prerequisites** (Required for RTX 30-Series FG):
    - Download the [OpenDLSSG Enabler](https://github.com/rodjunger/opendlssgenabler/releases) proxy (`version.dll`) and place it directly in the emulator folder next to `kyty_emulator.exe`.
