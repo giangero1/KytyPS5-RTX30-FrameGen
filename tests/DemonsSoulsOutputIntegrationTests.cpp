@@ -36,6 +36,8 @@ bool SetLeastHeight(Program*, uint32_t) { return true; }
 namespace DemonsSoulsHdOutput {
 bool Active() { return false; }
 void SetMode(int) {}
+uint32_t UpscaledWidth() { return HdWidth; }
+uint32_t UpscaledHeight() { return HdHeight; }
 }
 }
 
