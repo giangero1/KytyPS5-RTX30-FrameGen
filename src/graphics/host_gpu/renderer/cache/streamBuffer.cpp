@@ -7,7 +7,9 @@
 #include "device-fault.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -29,6 +31,14 @@ namespace Libs::Graphics {
 
 namespace {
 
+bool UseStatsOn() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_STAGING_STATS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
 class BufferReclaimer {
 public:
 	~BufferReclaimer() {
@@ -49,8 +59,39 @@ public:
 	}
 	// Returns once every pushed buffer is destroyed (before the allocator goes away).
 	void Flush() {
+		Release();
 		std::unique_lock lock(m_mutex);
 		m_idle.wait(lock, [this] { return m_pending.empty() && !m_busy; });
+	}
+	// BufferCache::Defragment: no memory is freed here while a pass over the game buffers' pool is open; what is pushed
+	// meanwhile waits for its end. A pass names allocations of erased buffers waiting here, and VMA reads its moves till
+	// the pass ends: freed meanwhile, they were read freed (8 GB GPUs: access violations in vmaGetAllocationInfo from
+	// Defragment, its block gone, 10-23). False while frees are queued or run: the pass waits for a later flip. (Begun
+	// over them, a pass lists allocations of erased buffers, which Defragment can only ignore: each takes a move of the
+	// pass's 64, and VMA counts its block as one it cannot empty.)
+	bool TryHold() {
+		const std::unique_lock freeing(m_free_mutex, std::try_to_lock);
+		if (!freeing.owns_lock()) return false;
+		{
+			const std::lock_guard lock(m_mutex);
+			if (!m_pending.empty() || m_busy) return false;
+		}
+		m_hold = true;
+		return true;
+	}
+	void Release() {
+		std::vector<Item> held;
+		{
+			const std::lock_guard freeing(m_free_mutex);
+			m_hold = false;
+			held.swap(m_held);
+		}
+		if (held.empty()) return;
+		{
+			const std::lock_guard lock(m_mutex);
+			m_pending.insert(m_pending.end(), held.begin(), held.end());
+		}
+		m_wake.notify_one();
 	}
 
 private:
@@ -68,7 +109,14 @@ private:
 			batch.swap(m_pending);
 			m_busy = true;
 			lock.unlock();
-			for (const auto& item: batch) vmaDestroyBuffer(item.allocator, item.buffer, item.allocation);
+			for (const auto& item: batch) {
+				const std::lock_guard freeing(m_free_mutex);
+				if (m_hold && item.allocation != nullptr) {
+					m_held.push_back(item);
+					continue;
+				}
+				vmaDestroyBuffer(item.allocator, item.buffer, item.allocation);
+			}
 			batch.clear();
 			lock.lock();
 			m_busy = false;
@@ -80,6 +128,9 @@ private:
 	std::vector<Item>       m_pending;
 	bool                    m_busy = false, m_stop = false;
 	std::thread             m_thread;
+	std::mutex              m_free_mutex; // (held over each free: TryHold)
+	std::vector<Item>       m_held;
+	bool                    m_hold = false;
 };
 
 BufferReclaimer& Reclaimer() {
@@ -293,6 +344,14 @@ void FlushBufferReclaimer() {
 	Reclaimer().Flush();
 }
 
+bool HoldBufferFrees() {
+	return Reclaimer().TryHold();
+}
+
+void ReleaseBufferFrees() {
+	Reclaimer().Release();
+}
+
 vk::DeviceAddress Buffer::BufferDeviceAddress() const noexcept {
 	EXIT_IF(m_device_address == 0);
 	return m_device_address;
@@ -455,6 +514,7 @@ std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignmen
 		return {nullptr, 0};
 	}
 	if (mapped_size > Size()) {
+		NoteRefusal(mapped_size);
 		return {nullptr, 0};
 	}
 
@@ -475,6 +535,7 @@ std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignmen
 	auto& pending_watches = wrap ? m_current_watches : m_previous_watches;
 	if (!WaitPendingOperations(pending_watches, invalidation_mark, aligned_offset + mapped_size,
 	                           allow_wait, wait_cursor, wait_bound)) {
+		NoteRefusal(mapped_size);
 		return {nullptr, 0};
 	}
 
@@ -487,7 +548,81 @@ std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignmen
 	m_wait_bound  = wait_bound;
 	m_offset      = aligned_offset;
 	m_mapped_size = mapped_size;
+	if (UseStatsOn() && Usage() == MemoryUsage::Upload) NoteUse(mapped_size, wrap);
 	return {Mapped().data() + m_offset, m_offset};
+}
+
+// The bytes the GPU may still read: the reservations of ticks not done, a suffix of the last lap's
+// watches (the earlier ones are done: ticks rise) and of this lap's, and the one just made.
+uint64_t StreamBuffer::InFlight() {
+	const auto first_busy = [this](const std::vector<Watch>& watches, size_t count) {
+		size_t low = 0, high = count;
+		while (low < high) {
+			const size_t middle = (low + high) / 2;
+			if (Scheduler().IsFree(watches[middle].tick)) {
+				low = middle + 1;
+			} else {
+				high = middle;
+			}
+		}
+		return low;
+	};
+	const auto busy_bytes = [&](const std::vector<Watch>& watches, size_t count) -> uint64_t {
+		const size_t first = first_busy(watches, count);
+		if (first >= count) return 0;
+		return watches[count - 1].upper_bound - (first == 0 ? 0 : watches[first - 1].upper_bound);
+	};
+	uint64_t bytes = m_mapped_size;
+	if (m_invalidation_mark.has_value())
+		bytes += busy_bytes(m_previous_watches, *m_invalidation_mark);
+	return bytes + busy_bytes(m_current_watches, m_current_watch_cursor);
+}
+
+void StreamBuffer::NoteRefusal(uint64_t size) {
+	if (!UseStatsOn() || Usage() != MemoryUsage::Upload) return;
+	m_use.refused++;
+	m_use.refused_bytes += size;
+}
+
+void StreamBuffer::NoteBypass(uint64_t size) {
+	if (!UseStatsOn() || Usage() != MemoryUsage::Upload) return;
+	m_use.bypassed++;
+	m_use.bypassed_bytes += size;
+}
+
+void StreamBuffer::NoteUse(uint64_t size, bool wrap) {
+	using Clock    = std::chrono::steady_clock;
+	const auto now = Clock::now();
+	if (m_use.maps == 0) m_use.since = m_use.second = now;
+	m_use.maps++;
+	m_use.bytes += size;
+	m_use.laps += wrap ? 1 : 0;
+	m_use.largest   = std::max(m_use.largest, size);
+	m_use.in_flight = std::max(m_use.in_flight, InFlight());
+	if (now - m_use.second >= std::chrono::seconds(1)) {
+		m_use.busiest      = std::max(m_use.busiest, m_use.second_bytes);
+		m_use.second_bytes = 0;
+		m_use.second       = now;
+	}
+	m_use.second_bytes += size;
+	if (now - m_use.since < std::chrono::seconds(10)) return;
+	m_use.busiest        = std::max(m_use.busiest, m_use.second_bytes);
+	constexpr double mib = 1024.0 * 1024.0;
+	std::printf(
+	    "Upload ring %.0f MiB: %.0f MiB in %.0f s (%llu reservations, largest %.1f MiB, busiest "
+	    "second %.0f MiB), %llu laps, most in flight %.1f MiB, %llu waits for the GPU (%.1f ms), "
+	    "%llu refused (%.0f MiB), %llu around the ring (%.0f MiB)\n",
+	    static_cast<double>(Size()) / mib, static_cast<double>(m_use.bytes) / mib,
+	    std::chrono::duration<double>(now - m_use.since).count(),
+	    static_cast<unsigned long long>(m_use.maps), static_cast<double>(m_use.largest) / mib,
+	    static_cast<double>(m_use.busiest) / mib, static_cast<unsigned long long>(m_use.laps),
+	    static_cast<double>(m_use.in_flight) / mib, static_cast<unsigned long long>(m_use.waits),
+	    static_cast<double>(m_use.wait_us) / 1000.0, static_cast<unsigned long long>(m_use.refused),
+	    static_cast<double>(m_use.refused_bytes) / mib,
+	    static_cast<unsigned long long>(m_use.bypassed),
+	    static_cast<double>(m_use.bypassed_bytes) / mib);
+	std::fflush(stdout);
+	m_use = {};
 }
 
 void StreamBuffer::Commit() {
@@ -527,10 +662,21 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 	}
 	while (requested_upper_bound > wait_bound && wait_cursor < *invalidation_mark) {
 		const auto& watch = watches[wait_cursor];
-		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
+		const bool  busy  = !Scheduler().IsFree(watch.tick);
+		if (busy && !allow_wait) {
 			return false;
 		}
+		const bool timed = busy && UseStatsOn() && Usage() == MemoryUsage::Upload;
+		const auto start =
+		    timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		Scheduler().Wait(watch.tick);
+		if (timed) {
+			m_use.waits++;
+			m_use.wait_us +=
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+			                              std::chrono::steady_clock::now() - start)
+				                          .count());
+		}
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);
 		}

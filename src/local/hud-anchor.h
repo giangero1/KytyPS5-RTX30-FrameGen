@@ -35,7 +35,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cinttypes>
 #include <utility>
+#include <vector>
 
 namespace Libs::Graphics::HudAnchor {
 
@@ -727,6 +729,122 @@ public:
 		Apply(ps, t, output.width, output.height);
 	}
 	KYTY_CLASS_NO_COPY(StretchScope);
+};
+
+// KYTY_OUTPUT_HEIGHT above 1080 (DemonsSoulsHdOutput::InterfaceScaled): the game lays its interface out in the HD
+// layout's 1920x1080 and turns the layout's pixels into clip coordinates by the canvas's own size (2560x1440 for 1440),
+// the viewport the whole canvas: the HUD, the menus, the movies and the loading screens showed at their HD pixels, in
+// the canvas's top left corner. Their draws into a target of the output's size get the viewport scaled by output /
+// 1080 about the canvas's corner, so a layout pixel lands where the output's is (ScaleScope; a masked icon's mask with
+// it; the scissors are the whole canvas). KYTY_OUTPUT_TRACE=1 lists the draws into such targets, a line for each vertex
+// and pixel shader pair.
+inline float OutputScale() {
+	namespace Hd = ::Loader::DemonsSoulsHdOutput;
+	return Hd::InterfaceScaled() ? static_cast<float>(Hd::UpscaledHeight()) / static_cast<float>(Hd::HdHeight) : 0.0f;
+}
+
+inline bool OutputTarget(const HW::Context& ctx) {
+	namespace Hd = ::Loader::DemonsSoulsHdOutput;
+	const auto& target = ctx.GetRenderTarget(0);
+	return target.base.addr != 0 && target.attrib2.width + 1u == Hd::UpscaledWidth() &&
+	       target.attrib2.height + 1u == Hd::UpscaledHeight();
+}
+
+// The HD layout's other draws at 1920x1080 (01.007.000, KYTY_OUTPUT_TRACE): the movies (the intro, the title's backdrop)
+// and the loading screens.
+constexpr std::array<uint64_t, 2> HdLayoutShaders {0x05ca0d08ae41fd2eULL, 0xa64d43c72c1c5c87ULL};
+
+inline bool Scaled(const HW::Context& ctx, const HW::VertexShaderInfo& vs, const HW::PixelShaderInfo& ps) {
+	if (OutputScale() <= 0.0f || !OutputTarget(ctx)) return false;
+	const uint64_t hash   = HashAt(vs.es_regs.data_addr);
+	const bool     scaled = hash == PixelShader || std::find(ClipShaders.begin(), ClipShaders.end(), hash) != ClipShaders.end() ||
+	                    std::find(HdLayoutShaders.begin(), HdLayoutShaders.end(), hash) != HdLayoutShaders.end();
+	static const bool trace = [] {
+		const char* value = std::getenv("KYTY_OUTPUT_TRACE");
+		return value != nullptr && *value != 0 && *value != '0';
+	}();
+	if (trace) {
+		static std::vector<std::pair<uint64_t, uint64_t>> seen;
+		const auto pair = std::make_pair(hash, PixelShaderHash(ps));
+		if (seen.size() < 400 && std::find(seen.begin(), seen.end(), pair) == seen.end()) {
+			seen.push_back(pair);
+			const auto& screen   = ctx.GetScreenViewport();
+			const auto& viewport = screen.viewports[0];
+			std::printf("Output trace: frame %" PRIu64 " vs %016" PRIx64 " ps %016" PRIx64 " viewport (%.0f,%.0f) %.0fx%.0f "
+			            "scissors (%d,%d)-(%d,%d) (%d,%d)-(%d,%d)%s\n",
+			            g_state.frame, pair.first, pair.second, viewport.xoffset - std::fabs(viewport.xscale),
+			            viewport.yoffset - std::fabs(viewport.yscale), 2.0f * std::fabs(viewport.xscale),
+			            2.0f * std::fabs(viewport.yscale), screen.generic_scissor_left, screen.generic_scissor_top,
+			            screen.generic_scissor_right, screen.generic_scissor_bottom, viewport.viewport_scissor_left,
+			            viewport.viewport_scissor_top, viewport.viewport_scissor_right, viewport.viewport_scissor_bottom,
+			            scaled ? " -> scaled" : "");
+			std::fflush(stdout);
+		}
+	}
+	return scaled;
+}
+
+class ScaleScope {
+public:
+	ScaleScope(HW::Context& ctx, const HW::PixelShaderInfo& ps): m_ctx(&ctx), m_screen(ctx.GetScreenViewport()) {
+		namespace Hd = ::Loader::DemonsSoulsHdOutput;
+		const float k        = OutputScale();
+		const auto  width    = static_cast<int>(Hd::UpscaledWidth());
+		const auto  height   = static_cast<int>(Hd::UpscaledHeight());
+		const auto& viewport = m_screen.viewports[0];
+		const auto  scale    = [&](int v, int most) { return std::clamp(static_cast<int>(std::lround(v * k)), 0, most); };
+		// (window = offset + clip * scale: both times k, a layout pixel p at k * p.)
+		ctx.SetViewportXScale(0, viewport.xscale * k);
+		ctx.SetViewportXOffset(0, viewport.xoffset * k);
+		ctx.SetViewportYScale(0, viewport.yscale * k);
+		ctx.SetViewportYOffset(0, viewport.yoffset * k);
+		// (A scissor over the whole canvas stays so; a narrower one, in the layout's pixels as the positions are, is scaled.)
+		const auto whole = [&](int left, int top, int right, int bottom) {
+			return left <= 0 && top <= 0 && right >= width - 1 && bottom >= height - 1;
+		};
+		if (!whole(m_screen.generic_scissor_left, m_screen.generic_scissor_top, m_screen.generic_scissor_right,
+		           m_screen.generic_scissor_bottom))
+			ctx.SetGenericScissor(scale(m_screen.generic_scissor_left, width), scale(m_screen.generic_scissor_top, height),
+			                      scale(m_screen.generic_scissor_right, width), scale(m_screen.generic_scissor_bottom, height),
+			                      m_screen.generic_scissor_window_offset_enable);
+		if (!whole(viewport.viewport_scissor_left, viewport.viewport_scissor_top, viewport.viewport_scissor_right,
+		           viewport.viewport_scissor_bottom))
+			ctx.SetViewportScissor(0, scale(viewport.viewport_scissor_left, width), scale(viewport.viewport_scissor_top, height),
+			                       scale(viewport.viewport_scissor_right, width), scale(viewport.viewport_scissor_bottom, height),
+			                       viewport.viewport_scissor_window_offset_enable);
+		PatchMask(ps, k, 0.0f, k); // (only a masked icon's)
+		Changed();
+		static bool reported = false;
+		if (!reported) {
+			reported = true;
+			std::printf("Demon's Souls output: the interface's HD layout scaled %.3fx to the %dx%d output\n", k, width, height);
+			std::fflush(stdout);
+		}
+	}
+	~ScaleScope() {
+		const auto& viewport = m_screen.viewports[0];
+		m_ctx->SetViewportXScale(0, viewport.xscale);
+		m_ctx->SetViewportXOffset(0, viewport.xoffset);
+		m_ctx->SetViewportYScale(0, viewport.yscale);
+		m_ctx->SetViewportYOffset(0, viewport.yoffset);
+		m_ctx->SetGenericScissor(m_screen.generic_scissor_left, m_screen.generic_scissor_top, m_screen.generic_scissor_right,
+		                         m_screen.generic_scissor_bottom, m_screen.generic_scissor_window_offset_enable);
+		m_ctx->SetViewportScissor(0, viewport.viewport_scissor_left, viewport.viewport_scissor_top,
+		                          viewport.viewport_scissor_right, viewport.viewport_scissor_bottom,
+		                          viewport.viewport_scissor_window_offset_enable);
+		Changed();
+	}
+	KYTY_CLASS_NO_COPY(ScaleScope);
+
+private:
+	static void Changed() {
+		auto& shadow = DrawStateObserver::g_shadow;
+		shadow.key_changes |= 1u;
+		shadow.dirty = true;
+	}
+
+	HW::Context*       m_ctx = nullptr;
+	HW::ScreenViewport m_screen; // (as it was)
 };
 
 } // namespace Libs::Graphics::HudAnchor

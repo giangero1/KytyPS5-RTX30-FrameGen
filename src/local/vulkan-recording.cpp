@@ -4,6 +4,7 @@
 #include "live-counters.h"
 #include "live-trace-gpu.h"
 #include "local-platform.h"
+#include "spin-gate.h"
 #include "time-census.h"
 
 #include <array>
@@ -283,12 +284,13 @@ private:
             if ((current & 4095u) == 0) KeepAffinity();
             for (auto ready = published.load(std::memory_order_acquire); current == ready;
                  ready = published.load(std::memory_order_acquire)) {
-                const uint32_t spins = kyty_local_recording_spin.load(std::memory_order_relaxed);
+                const uint32_t spins = SpinGate::Open(true) ? kyty_local_recording_spin.load(std::memory_order_relaxed) : 0;
                 for (uint32_t spin = 0; spin < spins && ready == current; ++spin) {
                     _mm_pause();
                     ready = published.load(std::memory_order_acquire);
                 }
                 if (ready != current) break;
+                LiveCounters::Add(LiveCounters::RecordSleeps);
                 sleeping.store(true, std::memory_order_seq_cst);
                 if (published.load(std::memory_order_seq_cst) == current)
                     published.wait(current, std::memory_order_seq_cst);

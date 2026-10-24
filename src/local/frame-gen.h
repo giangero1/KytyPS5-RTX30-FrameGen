@@ -233,8 +233,12 @@ void PrepareUpscale(UpscaleInputs& inputs);
 // (general layout), `region` where the game image is in it. Records into `command` the frames between the last frame
 // given and this one, into `outputs` (general layout, storage; in order), and returns how many to show before this
 // frame: none for a frame without inputs (a menu, a movie), or the first one after such frames (no frame to start from).
+// `hdr`: the backbuffer is HDR10 (PQ; FSR 3 built in only, PresenterGeneratesHdr).
 [[nodiscard]] uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const FrameInputs* inputs,
-                                const UpscaleImage& backbuffer, vk::Rect2D region, std::span<const UpscaleImage> outputs);
+                                const UpscaleImage& backbuffer, vk::Rect2D region, std::span<const UpscaleImage> outputs,
+                                bool hdr = false);
+// Whether the presenter's generation takes HDR10 frames too (FSR 3 built in; NGX's DLSS-G here only SDR ones).
+[[nodiscard]] bool PresenterGeneratesHdr();
 // Present thread: the frames the last rendered frame was shown as (1 + the generated ones), for PresentedFrames.
 void NotePresented(uint32_t frames);
 

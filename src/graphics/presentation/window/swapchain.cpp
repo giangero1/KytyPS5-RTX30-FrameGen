@@ -798,7 +798,7 @@ struct Presenter::Impl {
 			const FrameGen::UpscaleImage backbuffer {composed.image, composed_view, vk::ImageLayout::eGeneral, format, extent,
 			                                         composed.usage, 0, 0};
 			count = FrameGen::Generate(window.graphic_ctx, command.Handle(), frame.fg.valid && !frame.reusing_last ? &frame.fg : nullptr,
-			                           backbuffer, swapchain.PresentRegion(), outputs);
+			                           backbuffer, swapchain.PresentRegion(), outputs, frame.hdr);
 			// (A live `screenshot`: the finished frame and the frame generated before it.)
 			const auto shot      = Screenshot::Take();
 			auto       capture   = Screenshot::Record(window.graphic_ctx, command.Handle(), composed, shot);
@@ -1017,6 +1017,20 @@ void Swapchain::Create() {
 	}
 	m_fifo.store(create_info.presentMode == vk::PresentModeKHR::eFifo, std::memory_order_relaxed);
 	create_info.clipped          = VK_TRUE;
+#if defined(_WIN32)
+	// KYTY_FULLSCREEN_EXCLUSIVE (GraphicContext::full_screen_exclusive, issue #166): exclusive fullscreen disallowed or
+	// allowed. (VkSurfaceFullScreenExclusiveInfoEXT is vulkan_win32.h's, not included here: its layout.)
+	struct {
+		VkStructureType sType                 = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
+		const void*     pNext                 = nullptr;
+		int32_t         full_screen_exclusive = 0; // VkFullScreenExclusiveEXT: 1 allowed, 2 disallowed
+	} exclusive;
+	if (graphics.full_screen_exclusive >= 0) {
+		exclusive.pNext                 = create_info.pNext;
+		exclusive.full_screen_exclusive = graphics.full_screen_exclusive == 0 ? 2 : 1;
+		create_info.pNext               = &exclusive;
+	}
+#endif
 	// KYTY_FRAMEGEN_BACKEND=fsr: FSR's frame generation swapchain, made and used through its own functions.
 	if (FrameGen::OwnsSwapchain()) {
 		RequireVulkanSuccess(FrameGen::CreateSwapchain(graphics, create_info, &m_handle), "FSR frame generation swapchain");
@@ -1387,10 +1401,14 @@ Swapchain::Status Swapchain::Present() {
 	present.waitSemaphoreCount = 1;
 
 	vk::Result result;
-	if (auto& graphics = m_window.graphic_ctx; FrameGen::OwnsSwapchain()) {
+	if (auto& graphics = m_window.graphic_ctx; FrameGen::OwnsSwapchain() && graphics.present_queue != nullptr) {
 		// FSR's swapchain: its game queue is the present queue (FrameGen::CreateSwapchain).
 		Common::LockGuard lock(graphics.present_queue_mutex);
 		result = FrameGen::QueuePresent(graphics.present_queue, present);
+	} else if (FrameGen::OwnsSwapchain()) {
+		// ... or the graphics queue, without a present queue (issue #170: one graphics queue).
+		Common::LockGuard lock(graphics.queue_mutex);
+		result = FrameGen::QueuePresent(graphics.queue, present);
 	} else if (graphics.present_queue != nullptr) {
 		// Its own queue: a present blocked in the kernel does not hold up other submissions.
 		Common::LockGuard lock(graphics.present_queue_mutex);
@@ -1607,10 +1625,11 @@ void Presenter::Present(Frame& frame, bool reuse) {
 	KYTY_PROFILER_FUNCTION();
 	m_impl->frames.ValidateForPresent(&frame, reuse);
 #if defined(__linux__)
-	// Linux frame generation: a new frame, and those NGX makes before it (PresentGenerated). A cleared or HDR frame goes
-	// the normal way, and DLSS-G starts again after it; a last frame shown again (an idle refresh) is not new.
+	// Linux frame generation: a new frame, and those NGX makes before it (PresentGenerated). A cleared frame, or an HDR
+	// one for DLSS-G (FSR 3 built in takes PQ frames too), goes the normal way, and generation starts again after it; a
+	// last frame shown again (an idle refresh) is not new.
 	if (FrameGen::PresenterGenerates() && !reuse) {
-		if (!frame.blank && !frame.hdr && m_impl->PresentGenerated(frame)) return;
+		if (!frame.blank && (!frame.hdr || FrameGen::PresenterGeneratesHdr()) && m_impl->PresentGenerated(frame)) return;
 		FrameGen::SwapchainChanging();
 	}
 #endif

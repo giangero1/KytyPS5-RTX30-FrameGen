@@ -132,6 +132,9 @@ void                   TrimGuestRange(uint64_t vaddr, uint64_t size);
 // Linux, the texture offload: the pages of [address, address + size) of the backing view freed, in
 // every view of them (a later read gets zeros). False elsewhere.
 bool DiscardBacking(uint64_t address, uint64_t size);
+// Linux, the file offload: the byte at `address` of the backing view in a second read-write view of
+// the backing store, which protections of the backing view leave alone. Null elsewhere.
+uint8_t* SpareBackingPointer(uint64_t address);
 // The backing view (every guest mapping's bytes, at their backing offset): its base and size; false when there is none.
 bool                   BackingView(uint64_t* base, uint64_t* size);
 // Diagnostics (live `ranges`): the guest's virtual ranges (start, size, direct memory offset, protection, memory type,
@@ -163,6 +166,8 @@ bool                   TryReadMappedOrZero(uint64_t vaddr, void* data, uint64_t 
 // A page no GPU watcher holds that still faults on writes: back to the guest's own writable
 // protection. False when the guest itself made the range read-only (or it is unknown).
 bool                   RestoreGuestWritable(uint64_t vaddr, uint64_t size);
+// The guest's own protection of [vaddr, vaddr + size) (one guest mapping), whatever it is.
+bool                   RestoreGuestProtection(uint64_t vaddr, uint64_t size);
 bool                   TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t size,
                                          const char** failure_reason = nullptr);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
@@ -200,6 +205,15 @@ void                   InstallGpuResources(Graphics::GpuResourceManager* resourc
 // Whether the address is in a view a partial unmap is mapping again (Windows; statistics: remap_window_writes).
 [[nodiscard]] bool     InRemapWindow(uint64_t vaddr) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
+// Windows with guard pages: the pages read back lately that were not for a while get guards again (the render thread's,
+// once a frame; GuestAddressSpace::CoolHotReads).
+void CoolHotReads();
+// Windows: the texture offload is about to give part of the backing view no access or discard it (texture-offload.h); the
+// pages read back there leave GuestAddressSpace::NoteRead's set, their locks with them.
+void DropHotReadsBacking(uint64_t backing, uint64_t size);
+// Windows: whether a no-access protection is a guard page (KYTY_READ_GUARD, kyty_local_read_guard); the texture
+// offload's backing view takes the same (texture-offload.h Protect). False elsewhere.
+[[nodiscard]] bool ReadGuardsOn();
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);

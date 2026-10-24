@@ -35,6 +35,10 @@ struct GraphicContext {
 	bool                               memory_budget_ext_enabled             = false;
 	// VK_EXT_memory_priority, enabled only for KYTY_SIMULATE_VRAM_MB (vma.cpp).
 	bool                               memory_priority_enabled               = false;
+	// KYTY_FULLSCREEN_EXCLUSIVE=0|1 (Windows, issue #166): the swapchain asks the driver to keep out of exclusive
+	// fullscreen (0) or allows it (1), through VK_EXT_full_screen_exclusive; -1 (unset, or the extension missing): the
+	// driver's own choice.
+	int                                full_screen_exclusive                 = -1;
 	bool                               compute_subgroup_size_control_enabled = false;
 	// A pipeline may require 64-lane subgroups of its pixel shader (KYTY_PS_WAVE64).
 	bool                               fragment_wave64_requirable            = false;
@@ -93,12 +97,13 @@ struct GraphicContext {
 	vk::Queue                          present_queue = nullptr;
 	bool                               present_queue_created = false; // queue index 1 of queue_family
 	// KYTY_FRAMEGEN_BACKEND=fsr: the queues of FSR's frame generation swapchain (frame-gen.cpp), its own: presents and
-	// UI composition (queue index 2 of queue_family), async compute and image acquires (a compute-only family). Null
-	// without FSR.
+	// UI composition (queue index 2 of queue_family, or with fewer graphics queues index 2 of the compute family, which
+	// then can present), async compute and image acquires (a compute-only family). Null without FSR.
 	vk::Queue                          fsr_present_queue = nullptr;
 	vk::Queue                          fsr_compute_queue = nullptr;
 	vk::Queue                          fsr_acquire_queue = nullptr;
 	uint32_t                           fsr_compute_family = static_cast<uint32_t>(-1);
+	uint32_t                           fsr_present_family = static_cast<uint32_t>(-1);
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;

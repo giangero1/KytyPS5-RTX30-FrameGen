@@ -384,8 +384,10 @@ The finished application and its runtime dependencies will be placed in
 
 ### Building on Linux
 
-`./build-linux.sh` builds the emulator alone (no Qt launcher) in one step: `./build-linux.sh` builds
-`kyty_emulator`, `./build-linux.sh kyty_shader_precompile` another target. It uses `-O3`, ThinLTO and
+`./build-linux.sh` builds the emulator (no Qt launcher) in one step: `./build-linux.sh` builds
+`kyty_emulator` and `kyty_launcher`, `./build-linux.sh kyty_shader_precompile` another target. `kyty_launcher`
+([`launcher-linux/`](launcher-linux)) is the settings window, the Windows launcher's pages and settings with SDL2 and
+Dear ImGui linked in (nothing to install); it starts the game through `run_ds.sh`. It uses `-O3`, ThinLTO and
 `-march=x86-64-v3` for an executable other PCs can run (`KYTY_MARCH=native` for this CPU only). The
 manual steps below build the Qt launcher as well. `tools/local/dlss-bridge/build-dlss-linux.sh` adds DLSS
 (`tools/local/dlss-bridge/README.md`), and `./precompile-linux.sh --game <the game>` makes the static shader cache

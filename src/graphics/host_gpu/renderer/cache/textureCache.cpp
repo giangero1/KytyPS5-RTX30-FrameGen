@@ -24,6 +24,7 @@
 #include "live-counters.h"
 #include "local-platform.h"
 #include "native-resource-state.h"
+#include "scene-tags.h"
 
 #include <algorithm>
 #include <array>
@@ -385,12 +386,17 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	// below it a kept image costs nothing, a deleted one an upload when the game uses it again.
 	m_trigger_gc_memory = m_graphics.GetTotalMemoryBudget();
 #if KYTY_TEXTURE_OFFLOAD_SUPPORTED
-	if (TextureOffload::Enabled()) {
+	if (TextureOffload::AnyEnabled()) {
 		const bool offload = TextureOffload::GetMode() == TextureOffload::Mode::Offload;
 		g_offload_cache    = this;
 		g_offload_alive.store(true, std::memory_order_release);
 		auto& state = TextureOffload::Get();
-		state.remove.store(+[](uint64_t vaddr, uint64_t size) { g_offload_cache->m_page_manager.UpdateReadWatchers<false>(vaddr, size); });
+		// (Every page then gets the protection the page manager has for it: the touch let reads
+		// through (TouchLocked), and a page other read watchers hold (the GPU wrote it) keeps its
+		// no access without a change the hold's end would make.)
+		state.remove.store(+[](uint64_t vaddr, uint64_t size) {
+			g_offload_cache->m_page_manager.UpdateReadWatchers<false, true>(vaddr, size);
+		});
 		if (offload) {
 			// A restore on the render thread; from a game thread through it (as a guest readback: BufferCache::ReadMemory).
 			state.restore.store(+[](uint64_t vaddr, uint64_t size, TextureOffload::Touch touch) {
@@ -409,12 +415,34 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 				if (AsyncUpload::t_worker || CommandScheduler::InDeferredOperation()) return false;
 				return GuestGpu::IsGpuThread() || LibKernel::PthreadSelfOrNull() != nullptr;
 			});
+			// (A host write's wait for the asynchronous restores under it, on the render thread:
+			// their downloads go first.)
+			state.submit.store(+[] {
+				auto* cache = g_offload_cache;
+				if (cache == nullptr || !g_offload_alive.load(std::memory_order_acquire) ||
+				    !GuestGpu::IsGpuThread() || CommandScheduler::InDeferredOperation() ||
+				    !cache->m_offload_unsubmitted)
+					return;
+				cache->m_offload_unsubmitted = false;
+				cache->m_scheduler.Flush();
+			});
 		}
 		Common::HostException::SetProbeHandler(TextureOffload::OnFault);
-		std::printf(offload ? "Texture offload: on (the guest bytes of clean sampled textures of 256 KiB or more dropped from RAM "
-		                      "after 2 s clean and a download that gives them back exactly; KYTY_TEXTURE_OFFLOAD=0 keeps them)\n"
-		                    : "Texture offload probe: on (clean sampled textures of 256 KiB or more made inaccessible after 2 s "
-		                      "clean; nothing discarded)\n");
+		if (FileOffload::Enabled()) {
+			std::printf(FileOffload::GetMode() == FileOffload::Mode::Offload
+			                ? "File offload: on (APR-read guest pages still equal to their files "
+			                  "dropped from RAM, read back from the files when touched)\n"
+			                : "File offload probe: on (APR-read guest pages still equal to their "
+			                  "files made inaccessible; touches counted, nothing dropped)\n");
+		}
+		if (TextureOffload::Enabled()) {
+			std::printf(offload ? "Texture offload: on (the guest bytes of clean sampled textures "
+			                      "of 256 KiB or more dropped from RAM after 2 s clean and a "
+			                      "download that gives them back exactly; KYTY_TEXTURE_OFFLOAD=0 "
+			                      "keeps them)\n"
+			                    : "Texture offload probe: on (clean sampled textures of 256 KiB or "
+			                      "more made inaccessible after 2 s clean; nothing discarded)\n");
+		}
 	}
 #endif
 }
@@ -1079,9 +1107,12 @@ bool TextureCache::PartialDirtyCandidate(const Image& image) {
 bool TextureCache::TryInvalidatePartial(Image& image, uint64_t address, uint64_t size,
                                         uint64_t granule) {
 	const auto& info = image.info;
+	// (With GPU buffer writes over known ranges of it too: a refresh uploads those with the dirty ranges, InitializeImage.
+	// One written all over, or where not known, goes up whole anyway.)
 	if (!PartialDirtyCandidate(image) || !image.registered || !image.IsTracked() ||
 	    image.track_addr != info.data.address || image.track_addr_end != info.data.End() ||
-	    !image.CanTakePartialDirty() || image.IsBufferModified() || image.IsStencilModified()) {
+	    !image.CanTakePartialDirty() || (image.IsBufferModified() && image.BufferModifiedRanges().empty()) ||
+	    image.IsStencilModified()) {
 		return false;
 	}
 	const auto base  = info.data.address;
@@ -2094,10 +2125,13 @@ void TextureCache::InitializeImage(ImageId id) {
 	using Clock = std::chrono::steady_clock;
 	auto&             image = m_slot_images[id];
 	Clock::time_point marks[3] {Clock::now()};
-	const char*       kind = image.IsPartiallyCpuDirty() ? "partial"
-	                         : image.IsBufferModified()  ? "buffer"
-	                         : image.IsCpuDirty()        ? "cpu"
-	                                                     : "clean";
+	// (buffer: GPU buffer writes over known ranges; buffer-all: over all of it or where not known; +cpu: and CPU writes)
+	const bool        buffer_all = image.IsBufferModified() && image.BufferModifiedRanges().empty();
+	const bool        cpu        = image.IsCpuDirty();
+	const char*       kind = image.IsPartiallyCpuDirty() ? (image.IsBufferModified() ? "partial+buffer" : "partial")
+	                         : !image.IsBufferModified() ? (cpu ? "cpu" : "clean")
+	                         : buffer_all                ? (cpu ? "buffer-all+cpu" : "buffer-all")
+	                                                     : (cpu ? "buffer+cpu" : "buffer");
 	SlowLog::Scope    slow([&](double ms) {
         const auto at = [&](int i) {
             return marks[i] == Clock::time_point {}
@@ -2487,7 +2521,24 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 	}
 	std::sort(order.begin(), order.end(),
 	          [&](size_t left, size_t right) { return plan.tiles[left].tiled_offset < plan.tiles[right].tiled_offset; });
-	const auto                       start = std::chrono::steady_clock::now();
+	// A whole upload's tiles over no mapped guest memory: zeros, what their staged copy reads (ReadMappedOrZero),
+	// written on the GPU instead of staged, detiled and copied. Texture pools' released layers were most of their bytes
+	// at Stonefang 2-1's entry (10-23: 202 of 352 MiB and 167 of 256 MiB; a 1.47 GB pool's upload made a 780 ms
+	// frame with an 8 GB video memory budget, 234 ms with 32 GB).
+	std::vector<bool> unmapped;
+	if (only == nullptr) {
+		RangeSet mapped;
+		m_buffer_cache.MappedRanges(base, info.data.size, mapped);
+		unmapped.resize(plan.tiles.size());
+		// (Not over GPU-written bytes: their upload reads the buffer the GPU wrote, ObtainBufferForImage's "gpu" path.)
+		for (size_t index = 0; index < plan.tiles.size(); index++) {
+			const auto& tile = plan.tiles[index];
+			unmapped[index]  = !mapped.Intersects(base + tile.tiled_offset, tile.tiled_size) &&
+			                  !m_buffer_cache.IsRegionGpuModified(base + tile.tiled_offset, tile.tiled_size);
+		}
+	}
+	const auto skipped = [&](size_t index) { return !unmapped.empty() && unmapped[index]; };
+	const auto start   = std::chrono::steady_clock::now();
 	std::vector<GpuTileInfo>         tiles;
 	std::vector<vk::BufferImageCopy> regions;
 	uint64_t                         pieces     = 0;
@@ -2497,7 +2548,7 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 		const auto& first   = plan.tiles[order[at]];
 		uint64_t    begin   = base + first.tiled_offset;
 		uint64_t    end     = begin + first.tiled_size;
-		if (!selected(begin, end)) {
+		if (!selected(begin, end) || skipped(order[at])) {
 			at++;
 			continue;
 		}
@@ -2508,7 +2559,7 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 			const uint64_t tile_begin = base + tile.tiled_offset;
 			const uint64_t tile_end   = tile_begin + tile.tiled_size;
 			if (std::max(end, tile_end) - begin > ChunkedUploadPiece || !selected(tile_begin, tile_end) ||
-			    m_buffer_cache.IsRegionGpuModified(tile_begin, tile.tiled_size)) {
+			    skipped(order[next]) || m_buffer_cache.IsRegionGpuModified(tile_begin, tile.tiled_size)) {
 				break;
 			}
 			end = std::max(end, tile_end);
@@ -2545,6 +2596,27 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 		uploaded += end - begin;
 		at = next;
 	}
+	uint64_t zero_bytes = 0;
+	if (!unmapped.empty()) {
+		uint64_t zero_size = 0;
+		regions.clear();
+		for (size_t index = 0; index < plan.tiles.size(); index++) {
+			if (!unmapped[index]) continue;
+			auto region = plan.regions[index];
+			region.bufferOffset -= plan.tiles[index].linear_offset; // (into one tile's zeros: they all read the same)
+			regions.push_back(region);
+			zero_size = std::max(zero_size, plan.tiles[index].linear_size);
+			zero_bytes += plan.tiles[index].tiled_size;
+		}
+		if (!regions.empty()) {
+			const auto zeros = m_tiler.GetScratchBuffer(zero_size);
+			m_scheduler.EndRendering();
+			m_scheduler.Current().Handle().fillBuffer(zeros.buffer, zeros.offset, zeros.size, 0);
+			for (auto& region: regions) region.bufferOffset += zeros.offset;
+			image.Upload(regions, zeros.buffer, zeros.offset, zeros.size); // (its barrier waits for the fill)
+			LiveCounters::Add(LiveCounters::UnmappedUploadBytes, zero_bytes);
+		}
+	}
 	if (only != nullptr) {
 		LiveCounters::Add(LiveCounters::PartialUploads);
 		LiveCounters::Add(LiveCounters::PartialUploadBytes, uploaded);
@@ -2567,10 +2639,10 @@ bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<
 	static std::atomic<uint32_t> reports {0};
 	if (reports.fetch_add(1, std::memory_order_relaxed) < 64) {
 		std::printf("TextureCache: chunked upload addr=0x%llx size=0x%llx layers=%u levels=%u: %llu pieces (%llu with "
-		            "GPU-written bytes) in %.1f ms\n",
+		            "GPU-written bytes), %llu MiB over unmapped memory as zeros, in %.1f ms\n",
 		            static_cast<unsigned long long>(base), static_cast<unsigned long long>(info.data.size),
 		            info.resources.layers, info.resources.levels, static_cast<unsigned long long>(pieces),
-		            static_cast<unsigned long long>(gpu_pieces),
+		            static_cast<unsigned long long>(gpu_pieces), static_cast<unsigned long long>(zero_bytes >> 20u),
 		            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 	}
 	return true;
@@ -3429,6 +3501,34 @@ bool TextureCache::NewImageStartsSince(uint64_t epoch, std::vector<std::pair<uin
 	return true;
 }
 
+ImageId TextureCache::FindImageAt(uint64_t address, uint32_t width, uint32_t height, vk::Format format, uint32_t* count) {
+	if (count != nullptr) *count = 0;
+	if (!GuestRange {address, 1}.Valid()) {
+		return {};
+	}
+	std::scoped_lock lock {m_lock};
+	if (!MayStartAt(address) || !m_image_starts.contains(address)) {
+		return {};
+	}
+	ImageId  selected {};
+	uint64_t last = 0;
+	for (const auto id: FindImagesInRegion(address, 1, false)) {
+		const auto* image = m_slot_images.try_get(id);
+		if (image == nullptr || image->info.data.address != address) continue;
+		if (count != nullptr) ++*count;
+		if (image->backing.image == nullptr || image->backing.extent.width != width ||
+		    image->backing.extent.height != height ||
+		    (format != vk::Format::eUndefined && image->backing.format != format)) {
+			continue;
+		}
+		if (!selected || image->frame_accessed_last >= last) {
+			selected = id;
+			last     = image->frame_accessed_last;
+		}
+	}
+	return selected;
+}
+
 ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool ensure_valid) {
 	if (!GuestRange {address, size}.Valid()) {
 		return {};
@@ -4052,6 +4152,10 @@ void TextureCache::OffloadScan(uint64_t tick) {
 		m_scheduler.Flush();
 	}
 	if (tick % 120 != 0) return;
+#if KYTY_FILE_OFFLOAD_SUPPORTED
+	if (FileOffload::Enabled()) OffloadFiles();
+#endif
+	if (!TextureOffload::Enabled()) return;
 	// (Diagnostics: where a scan's time goes, printed when it took 10 ms or more.)
 	using Clock          = std::chrono::steady_clock;
 	const auto scan_start = Clock::now();
@@ -4152,10 +4256,14 @@ void TextureCache::OffloadScan(uint64_t tick) {
 		auto mark = Clock::now();
 		if (offload) AsyncUpload::DrainRange(begin, end - begin);
 		ms[1] += since(mark);
-		TextureOffload::Add(begin, end - begin, pieces, image.serial, (static_cast<uint64_t>(id.generation) << 32u) | id.index,
-		                    offload);
 		mark = Clock::now();
-		m_page_manager.UpdateReadWatchers<true>(begin, end - begin);
+		TextureOffload::Add(begin, end - begin, pieces, image.serial,
+		                    (static_cast<uint64_t>(id.generation) << 32u) | id.index, offload, [&] {
+			                    m_page_manager.UpdateReadWatchers<true>(begin, end - begin);
+			                    // (Its no access now, not with this thread's other deferred
+			                    // ones: TextureOffload::Add.)
+			                    PageManager::FlushDeferredProtection(begin, end - begin);
+		                    });
 		ms[2] += since(mark);
 		if (offload) {
 			discards.emplace_back(begin, end - begin);
@@ -4260,11 +4368,114 @@ void TextureCache::OffloadScan(uint64_t tick) {
 #endif
 }
 
+#if KYTY_FILE_OFFLOAD_SUPPORTED
+// The offload worker's compares of a scan's file ranges (CheckFileRange) 8 MiB at a time, each
+// batch posting the next: an image's asynchronous restore posted meanwhile, which threads wait for,
+// runs between two batches, not after a whole scan's (up to 256 MiB of reads and compares).
+static void PostFileChecks(std::shared_ptr<std::vector<std::pair<uint64_t, uint64_t>>> taken,
+                           size_t first, bool drop) {
+	OffloadWorker::Post([taken = std::move(taken), first, drop]() mutable {
+		constexpr uint64_t Batch = uint64_t {8} << 20u;
+		uint64_t           bytes = 0;
+		size_t             next  = first;
+		for (; next < taken->size() && bytes < Batch; ++next) {
+			TextureOffload::CheckFileRange((*taken)[next].first, drop);
+			bytes += (*taken)[next].second;
+		}
+		if (next < taken->size()) PostFileChecks(std::move(taken), next, drop);
+	});
+}
+#endif
+
+// KYTY_FILE_OFFLOAD (file-offload.h; from OffloadScan, every 120 flips): pieces of APR reads that
+// no read replaced for 10 s are taken (the page manager's hold on the guest view, no access in the
+// backing view: each touch faults from now on) and compared with their files by the offload
+// worker, which drops the equal ones (KYTY_FILE_OFFLOAD=1).
+void TextureCache::OffloadFiles() {
+#if KYTY_FILE_OFFLOAD_SUPPORTED
+	static const auto age = [] {
+		const char* value = std::getenv("KYTY_FILE_OFFLOAD_AGE");
+		return std::chrono::seconds(
+		    value != nullptr && value[0] != '\0' ? std::strtoull(value, nullptr, 10) : 10);
+	}();
+	// (KYTY_FILE_OFFLOAD_SCAN_MB, default 256: the bytes a scan takes;
+	// KYTY_FILE_OFFLOAD_SCAN_RANGES, default 256: the ranges, each a hold and protection changes on
+	// this thread.)
+	static const uint64_t budget = [] {
+		const char* value = std::getenv("KYTY_FILE_OFFLOAD_SCAN_MB");
+		return (value != nullptr && value[0] != '\0' ? std::strtoull(value, nullptr, 10)
+		                                             : uint64_t {256})
+		       << 20u;
+	}();
+	static const size_t count = [] {
+		const char* value = std::getenv("KYTY_FILE_OFFLOAD_SCAN_RANGES");
+		return static_cast<size_t>(
+		    value != nullptr && value[0] != '\0' ? std::strtoull(value, nullptr, 10) : 256);
+	}();
+	const auto start = std::chrono::steady_clock::now();
+	const bool drop  = FileOffload::GetMode() == FileOffload::Mode::Offload;
+	auto       taken = std::make_shared<std::vector<std::pair<uint64_t, uint64_t>>>();
+	// (As IsRegionGpuModified, under the lock this thread holds: OffloadScan's caller.)
+	const auto gpu_written = [&](uint64_t begin, uint64_t size) {
+		if (m_buffer_cache.IsRegionGpuModified(begin, size)) return true;
+		for (const auto id: FindImagesInRegion(begin, size, false)) {
+			const auto& image = m_slot_images[id];
+			if (!image.depth_id && image.IsGpuModified() && !image.IsDefinitelyCpuDirty())
+				return true;
+		}
+		return false;
+	};
+	for (const auto& candidate: FileOffload::Take(age, budget, count)) {
+		const uint64_t                     size = candidate.end - candidate.begin;
+		std::vector<TextureOffload::Piece> pieces;
+		uint64_t                           covered = 0;
+		for (uint64_t at = candidate.begin; at < candidate.end;) {
+			const auto  mapping_end = Libs::LibKernel::Memory::BackingMappingEnd(at);
+			const auto  piece = mapping_end > at ? std::min(mapping_end, candidate.end) - at : 0;
+			const auto* backing =
+			    piece != 0 ? Libs::LibKernel::Memory::TryGetBackingPointer(at, piece) : nullptr;
+			if (backing == nullptr) break;
+			pieces.push_back({reinterpret_cast<uint64_t>(backing), piece});
+			covered += piece;
+			at += piece;
+		}
+		// (Memory without backing bytes for all of it, flexible memory, or under a taken range:
+		// left alone. So is memory mapped at another guest address too (a write there would not
+		// fault) and memory the GPU wrote (its bytes are the GPU's, read back when the game reads
+		// them).)
+		if (covered != size || TextureOffload::AnyTaken(candidate.begin, size) ||
+		    !Libs::LibKernel::Memory::IsUniqueGuestBackingRangeAcrossMappings(candidate.begin,
+		                                                                      size) ||
+		    gpu_written(candidate.begin, size))
+			continue;
+		const auto hold = [&] {
+			m_page_manager.UpdateReadWatchers<true>(candidate.begin, size);
+			// (Its no access now, not with this thread's other deferred ones: TextureOffload::Add.
+			// The worker's compare comes after it too.)
+			PageManager::FlushDeferredProtection(candidate.begin, size);
+		};
+		if (TextureOffload::AddFile(candidate.begin, size, std::move(pieces), candidate.file,
+		                            candidate.offset, hold))
+			taken->emplace_back(candidate.begin, size);
+	}
+	const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+	    std::chrono::steady_clock::now() - start);
+	TextureOffload::NoteFileScan(taken->size(), static_cast<uint64_t>(us.count()));
+	if (!taken->empty()) PostFileChecks(std::move(taken), 0, drop);
+#endif
+}
+
 // Render thread: the discarded ranges over [vaddr, vaddr + size) downloaded back from their images in one submission,
 // the render thread waiting for it; their read watchers then go.
 void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch_value, bool async) {
 #if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	const auto touch  = static_cast<TextureOffload::Touch>(touch_value);
+#if KYTY_FILE_OFFLOAD_SUPPORTED
+	// (Dropped file bytes there: read back from their files first, on this thread. Not for an image
+	// gone: nothing reads them.)
+	if (touch != TextureOffload::Touch::Count && touch != TextureOffload::Touch::ImageGone)
+		TextureOffload::RestoreFiles(vaddr, size, touch);
+#endif
 	auto       ranges = TextureOffload::BeginRestore(vaddr, size, touch, touch == TextureOffload::Touch::Count, async);
 	if (ranges.empty()) return;
 	const auto                         start = std::chrono::steady_clock::now();
@@ -4517,6 +4728,36 @@ bool TextureCache::IsRegionGpuModified(uint64_t address, uint64_t size) {
 	return false;
 }
 
+namespace {
+
+// KYTY_SLOW_LOG_MS: a large image a CPU write or a map made dirty whole, or a partial unmap deleted, and why it took no
+// partial dirty state (TextureCache::TryInvalidatePartial).
+void LogFullDirty(const char* why, const Image& image, uint64_t address, uint64_t size, bool candidate) {
+	if (SlowLog::Threshold() <= 0.0 || image.info.data.size < PartialDirtyMinSize || !image.IsTracked() ||
+	    kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) == 0) {
+		return;
+	}
+	const auto& info = image.info;
+	std::printf("[tsc %llu] FULL-DIRTY %s addr=0x%llx size=0x%llx write=0x%llx+0x%llx candidate=%d "
+	            "(depth_id=%d backing=%d samples=%u volume=%d depth=%d stencil_plane=%d compression=%u) "
+	            "registered=%d tracked=%d whole=%d take=%d maybe=%d cpu=%d partial=%d gpu=%d buffer=%d "
+	            "buffer_ranges=%zu stencil=%d\n",
+	            static_cast<unsigned long long>(__rdtsc()), why, static_cast<unsigned long long>(info.data.address),
+	            static_cast<unsigned long long>(info.data.size), static_cast<unsigned long long>(address),
+	            static_cast<unsigned long long>(size), candidate ? 1 : 0, image.depth_id ? 1 : 0,
+	            image.backing.image != nullptr ? 1 : 0, info.samples, info.IsVolume() ? 1 : 0, info.IsDepth() ? 1 : 0,
+	            info.HasStencil() ? 1 : 0, static_cast<uint32_t>(info.metadata.compression), image.registered ? 1 : 0,
+	            image.IsTracked() ? 1 : 0,
+	            image.track_addr == info.data.address && image.track_addr_end == info.data.End() ? 1 : 0,
+	            image.CanTakePartialDirty() ? 1 : 0, image.IsMaybeCpuDirty() ? 1 : 0,
+	            image.IsDefinitelyCpuDirty() ? 1 : 0, image.IsPartiallyCpuDirty() ? 1 : 0,
+	            image.IsGpuModified() ? 1 : 0, image.IsBufferModified() ? 1 : 0, image.BufferModifiedRanges().size(),
+	            image.IsStencilModified() ? 1 : 0);
+	std::fflush(stdout);
+}
+
+} // namespace
+
 void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 	const auto page_begin = address & ~(TRACKER_PAGE_SIZE - 1);
 	const auto page_end   = (address + size + TRACKER_PAGE_SIZE - 1) & ~(TRACKER_PAGE_SIZE - 1);
@@ -4529,33 +4770,7 @@ void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 			if (TryInvalidatePartial(*owner, address, size, PartialDirtyGranule)) {
 				continue;
 			}
-			if (SlowLog::Threshold() > 0.0 && owner->info.data.size >= PartialDirtyMinSize &&
-			    owner->IsTracked() &&
-			    kyty_local_partial_image_dirty_mode.load(std::memory_order_relaxed) != 0) {
-				std::printf("[tsc %llu] FULL-DIRTY addr=0x%llx size=0x%llx write=0x%llx+0x%llx candidate=%d "
-				            "(depth_id=%d backing=%d samples=%u volume=%d depth=%d stencil_plane=%d compression=%u) "
-				            "registered=%d tracked=%d whole=%d take=%d maybe=%d cpu=%d partial=%d gpu=%d buffer=%d "
-				            "stencil=%d\n",
-				            static_cast<unsigned long long>(__rdtsc()),
-				            static_cast<unsigned long long>(owner->info.data.address),
-				            static_cast<unsigned long long>(owner->info.data.size),
-				            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
-				            PartialDirtyCandidate(*owner) ? 1 : 0, owner->depth_id ? 1 : 0,
-			            owner->backing.image != nullptr ? 1 : 0, owner->info.samples,
-			            owner->info.IsVolume() ? 1 : 0, owner->info.IsDepth() ? 1 : 0,
-			            owner->info.HasStencil() ? 1 : 0,
-			            static_cast<uint32_t>(owner->info.metadata.compression), owner->registered ? 1 : 0,
-				            owner->IsTracked() ? 1 : 0,
-				            owner->track_addr == owner->info.data.address &&
-				                    owner->track_addr_end == owner->info.data.End()
-				                ? 1
-				                : 0,
-				            owner->CanTakePartialDirty() ? 1 : 0, owner->IsMaybeCpuDirty() ? 1 : 0,
-				            owner->IsDefinitelyCpuDirty() ? 1 : 0, owner->IsPartiallyCpuDirty() ? 1 : 0,
-				            owner->IsGpuModified() ? 1 : 0, owner->IsBufferModified() ? 1 : 0,
-				            owner->IsStencilModified() ? 1 : 0);
-				std::fflush(stdout);
-			}
+			LogFullDirty("write", *owner, address, size, PartialDirtyCandidate(*owner));
 			owner->InvalidateCpuWrite(address, size);
 			UntrackImage(id, "cpu-write");
 			continue;
@@ -4695,6 +4910,7 @@ void TextureCache::MapMemory(uint64_t address, uint64_t size) {
 		if (TryInvalidatePartial(*owner, address, size, TRACKER_PAGE_SIZE)) {
 			continue;
 		}
+		LogFullDirty("map", *owner, address, size, PartialDirtyCandidate(*owner));
 		owner->InvalidateCpuWrite(address, size);
 		UntrackImage(id, "map");
 	}
@@ -4753,11 +4969,13 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 		// layer's memory at a time. The unmapped span becomes dirty (read back as it is when
 		// the image is next used) and stays unwatched until then; MapMemory marks it again
 		// when memory returns there.
-		if ((address > owner->info.data.address || address + size < owner->info.data.End()) &&
-		    TryInvalidatePartial(*owner, address, size, TRACKER_PAGE_SIZE)) {
-			LiveCounters::Add(LiveCounters::PartialUnmaps);
-			++slow_partial;
-			continue;
+		if (address > owner->info.data.address || address + size < owner->info.data.End()) {
+			if (TryInvalidatePartial(*owner, address, size, TRACKER_PAGE_SIZE)) {
+				LiveCounters::Add(LiveCounters::PartialUnmaps);
+				++slow_partial;
+				continue;
+			}
+			LogFullDirty("unmap", *owner, address, size, PartialDirtyCandidate(*owner));
 		}
 		++slow_deleted;
 		slow_bytes += owner->info.data.size;
@@ -4784,16 +5002,33 @@ void TextureCache::EraseSlot(ImageId id) {
 // faults 73 -> 232), and they held their video memory for good. One the game draws again is made again from its bytes.
 // Passed over (to the back of the list): images whose bytes only the GPU has (no download here), depth images with a
 // stencil association (deleting depth deletes it too), unregistered ones.
+// Texture pools of the world the game is in stay where the budget is 12 GiB or more (the collector below takes them,
+// oldest first, when it runs): one-level arrays of ChunkedUploadMin and up that shaders only sample. The game samples a
+// pool through views from a few first layers to a last one that moves as it streams, and leaves one for minutes as the
+// camera moves on: retired, the next view made it again whole from guest memory (2-2 and 5-2 tours: 1.3-2 GB, 150-460
+// ms frames, 2-3 times a map), where the image kept serves it or gives its layers on the GPU (HoldLayers). A kept
+// pool's watchers take a fault per MiB the game writes at most (partial dirty state). One last used before the game
+// entered its world (SceneTags) goes as before: the memory of the worlds left comes back.
 void TextureCache::RetireStaleImages(uint64_t tick) {
 	constexpr uint64_t RetireTicks    = 1200;
 	constexpr size_t   MaxRetirements = 16;
+	if (const auto generation = SceneTags::Generation(); generation != m_scene_generation) {
+		m_scene_generation = generation;
+		m_scene_tick       = tick;
+	}
 	if (tick <= RetireTicks) return;
 	thread_local std::vector<ImageId> stale, kept;
 	stale.clear();
 	kept.clear();
+	const bool keep_pools = !m_graphics.small_video_memory;
 	m_lru_cache.ForEachItemBelow(tick - RetireTicks, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered) return false;
+		// (Left at its age: the collector's.)
+		if (keep_pools && owner->info.resources.levels == 1 && owner->info.resources.layers > 1 &&
+		    owner->info.data.size >= ChunkedUploadMin && GuestTexture(*owner) &&
+		    m_lru_cache.TickOf(owner->lru_id) >= m_scene_tick)
+			return false;
 		if (owner->depth_id || owner->IsGpuModified())
 			kept.push_back(id);
 		else
@@ -4866,7 +5101,7 @@ void TextureCache::RunGarbageCollector() {
 		return true;
 	});
 	RetireStaleImages(tick);
-	if (TextureOffload::Enabled()) OffloadScan(tick);
+	if (TextureOffload::AnyEnabled()) OffloadScan(tick);
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}

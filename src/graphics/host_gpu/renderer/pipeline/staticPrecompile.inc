@@ -766,9 +766,12 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 	// The hang guard (issue #126: an RX 7800 XT's shards waited for hours on compiles its driver never finished, a thread
 	// of each still busy): the compiles in flight, looked at every 15 s. One running for 2 minutes is named in the log;
 	// one past KYTY_PRECOMPILE_STUCK_SECONDS (default 300; 0: no limit; a boss's death took ~75 s on an AMD GPU) is
-	// stuck: the shard takes no more work, lets its other compiles finish, adds the stuck pipelines' keys to the file
+	// slow, and the other threads go on. Only when every compile in flight is past twice the limit and none began for a
+	// minute (the threads all wait on the driver) is the shard stuck: it adds the stuck pipelines' keys to the file
 	// KYTY_PRECOMPILE_STUCK names (the scripts: the run's stuck-pipelines.txt, whose keys every shard leaves out), saves,
 	// keeps its file as .part<k> (merged like the shards') and ends with exit code 4, for the script to start it again.
+	// (An RX 6600 took more than 300 s on a few compute pipelines that did finish: stopping there left no keys out, and
+	// every restart met them again.)
 	struct InFlight {
 		std::chrono::steady_clock::time_point start;
 		const char*                           kind       = nullptr;
@@ -777,10 +780,12 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 		uint64_t                              pixel_hash = 0;
 		size_t                                n          = 0;
 		bool                                  reported   = false;
+		bool                                  slow       = false;
 	};
 	std::mutex                   in_flight_mutex;
 	std::map<uint64_t, InFlight> in_flight;
 	uint64_t                     in_flight_tokens = 0;
+	auto                         last_begin       = std::chrono::steady_clock::now();
 	std::atomic<bool>            stop_new {false};
 	const uint64_t               stuck_seconds = [] {
 		const char* value = std::getenv("KYTY_PRECOMPILE_STUCK_SECONDS");
@@ -797,6 +802,7 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 	const auto          compile_begins = [&](const char* kind, uint64_t key, uint64_t hash, uint64_t pixel_hash, size_t n) {
 		std::lock_guard lock(in_flight_mutex);
 		const auto      token = ++in_flight_tokens;
+		last_begin            = std::chrono::steady_clock::now();
 		in_flight.emplace(token, InFlight {std::chrono::steady_clock::now(), kind, key, hash, pixel_hash, n});
 		return token;
 	};
@@ -808,11 +814,12 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 		return static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count());
 	};
-	// (The checkpoint thread's.) Ends the process when a compile is stuck.
+	// (The checkpoint thread's.) Ends the process when its compiles are stuck.
 	const auto guard_compiles = [&] {
 		bool stuck = false;
 		{
 			std::lock_guard lock(in_flight_mutex);
+			stuck = stuck_seconds != 0 && !in_flight.empty() && seconds_since(last_begin) >= 60;
 			for (auto& [token, compile]: in_flight) {
 				const auto seconds = seconds_since(compile.start);
 				if (!compile.reported && seconds >= 120) {
@@ -820,22 +827,19 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 					PipelineCacheLog("Shader seeds: still compiling after {} s: {} {:016x} (seeds {:016x} {:016x}, work item {})",
 					                 seconds, compile.kind, compile.key, compile.hash, compile.pixel_hash, compile.n);
 				}
-				stuck |= stuck_seconds != 0 && seconds >= stuck_seconds;
+				const bool past = stuck_seconds != 0 && seconds >= stuck_seconds;
+				if (past && !compile.slow) {
+					compile.slow = true;
+					PipelineCacheLog("Shader seeds: past {} s, the other threads go on: {} {:016x} (work item {})", stuck_seconds,
+					                 compile.kind, compile.key, compile.n);
+				}
+				stuck &= seconds >= 2 * stuck_seconds;
 			}
 		}
 		if (!stuck) return;
 		stop_new.store(true, std::memory_order_relaxed);
-		PipelineCacheLog("Shader seeds: a compile is past {} s, the driver does not return: no more work items here", stuck_seconds);
-		// Its other compiles finish (or get stuck too: each waits at most the limit).
-		for (bool running = true; running;) {
-			{
-				std::lock_guard lock(in_flight_mutex);
-				running = std::ranges::any_of(in_flight, [&](const auto& entry) {
-					return seconds_since(entry.second.start) < stuck_seconds;
-				});
-			}
-			if (running) std::this_thread::sleep_for(std::chrono::seconds(1));
-		}
+		PipelineCacheLog("Shader seeds: every compile is past {} s and none began for a minute, the driver does not return",
+		                 2 * stuck_seconds);
 		std::string lines;
 		{
 			std::lock_guard lock(in_flight_mutex);
@@ -1226,12 +1230,19 @@ bool PipelineCache::StaticCacheCurrent(GraphicContext& graphics, const std::file
 		if (error) return false;
 		const auto seeded = std::filesystem::last_write_time(seeds, error);
 		if (error || written < seeded) return false;
-		// Older than the release's hints too (run from the package's folder): a package with new hints, or a precompile
-		// that compiled the seeds alone (v20261016 on a PC without recorded play, issue #28), compiles what they add.
-		const auto hints  = std::filesystem::path("tools") / "local" / "static-precompile" /
-		                    ("hints-" + PipelineCacheGameId() + ".hints");
-		const auto hinted = std::filesystem::last_write_time(hints, error);
-		if (!error && written < hinted) return false;
+		// Made before the release's hints too: a package with new hints, or a precompile that compiled the seeds alone
+		// (v20261016 on a PC without recorded play, issue #28), compiles what they add. By the hints' hash the last
+		// precompile recorded: a zip holds its files' local times without a zone, so a package made in UTC and unpacked
+		// west of it had hints from hours ahead, and a store precompiled in between stayed out of date (issue #143).
+		// From an older precompile: by the files' times.
+		const auto hinted = std::filesystem::last_write_time(StaticHintsPath(), error);
+		if (!error) {
+			if (const auto recorded = ReadStaticHintsStamp()) {
+				if (*recorded != StaticHintsHash()) return false;
+			} else if (written < hinted) {
+				return false;
+			}
+		}
 		// Made without a translation feature of this emulator's for this GPU, and no precompile with it tried since: one
 		// makes the pipelines it changes.
 		namespace Translate = ShaderRecompiler::Frontend;
@@ -1381,16 +1392,22 @@ static bool MergeBlobShards(GraphicContext& graphics, bool prune, bool keep_shar
 // The shard files are removed once merged. A pruned merge makes the store of this run's pipelines alone: stamped with the
 // translation features they were made with; a precompile's last merge (`stamp`) with those it tried (WriteStaticFeatures).
 bool PipelineCache::MergePrecompileShards(GraphicContext& graphics, bool prune, bool keep_shards, bool stamp) {
+	const auto active  = graphics.pipeline_binaries_enabled ? StaticBinariesPath()
+	                     : StaticBlobsMode(graphics)         ? StaticBlobsPath()
+	                                                         : StaticCachePath();
 	const auto stamped = [&](bool merged) {
-		if (merged && (prune || stamp)) WriteStaticFeatures(prune);
+		if (merged && (prune || stamp)) {
+			WriteStaticFeatures(prune);
+			// (The store as of this precompile: with nothing new to merge it is not rewritten, and it kept its time from
+			// before the seeds of a newer emulator - out of date at every start, issue #143.)
+			std::error_code error;
+			std::filesystem::last_write_time(active, std::filesystem::file_time_type::clock::now(), error);
+		}
 		return merged;
 	};
 	// The shards of the other two kinds of store (made by another driver, with or without pipeline binaries): never
 	// merged here, gone with the rest (issue #126).
 	if (!keep_shards) {
-		const auto active = graphics.pipeline_binaries_enabled ? StaticBinariesPath()
-		                    : StaticBlobsMode(graphics)         ? StaticBlobsPath()
-		                                                        : StaticCachePath();
 		std::vector<std::filesystem::path> stale;
 		std::error_code                    error;
 		for (const auto& other: {StaticBinariesPath(), StaticBlobsPath(), StaticCachePath()}) {

@@ -108,6 +108,17 @@ static bool HasExtension(const std::vector<const char*>& extensions, const char*
 	                   [name](const char* ext) { return strcmp(ext, name) == 0; });
 }
 
+#if defined(_WIN32)
+// KYTY_FULLSCREEN_EXCLUSIVE=0|1 (GraphicContext::full_screen_exclusive): -1 when unset.
+static int FullscreenExclusiveRequest() {
+	static const int request = [] {
+		const char* value = std::getenv("KYTY_FULLSCREEN_EXCLUSIVE");
+		return value == nullptr || *value == '\0' ? -1 : value[0] == '0' ? 0 : 1;
+	}();
+	return request;
+}
+#endif
+
 // VK_KHR_pipeline_binary for the static precompile's pipelines (pipelineBinaries.h), with maintenance5
 // for the pipeline creation flags it needs. KYTY_PIPELINE_BINARIES=0: the static pipeline cache instead.
 // Without the binaries, maintenance5 alone where the driver has it: pipelines take their SPIR-V inline,
@@ -712,7 +723,7 @@ static void VulkanInitSubgroupSizeControl(vk::PhysicalDevice physical_device,
 static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const VulkanExtensions& r,
                                      uint32_t                        queue_family,
                                      const std::vector<const char*>& device_extensions,
-                                     GraphicContext&                 graphics) {
+                                     GraphicContext& graphics, vk::SurfaceKHR surface = nullptr) {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(queue_family == static_cast<uint32_t>(-1));
 
@@ -728,6 +739,7 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	uint32_t                                 queue_create_count = 1;
 	graphics.readback_family                                    = static_cast<uint32_t>(-1);
 	graphics.fsr_compute_family                                 = static_cast<uint32_t>(-1);
+	graphics.fsr_present_family                                 = static_cast<uint32_t>(-1);
 	bool fsr_queues                                             = false;
 #if defined(_WIN32)
 	// A second graphics-family queue for presents (GraphicContext::present_queue).
@@ -740,23 +752,49 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 			queue_create_infos[0].queueCount = 2;
 			graphics.present_queue_created   = true;
 		}
-		// KYTY_FRAMEGEN_BACKEND=fsr: a third graphics-family queue and two of a compute-only family for FSR's swapchain.
-		if (Libs::Graphics::FrameGen::UsesFsr() && graphics.present_queue_created && families[queue_family].queueCount >= 3) {
+		// KYTY_FRAMEGEN_BACKEND=fsr: queues of FSR's swapchain of its own. A third graphics-family queue (its presents)
+		// and two of a compute-only family (async compute, image acquires); with fewer graphics queues (an Intel Arc has
+		// one, issue #170) its presents on a third queue of that compute family, which must then be able to present (AMD
+		// allows a compute present queue the engine does not use, and the engine's own queue as the game queue:
+		// VkFrameInterpolationInfoFFX). KYTY_FSR_COMPUTE_PRESENT=1: that layout on any GPU, with one graphics queue (a
+		// test).
+		if (Libs::Graphics::FrameGen::UsesFsr()) {
+			static const bool compute_present_forced = [] {
+				const char* value = std::getenv("KYTY_FSR_COMPUTE_PRESENT");
+				return value != nullptr && value[0] == '1';
+			}();
+			if (compute_present_forced) {
+				queue_create_infos[0].queueCount = 1;
+				graphics.present_queue_created   = false;
+			}
+			const bool graphics_present =
+			    !compute_present_forced && graphics.present_queue_created && families[queue_family].queueCount >= 3;
+			const uint32_t needed = graphics_present ? 2 : 3;
 			for (uint32_t family = 0; family < family_count; ++family) {
 				const auto flags = families[family].queueFlags;
-				if (family != queue_family && families[family].queueCount >= 2 && (flags & vk::QueueFlagBits::eCompute) &&
-				    !(flags & vk::QueueFlagBits::eGraphics)) {
-					queue_create_infos[0].queueCount                = 3;
-					queue_create_infos[queue_create_count].queueFamilyIndex = family;
-					queue_create_infos[queue_create_count].queueCount       = 2;
-					++queue_create_count;
-					graphics.fsr_compute_family = family;
-					fsr_queues                  = true;
-					break;
-				}
+				if (family == queue_family || families[family].queueCount < needed || !(flags & vk::QueueFlagBits::eCompute) ||
+				    (flags & vk::QueueFlagBits::eGraphics))
+					continue;
+				vk::Bool32 presents = VK_FALSE;
+				if (!graphics_present &&
+				    (surface == nullptr || physical_device.getSurfaceSupportKHR(family, surface, &presents) != vk::Result::eSuccess ||
+				     presents == VK_FALSE))
+					continue;
+				if (graphics_present) queue_create_infos[0].queueCount = 3;
+				queue_create_infos[queue_create_count].queueFamilyIndex = family;
+				queue_create_infos[queue_create_count].queueCount       = needed;
+				++queue_create_count;
+				graphics.fsr_compute_family = family;
+				graphics.fsr_present_family = graphics_present ? queue_family : family;
+				fsr_queues                  = true;
+				break;
 			}
 			if (!fsr_queues) {
-				std::printf("Frame generation: FSR needs three graphics queues and a compute family of two queues: off\n");
+				std::printf("Frame generation: FSR needs three graphics queues and a compute family of two queues, or a compute "
+				            "family of three that can present: off\n");
+			} else if (!graphics_present) {
+				std::printf("Frame generation: FSR's presents on compute family %u (its own queue there; issue #170)\n",
+				            graphics.fsr_compute_family);
 			}
 		}
 	}
@@ -1171,6 +1209,15 @@ static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions& r) {
 		r.required_extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 	}
 
+#if defined(_WIN32)
+	// KYTY_FULLSCREEN_EXCLUSIVE (issue #166): VK_EXT_full_screen_exclusive needs this instance extension.
+	if (FullscreenExclusiveRequest() >= 0 &&
+	    HasExtension(r.available_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) &&
+	    !HasExtension(r.required_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
+		r.required_extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+	}
+#endif
+
 	if (HasExtension(r.available_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
 		r.required_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	} else {
@@ -1515,7 +1562,8 @@ void WindowContext::CreateVulkan() {
 	                         graphic_ctx.physical_device, queue_family);
 
 	if (graphic_ctx.physical_device == nullptr) {
-		EXIT("Could not find suitable device");
+		EXIT("Could not find suitable device: no Vulkan GPU has what the emulator needs (the log's lines above name what "
+		     "each one lacks; NVIDIA cards need a GeForce GTX 16 or RTX 20 series or newer)");
 	}
 
 	vk::PhysicalDevicePushDescriptorProperties push_descriptor_properties {};
@@ -1603,6 +1651,21 @@ void WindowContext::CreateVulkan() {
 		AddPipelineBinaryExtensions(available_extensions, device_extensions);
 		AddCopyMemoryIndirectExtension(available_extensions, device_extensions);
 		AntiLag::AddDeviceExtension(available_extensions, device_extensions); // (KYTY_LOW_LATENCY)
+#if defined(_WIN32)
+		// KYTY_FULLSCREEN_EXCLUSIVE (issue #166: on an RX 9060 XT fullscreen ran ~8% slower than a window until a Game Bar
+		// capture took it off the driver's own path): the swapchain then tells the driver whether exclusive fullscreen
+		// may be used (Swapchain::Create).
+		if (const int request = FullscreenExclusiveRequest();
+		    request >= 0 && HasExtension(available_extensions, "VK_EXT_full_screen_exclusive") &&
+		    HasExtension(r.required_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
+			device_extensions.push_back("VK_EXT_full_screen_exclusive");
+			graphic_ctx.full_screen_exclusive = request;
+			std::printf("Fullscreen: exclusive fullscreen %s (KYTY_FULLSCREEN_EXCLUSIVE=%d)\n",
+			            request == 0 ? "disallowed" : "allowed", request);
+		} else if (request >= 0) {
+			std::printf("Fullscreen: KYTY_FULLSCREEN_EXCLUSIVE ignored: the driver lacks VK_EXT_full_screen_exclusive\n");
+		}
+#endif
 		// Linux DLSS (KYTY_UPSCALER=dlss): the device extensions NVIDIA's NGX needs.
 		FrameGen::AddDeviceExtensions(graphic_ctx.instance, graphic_ctx.physical_device, available_extensions,
 		                              device_extensions);
@@ -1618,7 +1681,7 @@ void WindowContext::CreateVulkan() {
 	// (Streamline's own answer whether DLSS-G can run here, asked before the device: the refusal below gives it.)
 	const std::string frame_gen_problem = FrameGen::SupportProblem(graphic_ctx.physical_device);
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx.physical_device, r, queue_family,
-	                                        device_extensions, graphic_ctx);
+	                                        device_extensions, graphic_ctx, surface);
 	if (graphic_ctx.device == nullptr) {
 		// (Issue #32: an RTX 5080 whose driver refused the device Streamline asked for; the game runs without it.)
 		if (FrameGen::Requested()) {
@@ -1660,10 +1723,10 @@ void WindowContext::CreateVulkan() {
 		DeviceFault::NoteQueue(graphic_ctx.readback_queue, "readback");
 	}
 	if (graphic_ctx.fsr_compute_family != static_cast<uint32_t>(-1)) {
-		graphic_ctx.device.getQueue(queue_family, 2, &graphic_ctx.fsr_present_queue);
+		graphic_ctx.device.getQueue(graphic_ctx.fsr_present_family, 2, &graphic_ctx.fsr_present_queue);
 		graphic_ctx.device.getQueue(graphic_ctx.fsr_compute_family, 0, &graphic_ctx.fsr_compute_queue);
 		graphic_ctx.device.getQueue(graphic_ctx.fsr_compute_family, 1, &graphic_ctx.fsr_acquire_queue);
-		LOGF("\tFSR queues: present family %u index 2, compute and acquire family %u\n", queue_family,
+		LOGF("\tFSR queues: present family %u index 2, compute and acquire family %u\n", graphic_ctx.fsr_present_family,
 		     graphic_ctx.fsr_compute_family);
 	}
 	Libs::Graphics::FrameGen::OnDevice(graphic_ctx.instance, graphic_ctx.physical_device, graphic_ctx.device);
@@ -1794,6 +1857,23 @@ bool CreateHeadlessGraphicContext(GraphicContext& graphic_ctx) {
 		AddPipelineBinaryExtensions(available_extensions, device_extensions);
 		AddCopyMemoryIndirectExtension(available_extensions, device_extensions);
 	}
+#if !defined(__APPLE__)
+	{
+		// VulkanCreateDevice requires barycentrics: say so instead of its "not implemented" exit (a GeForce GTX 970
+		// running the precompile, issue #149).
+		vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric {};
+		vk::PhysicalDeviceFeatures2                            features {};
+		features.pNext = &barycentric;
+		graphic_ctx.physical_device.getFeatures2(&features);
+		if (barycentric.fragmentShaderBarycentric != VK_TRUE) {
+			std::fprintf(stderr,
+			             "%s has no fragment shader barycentrics (VK_KHR_fragment_shader_barycentric), which the emulator "
+			             "needs: NVIDIA cards need a GeForce GTX 16 or RTX 20 series or newer\n",
+			             physical_device_properties.properties.deviceName.data());
+			return false;
+		}
+	}
+#endif
 	VulkanInitSubgroupSizeControl(graphic_ctx.physical_device, graphic_ctx);
 	const VulkanExtensions no_layers {};
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx.physical_device, no_layers, queue_family,

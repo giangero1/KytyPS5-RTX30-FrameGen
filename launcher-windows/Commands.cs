@@ -61,6 +61,10 @@ sealed class Commands {
 		}
 	}
 
+	// Game output "1440p", with DLSS or FSR 3 only: the PS5 Pro path's output at 2560x1440 (run-windows.ps1 -OutputHeight,
+	// KYTY_OUTPUT_HEIGHT: a 1440p screen gets the upscaler's own picture). The game's TAA has no such output: 4K.
+	public bool Output1440 { get { return S.Str("output") == "1440p" && (Dlss || FsrUpscaler); } }
+
 	// direct (--play, a start from Steam or a shortcut, maybe with only a gamepad at hand): no dialogs (-Prompt) and no
 	// wait for a key after a crash.
 	public string PlayCommand(GameInfo game = null, bool direct = false) {
@@ -104,6 +108,7 @@ sealed class Commands {
 		else if (FsrUpscaler) arguments.AddRange(new[] { "-Upscaler", "fsr" });
 		// (With DLSS too: its PS5 Pro path then makes the 1080p output, the 3D at most 1080 high.)
 		if (HdOutput) arguments.Add("-HdOutput");
+		else if (Output1440) arguments.AddRange(new[] { "-OutputHeight", "1440" });
 		if (context.FrameGenAvailable && ((!fsrOn && frameGen >= 2) || dlss)) arguments.AddRange(new[] { "-StreamlineDir", Quote(context.Streamline) });
 		AddGpu(arguments);
 		var sets = new List<string>();
@@ -120,6 +125,8 @@ sealed class Commands {
 		if (S.Bool("fps30")) sets.Add("KYTY_FLIP_RATE=1");
 		// Memory kept in RAM against the MEMORY_MANAGEMENT blue screen (issue #50): a 6 GB working-set floor, no trims of its own.
 		if (S.Bool("keep_resident")) sets.AddRange(new[] { "KYTY_RESIDENT_MB=6144", "KYTY_WORKING_SET_TRIM=0" });
+		// The DualSense's speaker silent, over USB or Bluetooth: the pad's own volume 0 (the haptics stay).
+		if (!S.Bool("pad_speaker")) sets.Add("KYTY_DUALSENSE_SPEAKER_VOLUME=0");
 		// The DLSS model chosen on the Graphics page (a preset letter; none: the DLSS version's own choice).
 		var preset = S.Str("dlss_preset");
 		if (dlss && preset.Length == 1 && preset[0] >= 'A' && preset[0] <= 'O') sets.Add("KYTY_DLSS_PRESET=" + preset);

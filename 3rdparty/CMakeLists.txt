@@ -54,6 +54,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zstd zarchive_source)
 
+# Opus: the DualSense's Bluetooth link carries the pad speaker as Opus packets inside HID reports (there is no
+# USB audio endpoint over Bluetooth), so src/libs/dualSenseBluetooth.cpp encodes them with this.
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+	opus
+	GIT_REPOSITORY https://github.com/xiph/opus.git
+	GIT_TAG ddbe48383984d56acd9e1ab6a090c54ca6b735a6 # v1.5.2
+	GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(opus)
+
 add_library(zarchive STATIC
 	"${zarchive_source_SOURCE_DIR}/src/zarchivereader.cpp"
 	"${zarchive_source_SOURCE_DIR}/src/zarchivewriter.cpp"
@@ -82,6 +94,17 @@ endif()
 
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 add_subdirectory(SDL2)
+# SDL without its C library (SDL_LIBC off, its MSVC default) is compiled with /Gs1048576: no stack probe for a frame
+# under 1 MiB, as it has no __chkstk of its own. Each SDL function carries that probe size, and one that ThinLTO inlines
+# into the emulator's code hands it to the caller (LLVM's adjustCallerStackProbeSize, for a caller without its own):
+# the caller's frame then skips the stack's guard page. The DualSense Bluetooth sender thread's 16 KiB frame did, and
+# the process ended at start-up with 0xC0000005 and no word in the log (the fault cannot be delivered on that stack).
+# The emulator links the C runtime, whose __chkstk serves SDL too.
+if(MSVC AND NOT SDL_LIBC AND TARGET SDL2-static)
+	get_target_property(sdl_compile_options SDL2-static COMPILE_OPTIONS)
+	list(REMOVE_ITEM sdl_compile_options "/Gs1048576")
+	set_target_properties(SDL2-static PROPERTIES COMPILE_OPTIONS "${sdl_compile_options}")
+endif()
 
 add_library(Vulkan-Headers INTERFACE)
 add_library(Vulkan::Headers ALIAS Vulkan-Headers)

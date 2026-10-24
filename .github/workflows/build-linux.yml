@@ -59,6 +59,7 @@ jobs:
         run: |
           ./build-linux.sh kyty_emulator
           ./build-linux.sh kyty_shader_precompile
+          ./build-linux.sh kyty_launcher
 
       - name: Package
         env:
@@ -68,7 +69,7 @@ jobs:
           build=_Build/linux
           out="_Build/package/$PACKAGE"
           mkdir -p "$out/tools/local/static-precompile"
-          cp "$build/kyty_emulator" "$build/kyty_shader_precompile" "$out"/
+          cp "$build/kyty_emulator" "$build/kyty_shader_precompile" "$build/kyty_launcher" "$out"/
           cp tools/local/run_ds.sh precompile-linux.sh tools/local/dlss-bridge/get-dlss-linux.sh "$out"/
           # DLSS: the bridge's source only (MIT); get-dlss-linux.sh downloads NVIDIA's SDK and builds it on the user's PC,
           # so the package carries none of NVIDIA's files.
@@ -81,8 +82,8 @@ jobs:
           # the Windows package carries): the first launch lists the game's shaders from its files.
           cp tools/local/static-precompile/pass-states.json "$out/tools/local/static-precompile/"
           cp tools/local/static-precompile/hints-*.hints "$out/tools/local/static-precompile/" 2>/dev/null || true
-          chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/run_ds.sh" "$out/precompile-linux.sh" \
-            "$out/get-dlss-linux.sh"
+          chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/kyty_launcher" "$out/run_ds.sh" \
+            "$out/precompile-linux.sh" "$out/get-dlss-linux.sh"
           cat > "$out/README.md" <<'EOF'
           # KytyPS5 (Linux x64) for Demon's Souls (PPSA01341)
 
@@ -98,7 +99,16 @@ jobs:
           ## Run
 
           The game is Demon's Souls 01.007.000 or 01.005.000, as a folder (the one with `eboot.bin`)
-          or as a ZArchive (`.zar`). `run_ds.sh` is the launcher; point it at the game and start it:
+          or as a ZArchive (`.zar`).
+
+          `./kyty_launcher` opens the settings window (the Windows package's KytyLauncher.exe): choose the
+          game, the resolution, the upscaler (DLSS, FSR 3), frame generation, the graphics preset and the
+          rest, then PLAY. It saves them in `launcher-settings.json` and starts the game through `run_ds.sh`
+          in a terminal window with its log. The Shaders page runs the precompile, the Graphics page builds
+          DLSS (below). `./kyty_launcher --play` starts the game with the saved settings without the window
+          (Steam: add it as a non-Steam game). It needs nothing installed: SDL2 and Dear ImGui are built in.
+
+          `run_ds.sh` starts the game from a terminal; point it at the game:
 
           ```
           KYTY_GAME="/path/to/Demon's Souls.zar" ./run_ds.sh
@@ -108,8 +118,12 @@ jobs:
           1920x1080 window and shows MangoHud when it is installed (`MANGO=1`; `MANGO=0` hides it). The first
           launch translates shaders in the background for a minute or two; later launches are faster.
 
-          If the unpacker dropped the files' execute permission ("Permission denied"):
-          `chmod +x kyty_emulator kyty_shader_precompile run_ds.sh precompile-linux.sh get-dlss-linux.sh`.
+          If the unpacker dropped the files' execute permission ("Permission denied"): `chmod +x kyty_emulator
+          kyty_shader_precompile kyty_launcher run_ds.sh precompile-linux.sh get-dlss-linux.sh`.
+
+          Keep the kernel's own CPU scheduler: the emulator places its threads itself (`KYTY_RENDER_CPUS`), and a
+          sched_ext scheduler works against that (`scx_lavd`, which CachyOS suggests for games: about 10% slower on an
+          i5-14400, issue #80). A power profile (balanced or performance) made no measurable difference there.
 
           ## Shader precompile (optional)
 
@@ -174,7 +188,7 @@ jobs:
           # A tag's own release, else a new tag named after the package at this commit.
           tag="$GITHUB_REF_NAME"
           [ "$GITHUB_REF_TYPE" = tag ] || tag="$PACKAGE"
-          notes="Linux x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it and run ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest."
+          notes="Linux x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest."
           # The notes of this build (what changed, the per-PC shader caches, frame rates), when the commit has them.
           if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi
           # (A tag's release is the Windows package's too: latest. A manual run's own release is not.)

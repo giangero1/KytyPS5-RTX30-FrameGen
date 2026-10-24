@@ -100,6 +100,10 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
+	// The image starting at `address` with a `width`x`height` backing (of `format`, unless undefined), the one used
+	// last if several are; `count`: how many images start there (frame generation's interface canvas, frame-gen.cpp).
+	[[nodiscard]] ImageId FindImageAt(uint64_t address, uint32_t width, uint32_t height,
+	                                  vk::Format format = vk::Format::eUndefined, uint32_t* count = nullptr);
 	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
 	// Whether FindTexture with `desc` uploads anything first: guest bytes the CPU wrote, a GPU buffer write over them or
 	// over the stencil plane. A sampled view of a texture whose levels below it stay dirty (RefreshTextureLevels) needs
@@ -162,6 +166,9 @@ public:
 	// KYTY_TEXTURE_OFFLOAD(_PROBE) (texture-offload.h): the guest bytes of clean sampled textures probed for touches, or
 	// dropped from RAM after a download checked to give them back exactly (RunGarbageCollector).
 	void OffloadScan(uint64_t tick);
+	// KYTY_FILE_OFFLOAD (file-offload.h): APR-read pages still equal to their files probed, or
+	// dropped (OffloadScan).
+	void OffloadFiles();
 	// Render thread: the dropped bytes over [vaddr, vaddr + size) downloaded back from their images (texture-offload.h;
 	// `touch`: TextureOffload::Touch; `async`: written back by the offload worker when the GPU is done, touches waiting
 	// till then). Takes m_lock unless the caller holds it.
@@ -422,6 +429,8 @@ private:
 	VideoMemoryPressure m_video_pressure {};
 	uint64_t m_pressure_report_ms = 0;
 	uint64_t m_retirement_bytes = 0, m_completed_retirement_bytes = 0;
+	uint64_t         m_scene_generation       = 0; // RetireStaleImages: the world the game is in (SceneTags), entered
+	uint64_t         m_scene_tick             = 0; // at this tick
 	std::atomic<uint64_t> m_frame {0};
 	struct PendingDownload {
 		uint64_t address = 0, size = 0, tick = 0;

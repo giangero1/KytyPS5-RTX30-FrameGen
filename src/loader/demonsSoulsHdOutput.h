@@ -21,8 +21,20 @@ struct Program;
 // part is taken: the 3D upscaled to a 1080p output there (loader/demonsSoulsSuperResolution.h).
 // (SharpEmu's TitleDisplayPatches found the same places in 01.004.000; these are 01.007.000's, found by their code.)
 namespace DemonsSoulsHdOutput {
-// KYTY_HD_OUTPUT is set (before Install: the other patches keep out of its way).
+// KYTY_HD_OUTPUT is set (before Install: the other patches keep out of its way), or KYTY_OUTPUT_HEIGHT with an upscaler.
 [[nodiscard]] bool Requested();
+// KYTY_OUTPUT_HEIGHT=<1080..2159>, with the PS5 Pro path (KYTY_UPSCALER): its output at that height instead of the HD
+// output's 1080, 16:9 (2560x1440 for 1440: a 1440p screen gets DLSS's own picture, neither the 4K one scaled down nor
+// the 1080p one scaled up) - the 1080p output's places, the display buffers that size, the interface in its HD layout
+// scaled to the output (InterfaceScaled); 0 when unset or out of range.
+[[nodiscard]] uint32_t CustomOutputHeight();
+// The PS5 Pro path's output with the HD output: 1920x1080, or KYTY_OUTPUT_HEIGHT's size.
+[[nodiscard]] uint32_t UpscaledWidth();
+[[nodiscard]] uint32_t UpscaledHeight();
+// KYTY_OUTPUT_HEIGHT's output above 1080: the game lays its interface out in the HD layout's 1920x1080 in it, which
+// src/local/hud-anchor.h scales to the output (ScaleScope). (The 4K layout scaled down would be sharper on 1440, but the
+// game leaves out what lies past the output's size in its 3840x2160 layout: the souls, the items, the prompts.)
+[[nodiscard]] bool InterfaceScaled();
 void Install(Program* program);
 // Install found its places and took the game to the HD path.
 [[nodiscard]] bool Active();

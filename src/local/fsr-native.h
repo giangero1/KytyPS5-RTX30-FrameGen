@@ -23,6 +23,10 @@ namespace FsrNative {
 
 // KYTY_UPSCALER=fsr in a build with the FidelityFX sources.
 [[nodiscard]] bool UpscalerRequested();
+// KYTY_UPSCALER=dlss where DLSS cannot run (no NVIDIA RTX GPU or runtime, or FSR 3 frame generation, which runs without
+// Streamline): the upscaling is FSR 3's from then on (UpscalerRequested), not the game's own TAA (issue #85). False
+// where the sources are not built (macOS).
+[[nodiscard]] bool UpscaleInsteadOfDlss();
 // GPU thread or the recording worker: records the upscale of `inputs` (color, motion and depth in shader-read layouts,
 // the output general) into `command`; false when it could not (the caller stretches instead). The images are left in
 // their layouts.
@@ -39,6 +43,7 @@ struct InterpolationInputs {
 	float                  near_plane = 0.1f, fov_y = 1.0f;
 	float                  frame_ms = 16.7f;            // the time between the game's last two frames
 	bool                   reset    = false;            // no frame before this one to interpolate from
+	bool                   pq       = false;            // the backbuffer is HDR10 (ST 2084 PQ), not sRGB
 };
 // Present thread: records into `output` (general layout, storage) the frame between the last backbuffer given and this
 // one; false when there is none to show (the first frame after a reset, or FSR failed).

@@ -36,6 +36,9 @@
 #   .\run-windows.ps1 -HdOutput              Demon's Souls' own 1080p mode (a PS5's on a 1080p TV): its post-processing
 #                                            and HUD at 1920x1080 instead of 3840x2160, its 3D at most 1080 high; less
 #                                            work for the GPU (not with -Upscaler dlss, whose output is 4K)
+#   .\run-windows.ps1 -Upscaler dlss -OutputHeight 1440   the upscaler's output (and the frame on it) at 2560x1440
+#                                            instead of 3840x2160, for a 1440p screen (1080-2159; the HUD in its HD
+#                                            layout scaled to it); -RenderHeight picks the mode (1440 DLAA, 960 Quality)
 #   .\run-windows.ps1 -Aspect 21:9           Demon's Souls renders its 3D wider (21:9 = 64:27, up to 32:9; 3416x1440
 #                                            at 21:9), seeing more to the sides; shown at that aspect (the HUD at
 #                                            its sides unstretched; menus and movies stretched, or with -AspectFit
@@ -76,6 +79,7 @@ param(
 	[switch]$LowLatency,
 	[int]$RenderHeight = 0,
 	[switch]$HdOutput,
+	[int]$OutputHeight = 0,
 	[string]$Aspect = '',
 	[string]$Quality = '',
 	[string]$TextureReduce = '',
@@ -265,6 +269,9 @@ if (!$environment.Contains('KYTY_RENDER_CPUS')) { $environment['KYTY_RENDER_CPUS
 if ($RenderHeight -gt 0) { $environment['KYTY_RENDER_HEIGHT'] = "$RenderHeight" }
 # -HdOutput: the game's 1080p output (src/loader/demonsSoulsHdOutput.h). A 1440 render height (the default) becomes 1080.
 if ($HdOutput) { $environment['KYTY_HD_OUTPUT'] = '1' }
+# -OutputHeight: the PS5 Pro path's output at that height (KYTY_OUTPUT_HEIGHT, src/loader/demonsSoulsHdOutput.h), with
+# -Upscaler only.
+if ($OutputHeight -gt 0) { $environment['KYTY_OUTPUT_HEIGHT'] = "$OutputHeight" }
 # -Gpu: the graphics card on a PC with more than one, its number in the log's "Vulkan GPU <n>:" list or a part of its
 # name (-Gpu 4090); without it the first discrete GPU, in the order Windows' graphics settings give (issue #132). Give
 # precompile-windows.ps1 the same -Gpu: the pipelines are compiled for one card.

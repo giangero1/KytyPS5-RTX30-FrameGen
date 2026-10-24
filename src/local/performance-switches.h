@@ -6,6 +6,7 @@
 #include "native-buffer-residency.h"
 #include "local-platform.h"
 #include "native-resource-state.h"
+#include "spin-gate.h"
 
 #include <array>
 #include <atomic>
@@ -86,6 +87,9 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_READBACK_SLOTS", &kyty_local_readback_slots_mode},
 	    // 1: buffer upload copies on the upload worker; 2: image staging copies as well.
 	    Switch {"KYTY_ASYNC_UPLOAD", &kyty_local_async_upload_mode, 0, 2},
+	    // The upload and recording workers spin for new work only while this process's CPUs keep three idle
+	    // (spin-gate.h); 0 always, 2 never.
+	    Switch {"KYTY_SPIN_GATE", &kyty_local_spin_gate, 0, 2},
 	    Switch {"KYTY_BUFFER_RECLAIM", &kyty_local_buffer_reclaim_mode},
 	    Switch {"KYTY_UNMAP_PROTECT_SKIP", &kyty_local_unmap_protect_skip_mode},
 	    Switch {"KYTY_BDA_DIRTY_REGIONS", &kyty_local_bda_dirty_regions_mode},

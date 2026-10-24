@@ -450,13 +450,46 @@ int PollMouse(uint64_t now_ms) {
 	return MOUSE_POLL_INTERVAL_MS;
 }
 
+// The cursor over the window hides 3 s after the mouse last moved and shows again when it moves (issue #129). (The mouse
+// as a stick hides it anyway: relative mode.)
+constexpr uint64_t CURSOR_HIDE_MS  = 3000;
+static uint64_t    g_cursor_moved  = 0;
+static bool        g_cursor_hidden = false;
+
+static void NoteCursorEvent(const SDL_Event& event) {
+	if (event.type != SDL_MOUSEMOTION) return;
+	g_cursor_moved = SDL_GetTicks64();
+	if (g_cursor_hidden) {
+		SDL_ShowCursor(SDL_ENABLE);
+		g_cursor_hidden = false;
+	}
+}
+
 bool HostInputWaitEvent(SDL_Event* event) {
 	if (!g_mouse.enabled || SDL_GetKeyboardFocus() == nullptr) {
 		CenterMouseStick();
-		if (SDL_WaitEvent(event) == 0) {
+		const uint64_t now = SDL_GetTicks64();
+		if (g_cursor_moved == 0) g_cursor_moved = now;
+		if (!g_cursor_hidden && now >= g_cursor_moved + CURSOR_HIDE_MS) {
+			SDL_ShowCursor(SDL_DISABLE);
+			g_cursor_hidden = true;
+		}
+		if (g_cursor_hidden) {
+			if (SDL_WaitEvent(event) == 0) {
+				EXIT("%s\n", SDL_GetError());
+			}
+			NoteCursorEvent(*event);
+			return true;
+		}
+		SDL_ClearError();
+		if (SDL_WaitEventTimeout(event, static_cast<int>(g_cursor_moved + CURSOR_HIDE_MS - now)) != 0) {
+			NoteCursorEvent(*event);
+			return true;
+		}
+		if (SDL_GetError()[0] != '\0') {
 			EXIT("%s\n", SDL_GetError());
 		}
-		return true;
+		return false;
 	}
 
 	const int timeout_ms = PollMouse(SDL_GetTicks64());

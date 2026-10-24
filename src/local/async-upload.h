@@ -13,6 +13,7 @@
 #include "live-counters.h"
 #include "local-platform.h"
 #include "parallel-pages.h"
+#include "spin-gate.h"
 
 #include <algorithm>
 #include <atomic>
@@ -130,16 +131,18 @@ private:
 		t_worker = true;
 		// Created by the render thread: do not inherit its dedicated CPU.
 		LocalPlatform::PinThreadToCpuList(std::getenv("KYTY_RECORDING_CPUS"));
-		// Pause iterations the worker polls for new copies before it sleeps.
+		// Pause iterations the worker polls for new copies before it sleeps (while its CPUs idle: spin-gate.h).
 		constexpr uint32_t UploadSpins = 20000;
 		uint64_t           done        = 0;
 		for (;;) {
-			uint64_t head = m_head.load(std::memory_order_acquire);
-			for (uint32_t spin = 0; head == done && spin < UploadSpins; ++spin) {
+			uint64_t       head  = m_head.load(std::memory_order_acquire);
+			const uint32_t spins = head == done && SpinGate::Open(false) ? UploadSpins : 0;
+			for (uint32_t spin = 0; head == done && spin < spins; ++spin) {
 				_mm_pause();
 				head = m_head.load(std::memory_order_acquire);
 			}
 			if (head == done) {
+				LiveCounters::Add(LiveCounters::UploadSleeps);
 				m_sleeping.store(true, std::memory_order_seq_cst);
 				head = m_head.load(std::memory_order_seq_cst);
 				if (head == done) {

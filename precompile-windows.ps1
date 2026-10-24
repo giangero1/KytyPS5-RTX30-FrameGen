@@ -291,13 +291,21 @@ function Start-Precompile([string]$name, [string[]]$arguments) {
 	$process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
 	$process.ProcessorAffinity = [IntPtr]$mask
 	$null = [KytyPrecompile.Qos]::High($process.Handle) # also keeps the exit code readable after the process ends
-	$process | Add-Member NoteProperty NvidiaCache $env:__GL_SHADER_DISK_CACHE_PATH -PassThru
+	$process | Add-Member NoteProperty NvidiaCache $env:__GL_SHADER_DISK_CACHE_PATH
+	$process | Add-Member NoteProperty Logs @("$logs\$name.err.log", "$logs\$name.out.log") -PassThru
 }
 function Remove-NvidiaCache($process) { Remove-Item -Recurse -Force $process.NvidiaCache -ErrorAction SilentlyContinue }
 function Wait-Precompile($process, [string]$what) {
 	$process.WaitForExit()
 	Remove-NvidiaCache $process
-	if ($process.ExitCode -ne 0) { throw "$what failed; logs: $logName" }
+	if ($process.ExitCode -ne 0) {
+		# The program's own last words first (a graphics card the emulator cannot use says what it lacks, #149).
+		foreach ($file in $process.Logs) {
+			$tail = @(Get-Content $file -Tail 4 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+			if ($tail.Count) { $tail | ForEach-Object { Write-Host "  $_" }; break }
+		}
+		throw "$what failed; logs: $logName"
+	}
 }
 
 Write-Host "precompile: $Seeds, $Shards shards, $Jobs at a time, affinity 0x$('{0:X}' -f $mask); logs $logName"

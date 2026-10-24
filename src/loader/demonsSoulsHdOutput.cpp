@@ -27,7 +27,39 @@ void Nop(uint64_t address, uint32_t length) {
 
 } // namespace
 
+uint32_t CustomOutputHeight() {
+	static const uint32_t height = [] {
+		const char* value = std::getenv("KYTY_OUTPUT_HEIGHT");
+		if (value == nullptr || *value == 0) return 0u;
+		const auto parsed = static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
+		if (parsed == DemonsSoulsRenderSize::OutputHeight) return 0u;
+		if (parsed < HdHeight || parsed > DemonsSoulsRenderSize::OutputHeight) {
+			std::printf("Demon's Souls output: KYTY_OUTPUT_HEIGHT=%s is not 1080-2160; not used\n", value);
+			return 0u;
+		}
+		return parsed;
+	}();
+	return height;
+}
+
+uint32_t UpscaledHeight() {
+	return CustomOutputHeight() != 0 ? CustomOutputHeight() : HdHeight;
+}
+
+uint32_t UpscaledWidth() {
+	return CustomOutputHeight() != 0 ? DemonsSoulsRenderSize::RenderSizeFor(CustomOutputHeight()).width : HdWidth;
+}
+
+bool InterfaceScaled() {
+	return g_active && g_upscaled && CustomOutputHeight() > HdHeight;
+}
+
 bool Requested() {
+	// KYTY_OUTPUT_HEIGHT: the PS5 Pro path's output at that height (with an upscaler only: the game's own HD path has no
+	// other size).
+	if (const char* upscaler = std::getenv("KYTY_UPSCALER");
+	    CustomOutputHeight() != 0 && upscaler != nullptr && *upscaler != 0 && std::strcmp(upscaler, "off") != 0)
+		return true;
 	const char* value = std::getenv("KYTY_HD_OUTPUT");
 	if (value != nullptr && *value != 0 && std::strcmp(value, "auto") != 0) return std::strcmp(value, "0") != 0;
 	// Unset or "auto" (the default): the HD output when the automatic render height (the window's) is at most 1080 lines,
@@ -85,9 +117,11 @@ void Install(Program* program) {
 	for (const auto at: RendererOverrides) Nop(*renderer + at, 3);
 	Nop(*interface + InterfaceOverrides[0], 3);
 	Nop(*interface + InterfaceOverrides[1], 4);
+	const uint32_t width  = upscaled ? UpscaledWidth() : HdWidth;
+	const uint32_t height = upscaled ? UpscaledHeight() : HdHeight;
 	for (const auto site: buffers) {
-		std::memcpy(reinterpret_cast<void*>(site + 1), &HdWidth, sizeof(HdWidth));
-		std::memcpy(reinterpret_cast<void*>(site + 6), &HdHeight, sizeof(HdHeight));
+		std::memcpy(reinterpret_cast<void*>(site + 1), &width, sizeof(width));
+		std::memcpy(reinterpret_cast<void*>(site + 6), &height, sizeof(height));
 	}
 	if (!upscaled) {
 		// The ceilings' mov r64, 2160 << 32 | 3840 (the immediate after the opcode's two bytes).
@@ -120,7 +154,9 @@ void Install(Program* program) {
 	g_upscaled = upscaled;
 	SetMode(2);
 	if (upscaled) {
-		std::printf("Demon's Souls HD output: the interface at 1920x1080 (its HD layout) over the PS5 Pro path's 1080p output\n");
+		std::printf("Demon's Souls HD output: the interface at 1920x1080 (its HD layout) over the PS5 Pro path's %ux%u "
+		            "output%s\n",
+		            width, height, CustomOutputHeight() != 0 ? " (KYTY_OUTPUT_HEIGHT; the interface scaled to it)" : "");
 	} else {
 		std::printf("Demon's Souls HD output: the game's HD path (display mode 2: output, post-processing and interface at "
 		            "1920x1080) is on\n");

@@ -1252,6 +1252,9 @@ bool CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
 		     args.base_vertex, args.first_instance);
 	}
+	// KYTY_OUTPUT_HEIGHT: the interface's HD layout scaled to the output (hud-anchor.h).
+	std::optional<HudAnchor::ScaleScope> scaled;
+	if (HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs())) scaled.emplace(m_ctx, m_sh_ctx.GetPs());
 	return m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
 }
 
@@ -1319,7 +1322,8 @@ uint32_t CommandProcessor::TryNativeXprDraws(std::span<const uint32_t> packets, 
 	}
 	if (packets.size() < 5 || (packets[4] & ~0x20u) != 2u || m_index_type_and_size > 1 ||
 	    !m_index_base_addr || !m_index_buffer_size || !m_draw_indirect_args_base_addr ||
-	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList) {
+	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList ||
+	    HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs())) {
 		// The cached draw-state key covers only draws the native path saw.
 		executor.NativeXprForgetState();
 		return 0;
@@ -1373,7 +1377,7 @@ uint32_t CommandProcessor::TryNativeMultiDraw(std::span<const uint32_t> packet) 
 	if (FrameCapture::Active() || packet.size() < 10 || ((packet[4] >> 30u) & 1u) != 0 || packet[5] == 0 ||
 	    packet[5] > max_draws || packet[8] != sizeof(DrawIndexedIndirectArgs) || (packet[9] & ~0x20u) != 2u ||
 	    m_index_type_and_size > 1 || !m_index_base_addr || !m_index_buffer_size || !m_draw_indirect_args_base_addr ||
-	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList)
+	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList || HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs()))
 		return skip();
 	const uint32_t                  count = packet[5];
 	std::array<uint64_t, max_draws> commands; // the first `count` are written, only they are read
@@ -1408,7 +1412,7 @@ uint32_t CommandProcessor::TryNativeDirectDraw(std::span<const uint32_t> packet)
 		return 0u;
 	};
 	if (FrameCapture::Active() || XprCapture::Enabled() || m_index_type_and_size > 1 ||
-	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList)
+	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList || HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs()))
 		return skip();
 	// What CpOpDrawIndex / CpOpDrawIndexOffset accept (anything else takes them).
 	const uint64_t element = m_index_type_and_size == 0 ? 2 : 4;
@@ -1464,6 +1468,7 @@ uint32_t CommandProcessor::TryNativeAutoDraw(std::span<const uint32_t> packet) {
 	if (hud.Several()) return 0u;
 	std::optional<HudAnchor::Scope>        anchor;
 	std::optional<HudAnchor::StretchScope> widen;
+	std::optional<HudAnchor::ScaleScope>   scaled;
 	if (hud.Single()) {
 		anchor.emplace(m_ctx, m_sh_ctx.GetPs(), static_cast<uint32_t>(std::countr_zero(hud.areas)), false);
 	} else if (hud.marker) {
@@ -1471,6 +1476,7 @@ uint32_t CommandProcessor::TryNativeAutoDraw(std::span<const uint32_t> packet) {
 	} else {
 		HudAnchor::RestoreMask(m_sh_ctx.GetPs());
 		if (HudAnchor::Stretched(m_ctx)) widen.emplace(m_ctx, m_sh_ctx.GetPs());
+		else if (HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs())) scaled.emplace(m_ctx, m_sh_ctx.GetPs());
 	}
 	const RenderExecutor::NativeXprDirectDraw draw {0, packet[1], m_num_instances, false};
 	return m_renderer.GetRenderExecutor().NativeXprTry(CurrentBuffer(), false, {}, 0, 0, vk::IndexType::eUint16, &draw)
@@ -1801,6 +1807,7 @@ bool CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	if (hud.areas == 0 || hud.Single()) {
 		std::optional<HudAnchor::Scope>        anchor;
 		std::optional<HudAnchor::StretchScope> widen;
+		std::optional<HudAnchor::ScaleScope>   scaled;
 		if (hud.Single()) {
 			anchor.emplace(m_ctx, m_sh_ctx.GetPs(), static_cast<uint32_t>(std::countr_zero(hud.areas)), false);
 		} else if (hud.marker) {
@@ -1808,6 +1815,7 @@ bool CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		} else {
 			HudAnchor::RestoreMask(m_sh_ctx.GetPs());
 			if (HudAnchor::Stretched(m_ctx)) widen.emplace(m_ctx, m_sh_ctx.GetPs());
+			else if (HudAnchor::Scaled(m_ctx, m_sh_ctx.GetVs(), m_sh_ctx.GetPs())) scaled.emplace(m_ctx, m_sh_ctx.GetPs());
 		}
 		return m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
 	}

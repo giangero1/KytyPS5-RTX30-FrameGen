@@ -41,6 +41,8 @@ public:
 		return m_page_manager.WatchedSpan(vaddr, size, first, end);
 	}
 	void SyncProtection(uint64_t vaddr, uint64_t size) { m_page_manager.SyncProtection(vaddr, size); }
+	// KYTY_READ_GUARD: the page's trackers' protection after its read guard's fault was served (PageManager).
+	void SettleProtection(uint64_t vaddr) { m_page_manager.SettleProtection(vaddr); }
 	// (PageManager::WatchedRuns: for a holder of the guest address-space lock.)
 	void WatchedRuns(uint64_t vaddr, uint64_t size, std::vector<PageManager::WatchedRun>* runs) const {
 		m_page_manager.WatchedRuns(vaddr, size, runs);

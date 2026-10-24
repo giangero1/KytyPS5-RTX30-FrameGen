@@ -45,15 +45,24 @@ bool SetLeastHeight(Program* program, uint32_t height) {
 
 void Install(Program* program) {
 	const char* upscaler = std::getenv("KYTY_UPSCALER");
-	const bool fsr = Libs::Graphics::FsrNative::UpscalerRequested();
+	// (FSR 3 built in, Linux: any GPU, nothing to wait for on the device.)
+	bool fsr = Libs::Graphics::FsrNative::UpscalerRequested();
 	if (upscaler == nullptr || (std::string_view(upscaler) != "dlss" && !fsr) || program == nullptr ||
 	    !Libs::Graphics::DemonsSouls::IsSupportedGame() || program->file_name.filename() != "eboot.bin")
 		return;
-	// (The device exists by now: without DLSS on it, the game's own TAA rather than a stretch without anti-aliasing.)
+	// (The device exists by now: without DLSS on it, FSR 3 built in - issue #85: DLSS asked for with FSR 3 frame
+	// generation on left an RTX 2060 the game's TAA from 540 lines -, else the game's own TAA rather than a stretch.)
 	if (!fsr && !Libs::Graphics::FrameGen::UpscalerReady()) {
-		std::printf("Demon's Souls super resolution: DLSS is not available here (an NVIDIA RTX GPU and NVIDIA's DLSS "
-		            "runtime: Streamline on Windows, libkyty_dlss.so on Linux); the game's own TAA kept\n");
-		return;
+		const char* reason = Libs::Graphics::FrameGen::UsesFsr()
+		                         ? "AMD FSR 3 frame generation runs without NVIDIA's Streamline, which DLSS needs"
+		                         : "it needs an NVIDIA RTX GPU and NVIDIA's DLSS runtime: Streamline on Windows, "
+		                           "libkyty_dlss.so on Linux";
+		if (!Libs::Graphics::FsrNative::UpscaleInsteadOfDlss()) {
+			std::printf("Demon's Souls super resolution: DLSS is not available here (%s); the game's own TAA kept\n", reason);
+			return;
+		}
+		std::printf("Demon's Souls super resolution: DLSS is not available here (%s); FSR 3 upscaling instead\n", reason);
+		fsr = true;
 	}
 	const auto site = GuestCode::FindUnique(*program, GuestCode::Pattern(CreateCheck));
 	if (!site) {
@@ -69,8 +78,11 @@ void Install(Program* program) {
 	g_active = true;
 	// (Its 1920x1080 output: DemonsSoulsHdOutput::Install takes the interface's part, DemonsSoulsRenderSize the sizes.)
 	g_hd = DemonsSoulsHdOutput::Requested();
-	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, %s in place of the TAA) is on%s\n",
-	            fsr ? "FSR 3" : "DLSS", g_hd ? ", its output 1920x1080 (KYTY_HD_OUTPUT)" : "");
+	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, %s in place of the TAA) is on", fsr ? "FSR 3" : "DLSS");
+	if (g_hd)
+		std::printf(", its output %ux%u (%s)", DemonsSoulsHdOutput::UpscaledWidth(), DemonsSoulsHdOutput::UpscaledHeight(),
+		            DemonsSoulsHdOutput::CustomOutputHeight() != 0 ? "KYTY_OUTPUT_HEIGHT" : "KYTY_HD_OUTPUT");
+	std::printf("\n");
 }
 
 } // namespace Loader::DemonsSoulsSuperResolution

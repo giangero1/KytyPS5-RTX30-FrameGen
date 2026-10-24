@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -129,6 +130,9 @@ public:
 	                                                bool allow_wait = true);
 	void                                        Commit();
 	[[nodiscard]] uint64_t Copy(const void* source, uint64_t size, uint64_t alignment = 0);
+	// KYTY_STAGING_STATS: an upload the caller sends around the ring (a temporary buffer, the
+	// large path), counted with its use.
+	void NoteBypass(uint64_t size);
 
 private:
 	friend struct StreamBufferTestAccess;
@@ -145,6 +149,21 @@ private:
 	                                                uint64_t requested_upper_bound, bool allow_wait,
 	                                                size_t& wait_cursor, uint64_t& wait_bound);
 
+	// KYTY_STAGING_STATS=1 (diagnostics): an upload ring's use, printed each 10 s (Map): the bytes
+	// through it, its laps, the waits for the GPU, the most in flight (reserved and not yet read
+	// by the GPU: the size it needs), the reservations refused (too large, or a wait not allowed)
+	// and the uploads sent around it.
+	struct UseStats {
+		uint64_t bytes = 0, maps = 0, laps = 0, waits = 0, wait_us = 0, largest = 0;
+		uint64_t second_bytes = 0, busiest = 0, in_flight = 0;
+		uint64_t refused = 0, refused_bytes = 0, bypassed = 0, bypassed_bytes = 0;
+		std::chrono::steady_clock::time_point since {}, second {};
+	};
+	[[nodiscard]] uint64_t InFlight();
+	void                   NoteUse(uint64_t size, bool wrap);
+	void                   NoteRefusal(uint64_t size);
+
+	UseStats              m_use;
 	uint64_t              m_offset      = 0;
 	uint64_t              m_mapped_size = 0;
 	std::vector<Watch>    m_current_watches;
@@ -154,6 +173,11 @@ private:
 	size_t                m_wait_cursor = 0;
 	uint64_t              m_wait_bound  = 0;
 };
+
+// The buffer reclaimer frees no memory from HoldBufferFrees (false: a free runs now) to ReleaseBufferFrees: a defragmentation
+// pass's moves must stay allocated until it ends (BufferCache::Defragment; streamBuffer.cpp).
+[[nodiscard]] bool HoldBufferFrees();
+void               ReleaseBufferFrees();
 
 } // namespace Libs::Graphics
 

@@ -34,6 +34,10 @@ double   ThreadCpuSeconds(uint64_t handle);
 uint64_t CurrentThreadCycles();
 // The calling thread's scheduling priority (Windows: THREAD_PRIORITY_*, -2 lowest .. 2 highest; Linux: 0).
 int CurrentThreadPriority();
+// The idle time of the logical processors this process may run on, summed, in 100 ns units, and which those are
+// (bit n: processor n; Windows: the process's group, NtQuerySystemInformation; Linux: the main thread's affinity,
+// /proc/stat's idle + iowait). False when unknown (macOS).
+bool ProcessCpusIdleTime(uint64_t* idle_100ns, uint64_t* cpus);
 
 // Total CPU seconds of the threads with this name (0 where the OS cannot enumerate them).
 double NamedThreadsCpuSeconds(const char* name);
@@ -99,10 +103,15 @@ MemoryUse ProcessMemory();
 uint64_t  PhysicalMemory();
 // The physical memory the system can still give without paging (free and standby; Linux: MemAvailable). 0: unknown.
 uint64_t AvailablePhysicalMemory();
+// KYTY_HEAP_TRIM=1 (off by default): the heap's free pages go back to the system on a thread of its
+// own, checked every 30 s, after 64 MiB of growth since the last trim; the first 10 are told.
+// Linux (glibc): malloc_trim (in Demon's Souls 130-150 MiB of its 1 GB of arenas were free chunks
+// still in RAM). Windows 8.1 and later: HeapOptimizeResources on the process heap (the CRT's).
+void StartHeapTrimmer();
 // Diagnostics: the busy blocks of every heap of the process by size ("size<TAB>count<TAB>bytes" lines to `path`, the
 // heaps locked while walked: a pause of a second or so), by size and first qword (<path>.sig.tsv: SPIR-V, a vtable as
-// module+offset, zero, data) and the committed private allocations (<path>.vm.tsv, the heaps' marked); false where
-// the host cannot list them.
+// module+offset, zero, data) and the committed private allocations (<path>.vm.tsv, the heaps' marked); Linux (glibc):
+// the arenas' totals and malloc_info's XML instead. false where the host cannot list them.
 bool WriteHeapHistogram(const char* path);
 // Diagnostics: the stacks of live heap blocks of the given sizes ("2848,5151,16-256"): StartAllocTrace hooks the process
 // heap calls of every loaded module (their imports of RtlAllocateHeap/RtlFreeHeap/RtlReAllocateHeap) and records each

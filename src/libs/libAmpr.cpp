@@ -11,6 +11,7 @@
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"
 #include "loader/systemContent.h"
+#include "file-offload.h"
 #include "local-platform.h"
 #include "scene-tags.h"
 #include "slow-log.h"
@@ -1618,6 +1619,7 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 			*bytes_read += read;
 		}
 		LogAprRead(host_path, destination, *bytes_read, file_offset);
+		FileOffload::NoteRead(host_path, destination, *bytes_read, file_offset);
 		return OK;
 	}
 
@@ -1663,6 +1665,7 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 	}
 
 	file.Close();
+	FileOffload::NoteRead(host_path, destination, *bytes_read, file_offset);
 	return OK;
 }
 

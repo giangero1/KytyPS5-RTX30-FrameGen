@@ -377,6 +377,7 @@ int main(int argc, char* argv[]) {
 		return 0;
 	}
 
+	LocalPlatform::StartHeapTrimmer();
 	Run(options);
 
 	return 0;

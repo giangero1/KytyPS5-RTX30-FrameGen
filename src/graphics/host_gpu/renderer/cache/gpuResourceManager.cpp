@@ -571,6 +571,7 @@ void GpuResourceManager::RunCollectors() {
 	// buffer collected under it faults back at once, and each registration invalidates every BDA
 	// region proof. Buffers are collected only after a frame without such shaders.
 	m_buffer_cache.RunGarbageCollector(!std::exchange(m_bda_used, false));
+	LibKernel::Memory::CoolHotReads();
 }
 
 } // namespace Libs::Graphics

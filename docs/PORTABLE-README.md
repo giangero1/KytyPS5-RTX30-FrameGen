@@ -54,8 +54,8 @@ hold every language, and one value turns the others on: see [Game language](#gam
 | --- | --- | --- |
 | OS | Windows 10 (1803 or later) or Windows 11, 64-bit | |
 | CPU | AVX2 required (Intel Core 4th generation / AMD Ryzen or later) | 8 cores or more recommended; the test PC has an i9-14900K |
-| RAM | **32 GB recommended, 16 GB works** | The game process takes about 20 GB while a save loads but uses only about 4 GB of it in play, so with 16 GB Windows moves the rest to the page file and loading takes longer. It needs about 34 GB of RAM plus page file: keep the page file "system managed" or set it to at least 32 GB (the launcher warns when Windows cannot provide it). When the RAM runs full (a browser open beside the game, the first session's shader preparation), some 16 GB PCs get a MEMORY_MANAGEMENT blue screen (issue #50): close other large programs while playing |
-| GPU | NVIDIA RTX with **12 GB of VRAM recommended, 8 GB works** | About 11 GB of VRAM in use in the heaviest areas. With less than 12 GB, render targets and buffers keep the video memory and the textures that do not fit are read from system memory. The test PC with its video memory limited to 8 GB: Boletaria's gate 45–52 fps, most areas 40–60, the heaviest (Shrine of Storms, Stonefang 2-1, Boletaria 1-2 and 1-3) 10–35, changing from run to run with the textures the driver keeps in video memory; a slower GPU or PCIe link gives less. The test PC has an RTX 5090; users run it on AMD Radeon (RX 6000 and newer) and Intel Arc cards too, with problems of their own tracked in the issues |
+| RAM | **32 GB recommended, 16 GB works** | The game process takes about 20 GB while a save loads but uses only about 4 GB of it in play, so with 16 GB Windows moves the rest to the page file and loading takes longer. It needs about 34 GB of RAM plus page file: keep the page file "system managed" or set it to at least 32 GB (the launcher warns when Windows cannot provide it). The MEMORY_MANAGEMENT blue screen that PCs whose RAM ran full got (issue #50) is fixed; a full RAM still makes the game slow, so close other large programs (a browser) while playing |
+| GPU | NVIDIA RTX with **12 GB of VRAM recommended, 8 GB works** | About 11 GB of VRAM in use in the heaviest areas. With less than 12 GB, render targets and buffers keep the video memory and the textures that do not fit are read from system memory. The test PC with its video memory limited to 8 GB, walking past every enemy of a map (up to 120 fps): Boletaria's gate about 72 fps, Boletaria 1-2 98, 1-3 64 (its own limit on the processor, the same with all the video memory), Stonefang 2-1 87, Shrine of Storms 96, about what it runs with all its video memory. That measures where the textures go, not a slower GPU: an 8 GB card is usually a slower one too, and gives less. The test PC has an RTX 5090; users run it on AMD Radeon (RX 6000 and newer) and Intel Arc cards too, with problems of their own tracked in the issues |
 | GPU driver | The latest | The emulator uses Vulkan, which comes with the driver |
 | Disk | About 83 GB for the game, an SSD recommended | The emulator takes about 270 MB, the shader caches about 2.5–5 GB, and while playing the system temp folder needs another 4–5 GB |
 
@@ -176,8 +176,18 @@ width, as without DLSS. (Note: do not treat upstream RTX 5090 results as this RT
 a 1080p TV: its post-processing and HUD at 1920x1080 instead of 3840x2160 scaled down to the window afterwards,
 and its 3D at most 1080 high (a higher render height is lowered to 1080). Less work for the graphics card: at
 Boletaria's start on an RTX 5090, 69.8 fps at 4K, 78.3 at 1080p. It suits 1080p screens; on larger ones the
-picture is softer than the 4K output's. DLSS makes the 4K output, so with "DLSS (PS5 Pro path)" this row stays
-at 4K.
+picture is softer than the 4K output's. With "DLSS (PS5 Pro path)" too, the game's PS5 Pro mode makes a
+1920x1080 output instead of its 4K one: DLSS turns the 3D at the render height (360 = Ultra Performance, 540 = Performance, 630 = Balanced, 720 and 900 = Quality, 1080 = DLAA)
+into the 1080p picture, and the game finishes it at 1080p, HUD included. For 1080p screens and graphics cards
+that find DLSS's 4K output too heavy (RTX 20/30): the game's own 1080p mode has no upscaler (its 3D, anti-aliasing
+and effects at the render height, stretched at the end). On an RTX 5090 at Boletaria's start (its processor the
+limit there): DLSS from 720 to 1080p 75.2 fps, DLSS from 1080 to 4K 68.8, the game's TAA at 1080p 76.8.
+"1440p" (with DLSS or FSR 3 only; -Upscaler dlss -OutputHeight 1440 on a un.cmd line, contributed by Tutuzaooo)
+makes that output 2560x1440, for 1440p screens: the upscaler's own picture at the screen's size, neither the 4K one
+scaled down nor the 1080p one scaled up, the HUD and menus in the game's HD layout scaled to it. Its render heights:
+1440 = DLAA, 960 = Quality, 840 = Balanced, 720 = Performance, 480 = Ultra Performance. With the game's TAA the
+output stays 4K.
+
 "Frame generation" (DLSS, 2x to 6x; official native support on NVIDIA RTX 40 or newer, 3x and up RTX 50; this
 fork's RTX 30 compatibility setup with OpenDLSSG is validated at 2x) uses NVIDIA's Streamline
 runtime, which this package does not include: download the Streamline SDK (a release zip from
@@ -240,6 +250,7 @@ shortcut):
 | `-Set KYTY_ALL_LANGUAGES=0` | Demon's Souls' language settings offer every language the package has, in every region: the text of 23 (a US game Russian, Japanese or Korean too) and the voices of 9 (English, French, German, Italian, Spanish, Japanese, Brazilian Portuguese, Latin American Spanish; British English speaks English); this keeps only the console region's |
 | `-RenderHeight 1080` | The height the game renders its 3D at (360–2160; below 720 is meant for the 1080p output, `-HdOutput`, e.g. 540 = DLSS Performance there): lower is faster on a slow graphics card and less sharp. Without it the height follows the window, at most 1440 as on the PS5 (1080 on a 1080p screen) |
 | `-HdOutput` | The game's own 1080p output (the launcher's "Game output: 1080p"): post-processing and HUD at 1920×1080, the 3D at most 1080 high; with `-Upscaler dlss`, DLSS makes the 1080p picture from it. Without it (and without `-RenderHeight`, `-Upscaler` or `-Aspect`) the game takes it by itself for a window or screen at most 1080 lines high; `-Set KYTY_HD_OUTPUT=0` keeps the 4K output |
+| `-OutputHeight 1440` | With `-Upscaler dlss` or `-Upscaler fsr`: the PS5 Pro path's output at that height (1080–2159, 16:9; 2560×1440 for 1440, the launcher's "Game output: 1440p"), the HUD in the game's HD layout scaled to it; `-RenderHeight` picks the mode (1440 DLAA, 960 Quality, 840 Balanced, 720 Performance, 480 Ultra Performance) |
 | `-Aspect 21:9` | The 3D rendered wider (`21:9` or `32:9`) for ultrawide displays; the HUD keeps its shape at the sides; in-game menus, movies and loading screens are stretched to the width (with `-AspectFit` too: movies, the title and loading screens keep their 16:9, with black bars at the sides) |
 | `-Quality low` | How much the game draws: `low` or `lowest` (shorter shadows, simpler distant detail), faster where the processor limits the frame rate |
 | `-TextureReduce 2` | Large textures without their largest levels: `1` half the size per side (the default with less than 12 GB of video memory), `2` a quarter, `0` whole |
@@ -430,14 +441,15 @@ hurts.
   mode" in the launcher (see above). The frame rate is then about 37% lower.
 - Sound: 3D sound has no direction, and there is no reverb. On a busy PC it may crackle: the sound buffer
   (20 ms) grows by itself after each dropout; to start with a bigger one: `run.cmd -Set KYTY_AUDIO_BUFFER_MS=60`
-  (up to 200).
+  (up to 200). Where the CPU is at its limit and the game makes its sound too late, the sound is stretched a
+  little to fill the gaps instead of cutting out (`-Set KYTY_AUDIO_STRETCH=0` turns that off).
 - It uses a lot of memory and video memory: on PCs with too little it may just exit.
-- On some PCs whose RAM runs full (mostly 16 GB with a browser open), Windows stops with a
-  MEMORY_MANAGEMENT blue screen after 10 minutes to an hour of play (issue #50, being worked on). Until it is
-  fixed: close other large programs while playing, keep a page file of at least 32 GB, and restart the game
-  after long sessions. An untested option for it is on the launcher's Experimental page, "Keep memory resident"
-  (`run.cmd -Set KYTY_RESIDENT_MB=6144,KYTY_WORKING_SET_TRIM=0`; it uses about 1.5 GB more RAM): a note in issue #50
-  on whether it helps is welcome.
+- The MEMORY_MANAGEMENT blue screen (0x1A, 0x41202) that PCs whose RAM ran full got after 10 minutes to an hour
+  of play (issue #50, mostly 16 GB with a browser open) is fixed: Windows mishandles no-access pages of a mapped
+  file when it pages them out, and the emulator now keeps such pages from reads with guard pages instead
+  (`run.cmd -Set KYTY_READ_GUARD=0` goes back to no access, for comparison). If you still get this blue screen,
+  please report it in issue #50. A full RAM still makes the game slow: close other large programs while playing
+  and keep a page file of at least 32 GB.
 - On some TVs the picture tears or stutters with VSync on. A user's fix on a 60 Hz TV with an NVIDIA
   card (issue #30): in the NVIDIA Control Panel, Manage 3D settings > Program Settings, add
   `kyty_emulator.exe` and set "Vertical sync" to On and "Vulkan/OpenGL present method" to "Prefer native".

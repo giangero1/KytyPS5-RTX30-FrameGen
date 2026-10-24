@@ -40,6 +40,9 @@ partial class MainWindow : Window {
 	// Below 720 with the 1080p output only (issue #129): DLSS's Balanced, Performance and Ultra Performance there; the
 	// game's TAA down to 540 (from 360 its picture is too soft).
 	static readonly int[] LowRenderHeights = { 630, 540, 360 };
+	// The 1440p output's (DLSS or FSR 3, PR #165): DLAA, Quality, Balanced 840, Performance 720, Ultra Performance 480 (its
+	// third; the emulator raises a height between the third and the half to the half).
+	static readonly int[] Output1440Heights = { 1440, 1152, 1080, 960, 840, 720, 480 };
 
 	// (--screenshot pictures: no game art, another path shown.)
 	public static bool ScreenshotNoArt;
@@ -62,7 +65,7 @@ partial class MainWindow : Window {
 	TextBox gamePath, extraArgs;
 	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, hud, uiLanguage, gpu;
 	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, antiLag,
-		keepResident, fps30;
+		keepResident, fps30, padSpeaker;
 	TextBlock renderNote, outputNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
 	Image banner;
 	Border bannerFallback;
@@ -505,7 +508,8 @@ partial class MainWindow : Window {
 			UpdateRenderNote();
 			Changed();
 		};
-		var outputs = new[] { new Choice(T("output.auto"), "auto"), new Choice(T("output.4k"), "4k"), new Choice(T("output.1080"), "1080p") };
+		var outputs = new[] { new Choice(T("output.auto"), "auto"), new Choice(T("output.4k"), "4k"), new Choice(T("output.1080"), "1080p"),
+			new Choice(T("output.1440"), "1440p") };
 		output = Combo(outputs, Math.Max(0, Array.FindIndex(outputs, c => (string)c.Value == S.Str("output"))));
 		outputNote = Desc("");
 		output.SelectionChanged += (s, e) => {
@@ -528,6 +532,7 @@ partial class MainWindow : Window {
 			UpdateUpscalerNote();
 			SelectRenderHeight();
 			UpdateRenderNote();
+			UpdateOutputNote();
 			Changed();
 		};
 		SelectRenderHeight();
@@ -551,6 +556,8 @@ partial class MainWindow : Window {
 			Margin = new Thickness(12, 0, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 380 };
 		streamlineText.Text = context.Streamline ?? (S.Str("streamline").Length != 0 ? S.Str("streamline") : T("streamline.none"));
 		fsr = Switch(context.FsrAvailable && S.Bool("fsr"), context.FsrAvailable);
+		fsr.Checked += (s, e) => UpdateUpscalerNote();
+		fsr.Unchecked += (s, e) => UpdateUpscalerNote();
 		return Page("graphics.title",
 			Section("graphics.resolution"),
 			Row("upscaler", upscaler, upscalerNote),
@@ -586,11 +593,21 @@ partial class MainWindow : Window {
 		}
 	}
 
-	// The output's note, with what Automatic picks for this window.
+	// The output's lines: 1080 (the 1080p output), 1440 (1440p with an upscaler) or 2160.
+	int OutputLines {
+		get {
+			if (HdOutputChosen) return 1080;
+			var value = output == null ? S.Str("output") : Value(output) as string;
+			return value == "1440p" && renderForDlss ? 1440 : 2160;
+		}
+	}
+
+	// The output's note, with what Automatic picks for this window (and 1440p's without an upscaler).
 	void UpdateOutputNote() {
 		if (outputNote == null || output == null) return;
-		var auto = Value(output) as string == "auto";
-		outputNote.Text = T("output.desc") + (auto ? " " + F("output.autoNow", HdOutputChosen ? "1080p" : "4K") : "");
+		var value = Value(output) as string;
+		outputNote.Text = T("output.desc") + (value == "auto" ? " " + F("output.autoNow", HdOutputChosen ? "1080p" : "4K")
+		                                      : value == "1440p" && !renderForDlss ? " " + T("output.1440NoUpscaler") : "");
 	}
 
 	// The Display page's window changed: Automatic may pick the other output, and the render heights follow it.
@@ -604,7 +621,7 @@ partial class MainWindow : Window {
 	// The DLSS mode a render height runs in: the emulator picks it from the height's share of the game's output
 	// (frame-gen.cpp: 95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance).
 	string SuperResolutionMode(int height) {
-		var share = (double)height / (HdOutputChosen ? 1080 : 2160);
+		var share = (double)height / OutputLines;
 		// (FSR 3 names the same modes; at the output's own size it is FSR's native anti-aliasing.)
 		var native = upscaler != null && Value(upscaler) as string == "fsr" ? "fsr.native" : "dlss.dlaa";
 		return T(share >= 0.95 ? native : share >= 0.62 ? "dlss.quality" : share >= 0.55 ? "dlss.balanced" : share >= 0.45 ? "dlss.performance" : "dlss.ultra");
@@ -631,8 +648,10 @@ partial class MainWindow : Window {
 	// one as the upscaler's default (DLSS 1080, the game's TAA 1440).
 	void SelectRenderHeight() {
 		var most = MaxRenderHeight();
-		var allowed = RenderHeights.Where(h => h <= most && (!renderForDlss || (HdOutputChosen ? h <= 1080 : h >= 1080 || h == 720))).ToList();
-		if (HdOutputChosen) allowed.AddRange(LowRenderHeights.Where(h => renderForDlss || h >= 540));
+		var lines = OutputLines;
+		var allowed = lines == 1440 ? Output1440Heights.Where(h => h <= most).ToList()
+		              : RenderHeights.Where(h => h <= most && (!renderForDlss || (lines == 1080 ? h <= 1080 : h >= 1080 || h == 720))).ToList();
+		if (lines == 1080) allowed.AddRange(LowRenderHeights.Where(h => renderForDlss || h >= 540));
 		fillingRender = true;
 		var was = building;
 		building = true;
@@ -665,19 +684,26 @@ partial class MainWindow : Window {
 	void UpdateRenderNote() {
 		if (render == null || renderNote == null) return;
 		var h = SelectedRender();
-		// (The 1080p output's 3D is at most 1080 high.)
-		var capped = HdOutputChosen && h > 1080;
-		if (capped) h = 1080;
-		// (DLSS's 4K output takes 1080 at least, or 720 for its ultra performance: a third of the output.)
-		var raised = renderForDlss && !HdOutputChosen && h < 1080 && h != 720;
-		if (raised) h = 1080;
+		var lines = OutputLines;
+		// (The 1080p and 1440p outputs' 3D is at most their height.)
+		var capped = lines < 2160 && h > lines;
+		if (capped) h = lines;
+		// (The PS5 Pro path's 4K output takes 1080 at least, or 720 for its ultra performance: a third of the output; the
+		// 1440p output 720 at least, or 480.)
+		var least = lines == 1440 ? 720 : 1080;
+		var raised = renderForDlss && lines != 1080 && h < least && h != lines / 3;
+		if (raised) h = least;
 		var w = (int)(Math.Floor(h * RatioAspect() / 8.0 + 0.5) * 8);
-		renderNote.Text = F(capped ? "render.capped" : raised ? "render.raised" : "render.desc", w, h);
+		renderNote.Text = F(capped ? (lines == 1440 ? "render.capped1440" : "render.capped")
+		                    : raised ? (lines == 1440 ? "render.raised1440" : "render.raised") : "render.desc", w, h);
 	}
 
 	void UpdateUpscalerNote() {
 		var chosen = upscaler == null ? S.Str("upscaler") : Value(upscaler) as string;
+		// (DLSS with FSR 3 frame generation: that runs without Streamline, so the emulator upscales with FSR 3 instead.)
+		var fsrFrameGen = fsr != null ? fsr.IsChecked == true : context.FsrAvailable && S.Bool("fsr");
 		upscalerNote.Text = chosen == "fsr" ? T("upscaler.fsrNote")
+		                    : chosen == "dlss" && fsrFrameGen ? T("upscaler.dlssFsrFg")
 		                    : T(context.FrameGenAvailable ? "upscaler.ok" : !context.RtxGpu ? "upscaler.noRtx" : "upscaler.noStreamline");
 	}
 
@@ -706,9 +732,12 @@ partial class MainWindow : Window {
 		var choose = FlatButton("button.cheats", (s, e) => ChooseCheats());
 		choose.Margin = new Thickness(16, 0, 0, 0);
 		cheatState = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 0, 0) };
+		padSpeaker = Switch(S.Bool("pad_speaker"));
 		return Page("game.title",
 			Section("game.console"),
 			Row("language", language, Desc(T("language.desc"))),
+			Section("game.controller"),
+			Row("padspeaker", padSpeaker, Desc(T("padspeaker.desc"))),
 			Section("game.cheats"),
 			Row("cheats", Horizontal(cheats, choose, cheatState), Desc(T("cheats.desc"))));
 	}
@@ -864,6 +893,7 @@ partial class MainWindow : Window {
 		S.Set("lowlatency", lowLatency.IsChecked == true);
 		S.Set("hdr", hdr.IsChecked == true);
 		S.Set("cheats", cheats.IsChecked == true);
+		S.Set("pad_speaker", padSpeaker.IsChecked == true);
 		S.Set("safegpu", safeGpu.IsChecked == true);
 		S.Set("hud", Math.Max(0, hud.SelectedIndex));
 		S.Set(renderForDlss ? "render_dlss" : "render", SelectedRender());
@@ -891,11 +921,14 @@ partial class MainWindow : Window {
 		var dlss = commands.Dlss;
 		var upscaledBy = dlss ? T("summary.dlss") : commands.FsrUpscaler ? T("summary.fsr3") : T("summary.taa");
 		var hdOutput = commands.HdOutput;
+		var output1440 = !hdOutput && commands.Output1440;
 		var superResolution = dlss || commands.FsrUpscaler;
 		var height = superResolution ? S.Int("render_dlss") : S.Int("render");
 		if (hdOutput && height > 1080) height = 1080;
-		// (The PS5 Pro path's 4K output takes 1080 at least, or 720, as its render height list.)
-		if (superResolution && !hdOutput && height < 1080 && height != 720) height = 1080;
+		if (output1440 && height > 1440) height = 1440;
+		// (The PS5 Pro path's 4K output takes 1080 at least, or 720, as its render height list; the 1440p output 720, or 480.)
+		if (superResolution && !hdOutput && !output1440 && height < 1080 && height != 720) height = 1080;
+		if (output1440 && height < 720 && height != 480) height = 720;
 		string frameGeneration;
 		if (context.FsrAvailable && S.Bool("fsr")) frameGeneration = T("summary.fsr");
 		else if (context.FrameGenAvailable && S.Int("framegen") >= 2) frameGeneration = "DLSS " + S.Int("framegen") + "x";
@@ -908,9 +941,11 @@ partial class MainWindow : Window {
 		if (S.Bool("lowlatency")) options.Add(T("lowlatency"));
 		if (S.Bool("hdr")) options.Add(T("summary.hdr"));
 		if (hdOutput) options.Add(T("summary.hd"));
+		if (output1440) options.Add(T("summary.1440"));
 		if (S.Bool("present_direct")) options.Add(T("summary.presentDirect"));
 		if (S.Bool("antilag")) options.Add(T("summary.antilag"));
 		if (S.Bool("keep_resident")) options.Add(T("summary.keepResident"));
+		if (!S.Bool("pad_speaker")) options.Add(T("summary.padSpeakerOff"));
 		if (S.Str("extra_args").Length != 0) options.Add(T("summary.extra"));
 
 		var parts = new List<string> {

@@ -1987,12 +1987,22 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 	// FSR: the interface canvas as it is at the flip (RecordHudless reads its alpha).
 	inputs.ui_valid = false;
 	if (const uint64_t canvas = g_ui_canvas.load(std::memory_order_relaxed); (g_fsr || g_fsr_native) && canvas != 0) {
-		static uint32_t reports = 0;
-		if (const auto id = cache.FindImageFromRange(canvas, 8, false); id) {
-			auto&              ui   = cache.GetImage(id);
-			const vk::Extent2D size = UiCanvasExtent();
-			if (ui.backing.image != nullptr && ui.backing.extent.width == size.width &&
-			    ui.backing.extent.height == size.height && !IsDepthFormat(ui.backing.format)) {
+		// (Another image can start at the canvas's address later on - a pass reusing its memory -: the canvas is the
+		// one of its size used last, not the first registered there. Each change of state reported, up to 32.)
+		static int        state   = 0; // 1: copied, 2: unusable, 3: not in the cache
+		static uint32_t   reports = 0;
+		static vk::Format format  = vk::Format::eUndefined; // the canvas's, from its first copy
+		const vk::Extent2D size  = UiCanvasExtent();
+		uint32_t           count = 0;
+		auto               id    = cache.FindImageAt(canvas, size.width, size.height, format, &count);
+		// (A canvas made again in another format - a game setting changed - is still the canvas: the one of its size used
+		// last, its format taken from then on.)
+		if (!id && format != vk::Format::eUndefined) id = cache.FindImageAt(canvas, size.width, size.height, vk::Format::eUndefined, &count);
+		int                now   = 3;
+		if (id) {
+			auto& ui = cache.GetImage(id);
+			now      = 2;
+			if (!IsDepthFormat(ui.backing.format)) {
 				// (At most 1920x1080, the 4K canvas at half its size: its alpha is a mask, read a few pixels wide; a
 				// quarter of the video memory.)
 				bool failed = false;
@@ -2001,21 +2011,24 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 				if (!failed) {
 					BlitInto(vk_command, ui, inputs.ui);
 					inputs.ui_valid = true;
+					now             = 1;
+					format          = ui.backing.format;
 				}
-				if (reports++ == 0) {
-					std::printf("Frame generation: FSR HUD canvas copied (%ux%u, format %d)\n", ui.backing.extent.width,
-					            ui.backing.extent.height, static_cast<int>(ui.backing.format));
-					std::fflush(stdout);
-				}
-			} else if (reports++ < 4) {
-				std::printf("Frame generation: FSR HUD canvas image unusable (%ux%u, format %d)\n", ui.backing.extent.width,
-				            ui.backing.extent.height, static_cast<int>(ui.backing.format));
+			}
+			if (now != state && reports < 32) {
+				++reports;
+				std::printf("Frame generation: FSR HUD canvas %s (%ux%u, format %d; %u image(s) at 0x%" PRIx64 ")\n",
+				            now == 1 ? "copied" : "image unusable", ui.backing.extent.width, ui.backing.extent.height,
+				            static_cast<int>(ui.backing.format), count, canvas);
 				std::fflush(stdout);
 			}
-		} else if (reports++ < 4) {
-			std::printf("Frame generation: FSR HUD canvas at 0x%" PRIx64 " not in the texture cache\n", canvas);
+		} else if (now != state && reports < 32) {
+			++reports;
+			std::printf("Frame generation: FSR HUD canvas at 0x%" PRIx64 " not in the texture cache as %ux%u (%u image(s) there)\n",
+			            canvas, size.width, size.height, count);
 			std::fflush(stdout);
 		}
+		state = now;
 	} else if ((g_fsr || g_fsr_native) && canvas == 0) {
 		static uint32_t scenes = 0;
 		if (++scenes == 300) {
@@ -2503,7 +2516,7 @@ void OnFsrQueues(GraphicContext& graphics) {
 #ifdef KYTY_FRAMEGEN_FSR
 	if (!g_fsr) return;
 	if (graphics.fsr_present_queue == nullptr || graphics.fsr_compute_queue == nullptr ||
-	    graphics.fsr_acquire_queue == nullptr || graphics.present_queue == nullptr) {
+	    graphics.fsr_acquire_queue == nullptr) {
 		LOGF("frame generation: no queues for FSR's swapchain\n");
 		std::printf("Frame generation: the GPU lacks the queues FSR's swapchain needs, FSR off\n");
 		std::fflush(stdout);
@@ -2533,11 +2546,13 @@ vk::Result CreateSwapchain(GraphicContext& graphics, const vk::SwapchainCreateIn
 	create.swapchain      = &handle;
 	create.allocator      = nullptr;
 	create.createInfo     = static_cast<VkSwapchainCreateInfoKHR>(info);
-	// The game queue is the emulator's present queue (presents go through QueuePresent there, under its lock): the
-	// swapchain records the generated frame's work on it in the present call.
-	create.gameQueue         = {static_cast<VkQueue>(graphics.present_queue), graphics.queue_family, nullptr};
+	// The game queue is the emulator's present queue (presents go through QueuePresent there, under its lock), or without
+	// one its graphics queue (under queue_mutex): the swapchain records the generated frame's work on it in the present
+	// call.
+	const vk::Queue game = graphics.present_queue != nullptr ? graphics.present_queue : graphics.queue;
+	create.gameQueue         = {static_cast<VkQueue>(game), graphics.queue_family, nullptr};
 	create.asyncComputeQueue = {static_cast<VkQueue>(graphics.fsr_compute_queue), graphics.fsr_compute_family, nullptr};
-	create.presentQueue      = {static_cast<VkQueue>(graphics.fsr_present_queue), graphics.queue_family, nullptr};
+	create.presentQueue      = {static_cast<VkQueue>(graphics.fsr_present_queue), graphics.fsr_present_family, nullptr};
 	create.imageAcquireQueue = {static_cast<VkQueue>(graphics.fsr_acquire_queue), graphics.fsr_compute_family, nullptr};
 	if (!FsrOk(s.api.CreateContext(&s.swapchain_context, &create.header, nullptr), "swapchain")) {
 		s.swapchain_context = nullptr;
@@ -2740,8 +2755,12 @@ void NotePresented(uint32_t frames) {
 	g_presented_frames.store(std::max(frames, 1u), std::memory_order_relaxed);
 }
 
+bool PresenterGeneratesHdr() {
+	return PresenterGenerates() && g_fsr_native;
+}
+
 uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const FrameInputs* inputs, const UpscaleImage& backbuffer,
-                  vk::Rect2D region, std::span<const UpscaleImage> outputs) {
+                  vk::Rect2D region, std::span<const UpscaleImage> outputs, bool hdr) {
 #ifdef KYTY_FRAMEGEN_NGX
 	if (!PresenterGenerates()) return 0;
 	const bool discontinuity = g_fg_discontinuity.exchange(false, std::memory_order_relaxed);
@@ -2781,6 +2800,7 @@ uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const Fra
 		last         = now;
 		fsr.frame_ms = frame_ms;
 		fsr.reset    = !g_fg_history || discontinuity;
+		fsr.pq       = hdr;
 		// (This frame's HUD-less image, RecordHudless: FSR takes the HUD and the menus from the game's frame.)
 		if (auto& h = g_fsr_hud; h.ready) {
 			const auto& hud = h.images[h.index];
@@ -2924,6 +2944,7 @@ uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const Fra
 	(void)backbuffer;
 	(void)region;
 	(void)outputs;
+	(void)hdr;
 	return 0;
 #endif
 }
