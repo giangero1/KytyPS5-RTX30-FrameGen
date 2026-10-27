@@ -370,6 +370,14 @@ $env:KYTY_PRECOMPILE_CLAIMS = Join-Path $nvidiaCaches 'claims'
 $stuckList = "$logs\stuck-pipelines.txt"
 $env:KYTY_PRECOMPILE_STUCK = $stuckList
 $restarted = 0
+# A shard that used almost no CPU for 20 minutes is hung outside the driver's compiles, which its own guard watches (exit 4
+# after 10): it is ended and started again, twice at most, then left out (the game makes its pipelines where first
+# needed). Issue #213: one shard of the first tier stayed for good at no CPU, and the second tier never started.
+$idleMinutes = 20
+$idleWindow = @{}   # name -> @(CPU seconds, the window's start)
+$idleEnded = @{}    # names ended here: their exit is not a failure
+$idleRestarts = @{} # 'seed file|shard' -> restarts
+$idleChecked = Get-Date
 $running = @{}
 $finished = 0
 $split = 0
@@ -405,6 +413,26 @@ while ($first.Count -or $second.Count -or $running.Count) {
 		if (!$process.HasExited) { continue }
 		$running.Remove($name)
 		Remove-NvidiaCache $process
+		$idleWindow.Remove($name)
+		if ($idleEnded.ContainsKey($name)) {
+			$idleEnded.Remove($name)
+			$key = "$seedFile|$shard"
+			$idleRestarts[$key] = 1 + [int]$idleRestarts[$key]
+			foreach ($stream in 'out', 'err') {
+				Move-Item -LiteralPath "$logs\$name.$stream.log" "$logs\$name.idle$($idleRestarts[$key]).$stream.log" -ErrorAction SilentlyContinue
+			}
+			if ($idleRestarts[$key] -le 2) {
+				$queue = $second
+				if ($seedFile -eq $Recorded) { $queue = $first }
+				$queue.Enqueue(@($seedFile, $shard))
+				Write-Host ("  {0:hh\:mm\:ss} {1}: no work for $idleMinutes minutes; started again" -f ((Get-Date) - $begin), $name)
+			} else {
+				$finished++
+				Write-Host (("  {0:hh\:mm\:ss} {1}: no work for $idleMinutes minutes a third time; left out (the game makes its " +
+					"pipelines when it first needs them)") -f ((Get-Date) - $begin), $name)
+			}
+			continue
+		}
 		if ($process.ExitCode -eq 3) {
 			# NVIDIA's dictionary from the shard's first pipeline on: the driver had it before the shard compiled anything,
 			# and every smaller shard would too (issue #107).
@@ -437,6 +465,21 @@ while ($first.Count -or $second.Count -or $running.Count) {
 			throw "$name failed; logs: $logName"
 		} else {
 			$finished++
+		}
+	}
+	if (((Get-Date) - $idleChecked).TotalSeconds -ge 30) {
+		$idleChecked = Get-Date
+		foreach ($name in @($running.Keys)) {
+			$process = $running[$name][2]
+			if ($process.HasExited -or $idleEnded.ContainsKey($name)) { continue }
+			$process.Refresh()
+			$cpu = $process.TotalProcessorTime.TotalSeconds
+			if (!$idleWindow.ContainsKey($name)) { $idleWindow[$name] = @($cpu, (Get-Date)); continue }
+			$cpuThen, $since = $idleWindow[$name]
+			if ($cpu - $cpuThen -ge 5) { $idleWindow[$name] = @($cpu, (Get-Date)); continue }
+			if (((Get-Date) - $since).TotalMinutes -lt $idleMinutes) { continue }
+			$idleEnded[$name] = $true
+			Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
 		}
 	}
 	if (((Get-Date) - $shown).TotalSeconds -ge 60) {

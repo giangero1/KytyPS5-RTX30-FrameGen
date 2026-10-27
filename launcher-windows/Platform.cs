@@ -260,6 +260,28 @@ static class Native {
 		return EnumDisplaySettingsW(null, -1, ref mode) ? (int)mode.dmPelsHeight : 0;
 	}
 
+	[DllImport("user32.dll")]
+	static extern IntPtr GetForegroundWindow();
+
+	[DllImport("user32.dll")]
+	static extern bool IsWindow(IntPtr window);
+
+	[DllImport("user32.dll")]
+	static extern bool SetForegroundWindow(IntPtr window);
+
+	// The window that has the focus now, as the emulator reads it from KYTY_RETURN_FOCUS (a number).
+	public static string ForegroundWindow() {
+		return GetForegroundWindow().ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
+	}
+
+	// The focus to a window ForegroundWindow named, if it is still there (Windows may refuse it to a process without it).
+	public static void Focus(string window) {
+		long handle;
+		if (long.TryParse(window, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out handle) &&
+		    handle != 0 && IsWindow(new IntPtr(handle)))
+			SetForegroundWindow(new IntPtr(handle));
+	}
+
 	[DllImport("kernel32.dll", SetLastError = true)]
 	static extern bool GetSystemCpuSetInformation(IntPtr information, uint length, out uint returned, IntPtr process, uint flags);
 

@@ -6,6 +6,7 @@
 // The bytes are this build's: never written for another emulator build to read.
 
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <cstdint>
 #include <span>
@@ -19,5 +20,13 @@ bool Save(const Libs::Graphics::ShaderRecompiler::IR::ResourcePlan& plan, std::v
 // ExtractResourcePlan ends), or with `defer_linear` left to the caller: *defer_linear tells whether it had one.
 bool Load(std::span<const uint8_t> bytes, Libs::Graphics::ShaderRecompiler::IR::ResourcePlan& plan,
           bool* defer_linear = nullptr);
+
+// A translated module's infos (what the shader prefetch keeps of it besides its SPIR-V) and the specialization it was
+// compiled with, appended to `out`; false (out unchanged) when the bytes would not load back the same. Read back at
+// `at` (advanced past them); false for malformed bytes. This build's bytes too.
+bool SaveModule(const Libs::Graphics::ShaderRecompiler::IR::CompiledShaderInfo&     info,
+                const Libs::Graphics::ShaderRecompiler::IR::ResourceSpecialization& specialization, std::vector<uint8_t>& out);
+bool LoadModule(std::span<const uint8_t> bytes, size_t& at, Libs::Graphics::ShaderRecompiler::IR::CompiledShaderInfo& info,
+                Libs::Graphics::ShaderRecompiler::IR::ResourceSpecialization& specialization);
 
 } // namespace ResourcePlanSerial

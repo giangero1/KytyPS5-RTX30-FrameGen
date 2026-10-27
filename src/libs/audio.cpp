@@ -17,12 +17,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -284,6 +286,29 @@ uint32_t AudioOutOutputs(const OutputParam* params, uint32_t num, bool blocking)
 
 	return g_audio->AudioOutOutputs(output_params.data(),
 	                                static_cast<uint32_t>(output_params.size()), blocking);
+}
+
+MainOutput MainOutputReported() {
+	static const MainOutput output = [] {
+		MainOutput  reported;
+		const char* value = std::getenv("KYTY_AUDIO_OUTPUT");
+		std::string name  = value != nullptr ? value : "";
+		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (name == "headphones") {
+			reported.connection = 0x40;
+		} else if (name == "amplifier") {
+			reported.speaker_type = 1;
+		} else if (name == "soundbar") {
+			reported.speaker_type = 2;
+		} else if (!name.empty() && name != "tv") {
+			std::printf("AudioOut: KYTY_AUDIO_OUTPUT=%s is none of tv, headphones, amplifier, soundbar: the game is told a TV\n",
+			            value);
+			return reported;
+		}
+		if (!name.empty()) std::printf("AudioOut: the game is told its sound goes to %s (KYTY_AUDIO_OUTPUT)\n", name.c_str());
+		return reported;
+	}();
+	return output;
 }
 
 } // namespace AudioInternal
@@ -1205,7 +1230,7 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state) {
 		case AUDIO_OUT_PORT_TYPE_MAIN:
 		case AUDIO_OUT_PORT_TYPE_BGM:
 		case AUDIO_OUT_PORT_TYPE_AUDIO3D:
-			state->output  = 1;
+			state->output  = AudioInternal::MainOutputReported().connection;
 			state->channel = (channels_num > 2 ? 2 : channels_num);
 			break;
 		case AUDIO_OUT_PORT_TYPE_VOICE:

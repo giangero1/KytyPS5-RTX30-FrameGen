@@ -66,11 +66,17 @@ constexpr uint32_t TranslatorFeatureTableSlotsAtUse   = 2u; // a table mode slot
 // V_MIN/MAX/MIN3/MAX3_F32 as GLSL NMin/NMax, which AMD GPUs execute with the guest GPU's own NaN and signed-zero rules
 // (v_min_f32/v_max_f32), in place of an exact emulation (about a dozen instructions each; upstream PR #1761).
 constexpr uint32_t TranslatorFeatureNativeFloatMinMax = 4u;
-constexpr uint32_t TranslatorFeatures =
-    TranslatorFeatureCooperativeHalves | TranslatorFeatureTableSlotsAtUse | TranslatorFeatureNativeFloatMinMax;
+// Vector register writes under EXEC as their values where no use observes the lanes outside it (IR::EliminateExecSelects:
+// RTX 5090 at 1-1, 4K: GPU -3%; the heaviest compute shaders 4-14% fewer instructions).
+constexpr uint32_t TranslatorFeatureExecSelects = 8u;
+constexpr uint32_t TranslatorFeatures = TranslatorFeatureCooperativeHalves | TranslatorFeatureTableSlotsAtUse |
+                                        TranslatorFeatureNativeFloatMinMax | TranslatorFeatureExecSelects;
+// Those a store made without stays up to date for (no precompile offered for them alone): the next precompile, made
+// for another reason (a new graphics driver, new seeds), brings them; worth less than a precompile's time.
+constexpr uint32_t TranslatorFeaturesWithNextPrecompile = TranslatorFeatureExecSelects;
 // Those the translation uses (default: all; the emulator sets those its static store was made with before it translates
 // anything). KYTY_LANE_LOCAL_COOP=0/1 overrides the cooperative halves either way, KYTY_TABLE_SLOTS_AT_USE=0/1 the
-// table slots' loads, KYTY_NATIVE_FLOAT_MIN_MAX=0/1 the float min/max.
+// table slots' loads, KYTY_NATIVE_FLOAT_MIN_MAX=0/1 the float min/max, KYTY_EXEC_SELECTS=0/1 the EXEC selects.
 void                   SetTranslatorFeatures(uint32_t features);
 [[nodiscard]] uint32_t TranslatorFeatureSet();
 // Those this GPU's translation may use (default: all) and those it uses whatever the store was made with (`required`,

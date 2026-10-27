@@ -1036,10 +1036,15 @@ void LauncherWindow::GraphicsPage() {
 	}
 	upscalers.emplace_back("fsr");
 	upscaler_labels.emplace_back(T("upscaler.fsr"));
+	// (No upscaler and no anti-aliasing: Commands' KYTY_GAME_CONVARS, issue #220.)
+	upscalers.emplace_back("off");
+	upscaler_labels.emplace_back(T("upscaler.off"));
 	const auto  chosen = S().Str("upscaler");
 	std::string note;
 	if (chosen == "fsr")
 		note = T("upscaler.fsrNote");
+	else if (chosen == "off")
+		note = T("upscaler.offNote");
 	else
 		note = T(dlss_available_ ? "upscaler.ok"
 		         : !context_.rtx ? "upscaler.noRtx"
@@ -1201,6 +1206,23 @@ void LauncherWindow::GamePage() {
 		    }
 	    },
 	    T("language.desc"));
+	// What the game is told its sound goes to (KYTY_AUDIO_OUTPUT, issue #207): it mixes for it.
+	const std::vector<std::string> audio_outputs {"", "headphones", "amplifier", "soundbar"};
+	Row(
+	    "audiooutput",
+	    [&] {
+		    int index = static_cast<int>(
+		        std::find(audio_outputs.begin(), audio_outputs.end(), S().Str("audio_output")) - audio_outputs.begin());
+		    if (index >= 4) index = 0;
+		    if (Combo("##audiooutput", &index,
+		              {T("audiooutput.tv"), T("audiooutput.headphones"), T("audiooutput.amplifier"),
+		               T("audiooutput.soundbar")},
+		              340)) {
+			    S().Set("audio_output", audio_outputs[static_cast<size_t>(index)]);
+			    Changed();
+		    }
+	    },
+	    T("audiooutput.desc"));
 	Section("game.cheats");
 	Row(
 	    "cheats",
@@ -1464,9 +1486,11 @@ void LauncherWindow::ExperimentalPage() {
 std::string LauncherWindow::Summary(std::vector<std::pair<std::string, std::string>>* lines) const {
 	const auto res         = Times(S().Str("resolution"));
 	const bool dlss        = commands_.Dlss();
-	const auto upscaled_by = std::string(T(dlss                      ? "summary.dlss"
-	                                       : commands_.FsrUpscaler() ? "summary.fsr3"
-	                                                                 : "summary.taa"));
+	const auto upscaled_by =
+	    std::string(T(dlss                         ? "summary.dlss"
+	                : commands_.FsrUpscaler()      ? "summary.fsr3"
+	                : S().Str("upscaler") == "off" ? "summary.noAa"
+	                                               : "summary.taa"));
 	const bool hd          = commands_.HdOutput();
 	const bool sr          = dlss || commands_.FsrUpscaler();
 	int        height      = sr ? S().Int("render_dlss") : S().Int("render");

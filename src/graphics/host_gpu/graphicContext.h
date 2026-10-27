@@ -36,15 +36,18 @@ struct GraphicContext {
 	// VK_EXT_memory_priority, enabled only for KYTY_SIMULATE_VRAM_MB (vma.cpp).
 	bool                               memory_priority_enabled               = false;
 	// KYTY_FULLSCREEN_EXCLUSIVE=0|1 (Windows, issue #166): the swapchain asks the driver to keep out of exclusive
-	// fullscreen (0) or allows it (1), through VK_EXT_full_screen_exclusive; -1 (unset, or the extension missing): the
-	// driver's own choice.
+	// fullscreen (0) or allows it (1), through VK_EXT_full_screen_exclusive; -1 (unset on a GPU other than AMD's, or
+	// the extension missing): the driver's own choice. Unset on an AMD GPU: 0, full_screen_exclusive_default.
 	int                                full_screen_exclusive                 = -1;
+	bool                               full_screen_exclusive_default         = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	// A pipeline may require 64-lane subgroups of its pixel shader (KYTY_PS_WAVE64).
 	bool                               fragment_wave64_requirable            = false;
 	// With subgroup size control: wave64 compute programs run on 64-lane subgroups (else emulated on 32-lane ones, two
 	// guest lanes an invocation). VulkanInitSubgroupSizeControl decides it (KYTY_COMPUTE_WAVE64).
 	bool                               compute_wave64_native                 = false;
+	// The Steam Deck's GPU (Van Gogh) with Linux' RADV (VulkanInitSubgroupSizeControl).
+	bool                               steam_deck_radv                       = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;
@@ -62,6 +65,8 @@ struct GraphicContext {
 	bool                               maintenance5_enabled                  = false;
 	// VK_NV_copy_memory_indirect: an upload prologue's copies are one command (BufferCache::UploadDirtyRanges).
 	bool                               copy_memory_indirect_enabled          = false;
+	// KYTY_PIPELINE_STATS (diagnostic): VK_KHR_pipeline_executable_properties, the driver's statistics of pipelines.
+	bool                               pipeline_statistics_enabled           = false;
 	// False (the emulator): the driver keeps no copy of its own of the pipelines it makes (the
 	// precompile's captures of static cache hits come from that copy).
 	bool                               pipeline_binary_internal_cache        = true;

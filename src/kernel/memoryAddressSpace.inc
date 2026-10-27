@@ -1476,6 +1476,7 @@ private:
 			SetFailure(failure_reason, FailureReason::FixedMapViewFailed);
 			return nullptr;
 		}
+		VirtualMemory::WriteWatchMapped(vaddr, size, mode);
 		return ptr;
 	}
 
@@ -1483,6 +1484,7 @@ private:
 	// process-lifetime guest reservation.
 	static bool UnmapViewPreservePlaceholder(void* vaddr, uint64_t size) {
 		void* ptr = mmap(vaddr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+		VirtualMemory::WriteWatchUnmapped(reinterpret_cast<uint64_t>(vaddr), size);
 		return ptr != MAP_FAILED && ptr == vaddr;
 	}
 
@@ -1754,7 +1756,7 @@ public:
 			const auto end   = std::min(run.address + run.size, vaddr + size);
 			if (begin >= end) continue;
 			if (at < begin && !ProtectMappedUnlocked(at, begin - at, mode)) return false;
-			if (!ProtectMappedUnlocked(begin, end - begin, run.mode)) return false;
+			if (!ProtectMappedUnlocked(begin, end - begin, run.mode, true)) return false;
 			at = end;
 		}
 		return at >= vaddr + size || ProtectMappedUnlocked(at, vaddr + size - at, mode);
@@ -1782,10 +1784,26 @@ public:
 			if (LiveCensus::g_render) LiveCounters::Add(LiveCounters::AddressSpaceWaitKtRender, waited);
 		}
 		WaitNotBusy(lock, vaddr, size);
-		return ProtectMappedUnlocked(vaddr, size, mode);
+		return ProtectMappedUnlocked(vaddr, size, mode, true);
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// KYTY_READ_GUARD_RACES=1 (diagnostics): a guard fault whose page another thread read before it is guarded again
+	// (read_guard_races). The faulting read left the page out of the working set; in it now, another thread's read
+	// brought it in, and read the bytes the fault is about to replace (pressure mode at the Tower of Latria's start: ~1 a
+	// frame of ~100 guard faults; the hot pages' no access, 0.0).
+	static void CountReadGuardRace(uint64_t page) {
+		static const bool on = [] {
+			const char* value = std::getenv("KYTY_READ_GUARD_RACES");
+			return value != nullptr && *value == '1';
+		}();
+		if (!on) return;
+		PSAPI_WORKING_SET_EX_INFORMATION entry {};
+		entry.VirtualAddress = reinterpret_cast<void*>(page);
+		if (K32QueryWorkingSetEx(GetCurrentProcess(), &entry, sizeof(entry)) != 0 && entry.VirtualAttributes.Valid != 0)
+			LiveCounters::Add(LiveCounters::ReadGuardRaces);
+	}
+
 	// KYTY_READ_GUARD: the 4 KiB page of `vaddr` guarded again after its guard raised a fault, when it is a guest view's
 	// (true). At once, without the lock: Windows took the guard off as it raised the fault, and until it is back any other
 	// thread reads the page without a fault - a GPU-written page's stale bytes, a texture-offloaded page's zeros. The
@@ -1801,6 +1819,7 @@ public:
 		if (VirtualQuery(reinterpret_cast<const void*>(page), &info, sizeof(info)) != sizeof(info) ||
 		    info.Type != MEM_MAPPED || info.State != MEM_COMMIT)
 			return false;
+		CountReadGuardRace(page);
 		if (DWORD old = 0; VirtualProtect(reinterpret_cast<void*>(page), Page, PAGE_GUARD | PAGE_READONLY, &old) != 0)
 			return true;
 		std::shared_lock lock(m_mutex);
@@ -1820,8 +1839,11 @@ public:
 	// before its guard was back (1 in ~90 guard faults at the Tower of Latria, whose lights went out: issues #158, #159).
 	// No access keeps every reader out, and its blue screen (0x1A/0x41202, issues #5, #50) needs a no-access page whose
 	// memory Windows took out of RAM, which a locked page never is. The pages read back are few (~1,100 a second at
-	// Latria): the rest of the watched memory keeps its guards.
+	// Latria): the rest of the watched memory keeps its guards. Not while the PC is short of memory (HotReadsPressure):
+	// the lock holds the page of the backing view, not the guest view's page tables, and a 16 GB PC with 0.9 GB left
+	// blue-screened (0x1A) with these pages the only ones of the views without access (issue #91).
 	void NoteRead(uint64_t vaddr) {
+		if (m_hot_pressure.load(std::memory_order_relaxed)) return;
 		constexpr uint64_t Page    = 0x1000;
 		const uint64_t     page    = vaddr & ~(Page - 1);
 		auto*              backing = const_cast<uint8_t*>(m_backing->BackingPointer(page, Page));
@@ -1852,27 +1874,60 @@ public:
 		m_hot.emplace(page, HotRead {backing, now});
 	}
 
+	// Whether the PC is short of memory for no-access pages (NoteRead): less than KYTY_HOT_READS_MIN_AVAIL_MB (default
+	// 1536; 0: never) of RAM left, until 512 MiB more is. The blue screens came with less than 1.5 GB left (issues #5,
+	// #47, #50, #91; the laptop's and this desktop's under a memory hog), when Windows takes pages and page tables out of
+	// RAM. Each guard is a gap other threads read stale bytes in: at the Tower of Latria's start ~1 a frame with guards
+	// everywhere, none with these pages' no access (KYTY_READ_GUARD_RACES=1); and 16 GB PCs spend whole sessions around
+	// 2 GB left (issue #159: 2.0-2.5 GB the median), so from 2 GB, leaving at 3, they flickered as before the hot pages.
+	bool HotReadsPressure() {
+		static const uint64_t minimum = [] {
+			const char* value = std::getenv("KYTY_HOT_READS_MIN_AVAIL_MB");
+			return (value != nullptr && *value != '\0' ? std::strtoull(value, nullptr, 10) : uint64_t {1536}) << 20u;
+		}();
+		bool pressure = m_hot_pressure.load(std::memory_order_relaxed);
+		if (minimum == 0) return pressure;
+		const uint64_t available = LocalPlatform::AvailablePhysicalMemory();
+		if (available == 0) return pressure;
+		const bool next = pressure ? available < minimum + (uint64_t {512} << 20u) : available < minimum;
+		if (next != pressure) {
+			m_hot_pressure.store(next, std::memory_order_relaxed);
+			static std::atomic<uint32_t> reports {0};
+			if (reports.fetch_add(1, std::memory_order_relaxed) < 8)
+				std::printf("Memory: %llu MiB left on the PC: the pages read back %s\n",
+				            static_cast<unsigned long long>(available >> 20u),
+				            next ? "get guards like the rest until there is more (KYTY_HOT_READS_MIN_AVAIL_MB)"
+				                 : "keep no access again");
+		}
+		return next;
+	}
+
 	// The pages not read back for a while (HotReadsKeepMs) go back to guards, their backing pages unlocked: twice a
 	// second, under the lock held exclusively (no protection of the trackers changes meanwhile) when it is free at once.
-	// The render thread's (GpuResourceManager::RunCollectors).
+	// While the PC is short of memory, all of them, every flip until none is left. The render thread's
+	// (GpuResourceManager::RunCollectors).
 	void CoolHotReads() {
 		constexpr uint64_t Page = 0x1000;
 		const uint64_t     now  = GetTickCount64();
-		if (now - m_hot_cooled < 500) return;
-		m_hot_cooled = now;
+		if (now - m_hot_cooled < 500 && !m_hot_draining) return;
+		m_hot_cooled        = now;
+		const bool pressure = kyty_local_read_guard.load(std::memory_order_relaxed) != 0 &&
+		                      kyty_local_hot_reads.load(std::memory_order_relaxed) != 0 && HotReadsPressure();
 		{
 			std::lock_guard hot_lock(m_hot_mutex);
-			if (std::none_of(m_hot.begin(), m_hot.end(),
-			                 [&](const auto& hot) { return now - hot.second.noted >= HotReadsKeepMs; }))
+			m_hot_draining = pressure && !m_hot.empty();
+			if (!m_hot_draining && std::none_of(m_hot.begin(), m_hot.end(), [&](const auto& hot) {
+				    return now - hot.second.noted >= HotReadsKeepMs;
+			    }))
 				return;
 		}
 		std::unique_lock lock(m_mutex, std::try_to_lock);
 		if (!lock.owns_lock()) return;
 		std::lock_guard hot_lock(m_hot_mutex);
 		uint64_t        cooled = 0;
-		for (auto it = m_hot.begin(); it != m_hot.end() && cooled < 512;) {
+		for (auto it = m_hot.begin(); it != m_hot.end() && cooled < (pressure ? 2048u : 512u);) {
 			const auto page = it->first;
-			if (now - it->second.noted < HotReadsKeepMs || BusyUnlocked(page, Page)) {
+			if ((!pressure && now - it->second.noted < HotReadsKeepMs) || BusyUnlocked(page, Page)) {
 				++it;
 				continue;
 			}
@@ -1888,6 +1943,7 @@ public:
 			it = m_hot.erase(it);
 			++cooled;
 		}
+		m_hot_draining = pressure && !m_hot.empty();
 		LiveCounters::Add(LiveCounters::ReadHotCools, cooled);
 	}
 
@@ -2249,7 +2305,8 @@ private:
 		m_busy.erase(it);
 	}
 
-	bool ProtectMappedUnlocked(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
+	// `trackers`: the GPU trackers' protection (VirtualMemory::ProtectWriteWatch), not the guest's.
+	bool ProtectMappedUnlocked(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode, bool trackers = false) {
 		const auto end = vaddr + size;
 		auto       it  = m_mapped.upper_bound(vaddr);
 		if (it != m_mapped.begin()) {
@@ -2268,7 +2325,8 @@ private:
 			const auto flush_run = [&]() {
 				if (run_start >= run_end) return true;
 				LiveTrace::SlowOsCallScope slow(LiveTrace::OsProtect, run_start, run_end - run_start);
-				return VirtualMemory::Protect(run_start, run_end - run_start, mode);
+				return trackers ? VirtualMemory::ProtectWriteWatch(run_start, run_end - run_start, mode)
+				                : VirtualMemory::Protect(run_start, run_end - run_start, mode);
 			};
 			for (; it != m_mapped.end() && it->second.vaddr < end; ++it) {
 				const auto& region      = it->second;
@@ -2292,7 +2350,7 @@ private:
 			const auto  range_end   = std::min(end, region.vaddr + region.size);
 			if (range_start >= range_end) continue;
 			LiveTrace::SlowOsCallScope slow(LiveTrace::OsProtect, range_start, range_end - range_start);
-			if (!ProtectView(range_start, range_end - range_start, mode, region.type)) {
+			if (!ProtectView(range_start, range_end - range_start, mode, region.type, trackers)) {
 				return false;
 			}
 		}
@@ -2301,7 +2359,7 @@ private:
 
 	// A guest mapping's protection; on Windows with KYTY_READ_GUARD, a view's no access as a read guard
 	// (kyty_local_read_guard: private memory is no section's), but for the pages read back lately (NoteRead).
-	bool ProtectView(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode, MappingType type) {
+	bool ProtectView(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode, MappingType type, bool trackers) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		if (mode == VirtualMemory::Mode::NoAccess && type == MappingType::Backing &&
 		    kyty_local_read_guard.load(std::memory_order_relaxed) != 0) {
@@ -2312,7 +2370,8 @@ private:
 				return begin >= until ||
 				       VirtualProtect(reinterpret_cast<void*>(begin), until - begin, protection, &old) != 0;
 			};
-			if (kyty_local_hot_reads.load(std::memory_order_relaxed) == 0) return set(vaddr, end, PAGE_GUARD | PAGE_READONLY);
+			if (kyty_local_hot_reads.load(std::memory_order_relaxed) == 0 || m_hot_pressure.load(std::memory_order_relaxed))
+				return set(vaddr, end, PAGE_GUARD | PAGE_READONLY);
 			thread_local std::vector<std::pair<uint64_t, uint64_t>> hot;
 			hot.clear();
 			{
@@ -2340,7 +2399,7 @@ private:
 			return set(at, end, PAGE_GUARD | PAGE_READONLY);
 		}
 #endif
-		return VirtualMemory::Protect(vaddr, size, mode);
+		return trackers ? VirtualMemory::ProtectWriteWatch(vaddr, size, mode) : VirtualMemory::Protect(vaddr, size, mode);
 	}
 
 	// A free entry consumed with its placeholder split later (SplitPlaceholders, outside the lock).
@@ -2874,6 +2933,7 @@ private:
 		// mappings and never acquires a new guest address.
 		void* ptr = mmap(reinterpret_cast<void*>(vaddr), size, PROT_NONE,
 		                 MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+		VirtualMemory::WriteWatchUnmapped(vaddr, size);
 		EXIT_IF(ptr == MAP_FAILED || reinterpret_cast<uint64_t>(ptr) != vaddr);
 #else
 		(void)vaddr;
@@ -2923,6 +2983,8 @@ private:
 	std::map<uint64_t, HotRead>  m_hot;
 	std::map<uint8_t*, uint32_t> m_hot_locks;
 	uint64_t                     m_hot_cooled = 0; // (CoolHotReads: one thread)
+	bool                         m_hot_draining = false; // (CoolHotReads: short of memory, pages left to cool)
+	std::atomic<bool>            m_hot_pressure {false}; // HotReadsPressure
 #endif
 };
 

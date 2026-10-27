@@ -178,6 +178,14 @@ endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
 
+# A build for the Steam Deck (tools/local/deck/build-deck.sh: -march=znver2, Linux): KYTY_STEAM_DECK=1 in the code
+# selects its defaults and code paths: four Zen 2 cores, an RDNA 2 GPU of 8 compute units, 16 GB of memory the two
+# share.
+option(KYTY_STEAM_DECK "Build for the Steam Deck" OFF)
+if(KYTY_STEAM_DECK)
+	add_compile_definitions(KYTY_STEAM_DECK=1)
+endif()
+
 config_compiler_and_linker()
 
 if(KYTY_CLANG_CL)
@@ -342,7 +350,7 @@ add_custom_command(
 	OUTPUT "${fault_buffer_shader_header}"
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
 	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
-	        -DCACHING_PAGEBITS=14 -DMAX_PAGE_FAULTS=1024
+	        -DCACHING_PAGEBITS=14 -DMAX_PAGE_FAULTS=1024 -DFAULT_WORDS_PER_INVOCATION=16u
 	        -o "${fault_buffer_shader_spv}" "${fault_buffer_shader_source}"
 	COMMAND ${CMAKE_COMMAND} -DINPUT=${fault_buffer_shader_spv} -DOUTPUT=${fault_buffer_shader_header}
 	        -DSYMBOL=FAULT_BUFFER_PROCESS_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"

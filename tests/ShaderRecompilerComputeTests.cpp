@@ -32427,16 +32427,27 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, MaskSccSaveexecBranchesTheWholeWave());
     return 0;
   }
-  if (argc == 2 && std::strcmp(argv[1], "--shader-cases-only") == 0) {
+  // --shader-cases-only <name>: the cases after that one (a run on past a failure, which aborts).
+  if ((argc == 2 || argc == 3) &&
+      std::strcmp(argv[1], "--shader-cases-only") == 0) {
     VulkanHarness vulkan;
     const auto tests = MakeCases();
     const auto graphics_tests = MakeGraphicsCases();
     CheckOpcodeCoverage(tests, graphics_tests);
+    bool skipping = argc == 3;
     for (const auto &test : tests) {
-      RunCase(&vulkan, test);
+      if (!skipping) {
+        RunCase(&vulkan, test);
+      } else if (std::strcmp(test.name, argv[2]) == 0) {
+        skipping = false;
+      }
     }
     for (const auto &test : graphics_tests) {
-      RunGraphicsCase(&vulkan, test);
+      if (!skipping) {
+        RunGraphicsCase(&vulkan, test);
+      } else if (std::strcmp(test.name, argv[2]) == 0) {
+        skipping = false;
+      }
     }
     return 0;
   }

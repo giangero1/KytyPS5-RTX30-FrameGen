@@ -41,6 +41,7 @@ const std::vector<std::string>& GameVariables() {
 	                                             "KYTY_ANTI_LAG",
 	                                             "KYTY_FLIP_RATE",
 	                                             "KYTY_DLSS_PRESET",
+	                                             "KYTY_AUDIO_OUTPUT",
 	                                             "KYTY_RUN_LOG"};
 	return names;
 }
@@ -239,16 +240,23 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	auto quality = S().Str("quality");
 	for (auto& c: quality)
 		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	std::string convars;
 	if (quality == "low" || quality == "lowest") {
 		Put(set, "KYTY_TEXTURE_REDUCE", quality == "lowest" ? "2" : "1");
 		if (game.DemonsSouls()) {
-			Put(set, "KYTY_GAME_CONVARS",
-			    quality == "low"
-			        ? "r_forceViewportHeightForPixelSizeCalc=720;sunShadowMaxDistance=125"
-			        : "r_forceViewportHeightForPixelSizeCalc=480;sunShadowMaxDistance=60;"
-			          "r_enableAmbientShadowing=false;r_enableSpotShadows=false");
+			convars = quality == "low"
+			              ? "r_forceViewportHeightForPixelSizeCalc=720;sunShadowMaxDistance=125"
+			              : "r_forceViewportHeightForPixelSizeCalc=480;sunShadowMaxDistance=60;"
+			                "r_enableAmbientShadowing=false;r_enableSpotShadows=false";
 		}
 	}
+	// Upscaler "Off" (run-windows.ps1 -Antialiasing off, issue #220): Demon's Souls' TAA off and
+	// the camera jitter TAA needs with it; the game's own upscaling stays.
+	if (S().Str("upscaler") == "off" && game.DemonsSouls()) {
+		if (!convars.empty()) convars += ";";
+		convars += "r_aaMethod=0;r_aaEnableTemporalProjectMatrixJitter=false";
+	}
+	if (!convars.empty()) Put(set, "KYTY_GAME_CONVARS", convars);
 	// Frame generation: FSR 3's (built in, any graphics card), else DLSS's (KYTY_FRAMEGEN =
 	// generated frames per frame).
 	const bool fsr_frames = S().Bool("fsr");
@@ -284,6 +292,9 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	if (const auto preset = S().Str("dlss_preset");
 	    dlss && preset.size() == 1 && preset[0] >= 'A' && preset[0] <= 'O')
 		Put(set, "KYTY_DLSS_PRESET", preset);
+	// The audio output the game is told (it mixes for it; a TV when none is set, issue #207).
+	if (const auto output = S().Str("audio_output"); output == "headphones" || output == "amplifier" || output == "soundbar")
+		Put(set, "KYTY_AUDIO_OUTPUT", output);
 	Put(set, "MANGO", S().Bool("mangohud") && context_.HasMangoHud() ? "1" : "0");
 	Put(set, "KYTY_GAME", S().Str("game"));
 	if (!context_.emulator.empty()) Put(set, "KYTY_BIN", context_.emulator.string());

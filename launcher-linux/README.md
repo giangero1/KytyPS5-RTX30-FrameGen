@@ -40,6 +40,7 @@ can ask y/N and for the sudo password.
 | | DLSS runtime | runs `get-dlss-linux.sh <the emulator's folder>` |
 | | AMD FSR 3 frame generation | `KYTY_FRAMEGEN=1`, `KYTY_FRAMEGEN_BACKEND=fsr` |
 | Game | Console language | `--console-language` |
+| | Audio output | `KYTY_AUDIO_OUTPUT` |
 | | Cheats | `--game-patch _Patches/<title id>.json`; Choose… sets the mods' `enabled` flags |
 | Shaders | Precompile, Quick, efficiency cores | `precompile-linux.sh --game … [--quick] [--cpus <E-cores>]` |
 | | Export shader hints | `precompile-linux.sh --export-hints` |

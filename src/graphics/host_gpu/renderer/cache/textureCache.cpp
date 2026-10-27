@@ -545,6 +545,14 @@ bool TextureCache::SafeToDownload(const Image& image) {
 // Collector runs (flips) before memory an image could not be made for is asked for again.
 constexpr uint64_t FailedRetryTicks = 30;
 
+// The collectors count ages in flips, a 60 Hz vblank's: at -Fps120's 120 Hz they come twice as often, and the ~10 s
+// (StaleTicks) and ~20 s (RetireTicks) below were 5 and 10 s (issue #221: an RTX 4080 SUPER at its video memory budget
+// lost the textures a 5 s menu kept from being drawn and made ~1.3 GB of them again as it closed, frames of 1.2-4.8 s).
+static uint64_t FlipsPer60Hz() {
+	static const uint64_t factor = std::max<uint64_t>(1, Config::GetVblankFrequency() / 60);
+	return factor;
+}
+
 // KYTY_TEST_RECLAIM=<n>: the first n images that must exist, of 1 MiB and more, asked for from the 600th flip on, are
 // taken as not made once (ReclaimImageMemory, then made again).
 [[gnu::noinline]] static bool TestReclaim(const ImageInfo& info, uint64_t tick) {
@@ -5010,8 +5018,8 @@ void TextureCache::EraseSlot(ImageId id) {
 // pool's watchers take a fault per MiB the game writes at most (partial dirty state). One last used before the game
 // entered its world (SceneTags) goes as before: the memory of the worlds left comes back.
 void TextureCache::RetireStaleImages(uint64_t tick) {
-	constexpr uint64_t RetireTicks    = 1200;
-	constexpr size_t   MaxRetirements = 16;
+	const uint64_t   RetireTicks    = 1200 * FlipsPer60Hz();
+	constexpr size_t MaxRetirements = 16;
 	if (const auto generation = SceneTags::Generation(); generation != m_scene_generation) {
 		m_scene_generation = generation;
 		m_scene_tick       = tick;
@@ -5143,8 +5151,8 @@ void TextureCache::RunGarbageCollector() {
 	// most MaxDeletions a flip. What the game stops drawing it stops binding: 1-1 standing, 3.2 GiB of images were used
 	// in the last 2 flips, 3.0 GiB not for 160 and more, 0.05 GiB in between; turning the camera, images behind it
 	// come back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low 47 -> 27 fps).
-	constexpr uint64_t StaleTicks   = 600;
-	constexpr size_t   MaxDeletions = 40;
+	const uint64_t   StaleTicks   = 600 * FlipsPer60Hz();
+	constexpr size_t MaxDeletions = 40;
 	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
 	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
 	const bool     failing     = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -31,7 +32,7 @@ sealed class Choice {
 partial class MainWindow : Window {
 	// The window's sizes for each aspect ratio of the 3D.
 	static readonly Dictionary<string, string[]> ResolutionsByRatio = new Dictionary<string, string[]> {
-		{ "16:9", new[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" } },
+		{ "16:9", new[] { "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160" } },
 		{ "21:9", new[] { "2560x1080", "3440x1440", "3840x1600", "5120x2160" } },
 		{ "32:9", new[] { "3840x1080", "5120x1440", "7680x2160" } },
 	};
@@ -63,9 +64,9 @@ partial class MainWindow : Window {
 	int pageIndex;
 
 	TextBox gamePath, extraArgs;
-	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, hud, uiLanguage, gpu;
+	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, audioOutput, hud, uiLanguage, gpu;
 	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, antiLag,
-		keepResident, fps30, padSpeaker;
+		keepResident, fps30, padSpeaker, reopenLauncher;
 	TextBlock renderNote, outputNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
 	Image banner;
 	Border bannerFallback;
@@ -197,6 +198,23 @@ partial class MainWindow : Window {
 		var button = new Button { Content = T(key), Style = Res<Style>("FlatButton"), HorizontalAlignment = HorizontalAlignment.Left };
 		button.Click += click;
 		return button;
+	}
+
+	// A slider with the value it stands for next to it. Every number on these pages is an int, so the caller formats
+	// the text and stores the rounded value; the store happens here because ReadForm only knows the controls it has
+	// always had.
+	FrameworkElement SliderRow(double min, double max, double step, int value, Func<double, string> text, Action<double> changed) {
+		var label = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center,
+			MinWidth = 76, Margin = new Thickness(14, 0, 0, 0) };
+		var bar = new Slider {
+			Minimum = min, Maximum = max, SmallChange = step, LargeChange = step * 4, TickFrequency = step,
+			IsSnapToTickEnabled = true, Width = 300, VerticalAlignment = VerticalAlignment.Center,
+			Foreground = Res<Brush>("TextBrush"),
+		};
+		label.Text = text(value);
+		bar.ValueChanged += (s, e) => { label.Text = text(e.NewValue); changed(e.NewValue); Changed(); };
+		bar.Value = value;
+		return Horizontal(bar, label);
 	}
 
 	static object Value(ComboBox box) {
@@ -499,6 +517,8 @@ partial class MainWindow : Window {
 		var upscalers = new List<Choice> { new Choice(T("upscaler.game"), "") };
 		if (context.FrameGenAvailable) upscalers.Add(new Choice(T("upscaler.dlss"), "dlss"));
 		upscalers.Add(new Choice(T("upscaler.fsr"), "fsr"));
+		// (No upscaler and no anti-aliasing: run-windows.ps1 -Antialiasing off, issue #220.)
+		upscalers.Add(new Choice(T("upscaler.off"), "off"));
 		upscaler = Combo(upscalers, Math.Max(0, upscalers.FindIndex(c => (string)c.Value == S.Str("upscaler"))));
 		upscalerNote = Desc("");
 		render = new ComboBox();
@@ -526,7 +546,7 @@ partial class MainWindow : Window {
 			if (building) return;
 			// The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
 			S.Set(renderForDlss ? "render_dlss" : "render", renderWanted);
-			renderForDlss = (Value(upscaler) as string ?? "").Length != 0;
+			renderForDlss = Value(upscaler) as string == "dlss" || Value(upscaler) as string == "fsr";
 			renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
 			dlssModel.IsEnabled = Value(upscaler) as string == "dlss";
 			UpdateUpscalerNote();
@@ -703,6 +723,7 @@ partial class MainWindow : Window {
 		// (DLSS with FSR 3 frame generation: that runs without Streamline, so the emulator upscales with FSR 3 instead.)
 		var fsrFrameGen = fsr != null ? fsr.IsChecked == true : context.FsrAvailable && S.Bool("fsr");
 		upscalerNote.Text = chosen == "fsr" ? T("upscaler.fsrNote")
+		                    : chosen == "off" ? T("upscaler.offNote")
 		                    : chosen == "dlss" && fsrFrameGen ? T("upscaler.dlssFsrFg")
 		                    : T(context.FrameGenAvailable ? "upscaler.ok" : !context.RtxGpu ? "upscaler.noRtx" : "upscaler.noStreamline");
 	}
@@ -728,6 +749,10 @@ partial class MainWindow : Window {
 	FrameworkElement BuildGamePage() {
 		var languages = Strings.ConsoleLanguages.Select((name, i) => new Choice(name, i));
 		language = Combo(languages, S.Int("language"), 340);
+		// What the game is told its sound goes to (KYTY_AUDIO_OUTPUT, issue #207): it mixes for it.
+		var audioOutputs = new[] { new Choice(T("audiooutput.tv"), ""), new Choice(T("audiooutput.headphones"), "headphones"),
+			new Choice(T("audiooutput.amplifier"), "amplifier"), new Choice(T("audiooutput.soundbar"), "soundbar") };
+		audioOutput = Combo(audioOutputs, Math.Max(0, Array.FindIndex(audioOutputs, c => (string)c.Value == S.Str("audio_output"))), 340);
 		cheats = Switch(S.Bool("cheats"));
 		var choose = FlatButton("button.cheats", (s, e) => ChooseCheats());
 		choose.Margin = new Thickness(16, 0, 0, 0);
@@ -736,8 +761,17 @@ partial class MainWindow : Window {
 		return Page("game.title",
 			Section("game.console"),
 			Row("language", language, Desc(T("language.desc"))),
+			Row("audiooutput", audioOutput, Desc(T("audiooutput.desc"))),
 			Section("game.controller"),
 			Row("padspeaker", padSpeaker, Desc(T("padspeaker.desc"))),
+			Row("padvolume", SliderRow(0, 100, 5, S.Int("pad_speaker_volume"),
+				v => ((int)v).ToString(CultureInfo.InvariantCulture), v => S.Set("pad_speaker_volume", (int)v)), Desc(T("padvolume.desc"))),
+			Row("padvibration", SliderRow(0, 400, 10, S.Int("pad_vibration"),
+				v => F("padStrengthValue", (v / 100.0).ToString("0.0#", CultureInfo.InvariantCulture)), v => S.Set("pad_vibration", (int)v)), Desc(T("padvibration.desc"))),
+			Row("padactuator", SliderRow(5, 400, 5, S.Int("pad_actuator"),
+				v => F("padStrengthValue", (v / 100.0).ToString("0.0#", CultureInfo.InvariantCulture)), v => S.Set("pad_actuator", (int)v)), Desc(T("padactuator.desc"))),
+			Row("padlength", SliderRow(5, 500, 5, S.Int("pad_vibration_ms"),
+				v => F("padLengthValue", ((int)v).ToString(CultureInfo.InvariantCulture)), v => S.Set("pad_vibration_ms", (int)v)), Desc(T("padlength.desc"))),
 			Section("game.cheats"),
 			Row("cheats", Horizontal(cheats, choose, cheatState), Desc(T("cheats.desc"))));
 	}
@@ -805,6 +839,7 @@ partial class MainWindow : Window {
 			ReadForm();
 			Build();
 		};
+		reopenLauncher = Switch(S.Bool("reopen_launcher"));
 		var logs = FlatButton("button.logs", (s, e) => OpenLogs());
 		var readme = FlatButton("button.readme", (s, e) => OpenReadme());
 		var root = FlatButton("button.root", (s, e) => OpenFolder(context.Root));
@@ -827,6 +862,7 @@ partial class MainWindow : Window {
 			Row("extra", extraArgs, Desc(T("extra.desc"))),
 			Section("advanced.launcher"),
 			Row("uilang", uiLanguage),
+			Row("reopen", reopenLauncher, Desc(T("reopen.desc"))),
 			Row(null, Horizontal(logs, readme, root)),
 			Desc(T("credit")) });
 		return Page("advanced.title", content.ToArray());
@@ -894,6 +930,7 @@ partial class MainWindow : Window {
 		S.Set("hdr", hdr.IsChecked == true);
 		S.Set("cheats", cheats.IsChecked == true);
 		S.Set("pad_speaker", padSpeaker.IsChecked == true);
+		if (reopenLauncher != null) S.Set("reopen_launcher", reopenLauncher.IsChecked == true);
 		S.Set("safegpu", safeGpu.IsChecked == true);
 		S.Set("hud", Math.Max(0, hud.SelectedIndex));
 		S.Set(renderForDlss ? "render_dlss" : "render", SelectedRender());
@@ -906,6 +943,7 @@ partial class MainWindow : Window {
 		var chosenUpscaler = Value(upscaler) as string ?? "";
 		if (!(S.Str("upscaler") == "dlss" && !context.FrameGenAvailable && chosenUpscaler.Length == 0)) S.Set("upscaler", chosenUpscaler);
 		S.Set("dlss_preset", Value(dlssModel) as string ?? "");
+		S.Set("audio_output", Value(audioOutput) as string ?? "");
 		S.Set("gpu", Value(gpu) as string ?? "");
 		if (context.FsrAvailable) S.Set("fsr", fsr.IsChecked == true);
 		S.Set("ecores", ecores.IsChecked == true);
@@ -919,7 +957,8 @@ partial class MainWindow : Window {
 	void UpdateSummary() {
 		var res = S.Str("resolution").Replace("x", "×");
 		var dlss = commands.Dlss;
-		var upscaledBy = dlss ? T("summary.dlss") : commands.FsrUpscaler ? T("summary.fsr3") : T("summary.taa");
+		var upscaledBy = dlss ? T("summary.dlss") : commands.FsrUpscaler ? T("summary.fsr3")
+		                 : S.Str("upscaler") == "off" ? T("summary.noAa") : T("summary.taa");
 		var hdOutput = commands.HdOutput;
 		var output1440 = !hdOutput && commands.Output1440;
 		var superResolution = dlss || commands.FsrUpscaler;
@@ -979,13 +1018,28 @@ partial class MainWindow : Window {
 
 	void Play() {
 		ReadForm();
+		Process process;
 		try {
-			commands.Start(commands.PlayArguments(game.Found ? game : null));
+			process = commands.Start(commands.PlayArguments(game.Found ? game : null));
 		} catch (Exception e) {
 			MessageBox.Show(this, F("error.start", e.Message), T("error.title"), MessageBoxButton.OK, MessageBoxImage.Error);
 			return;
 		}
-		Close();
+		if (process == null || !S.Bool("reopen_launcher")) {
+			Close();
+			return;
+		}
+		// (Advanced page, "Back to the launcher after the game": hidden while the game's window - run.cmd's - is open.)
+		Hide();
+		process.EnableRaisingEvents = true;
+		process.Exited += (s, e) => Dispatcher.BeginInvoke(new Action(() => {
+			Show();
+			Activate();
+		}));
+		if (process.HasExited) {
+			Show();
+			Activate();
+		}
 	}
 
 	void Precompile(string option) {

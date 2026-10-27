@@ -14,6 +14,7 @@
 #include "SDL_rwops.h"
 #include "SDL_stdinc.h"
 #include "SDL_surface.h"
+#include "SDL_syswm.h"
 #include "SDL_thread.h"
 #include "SDL_touch.h"
 #include "SDL_video.h"
@@ -33,8 +34,10 @@
 #include "loader/demonsSoulsWarp.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
 #include "debug-snapshot.h"
+#include "local-platform.h"
 #include "perf-overlay.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
@@ -51,6 +54,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -234,6 +238,10 @@ static void ToggleDesktopFullscreen() {
 	    fullscreen ? 0u : static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN_DESKTOP);
 	if (SDL_SetWindowFullscreen(g_window->window, mode) != 0) {
 		LOGF("Toggle fullscreen failed: %s\n", SDL_GetError());
+	} else if (g_window->presenter != nullptr) {
+		// (A full screen of the window's own size changes nothing a present reports; FSR's frame generation swapchain
+		// then kept presenting to the window it had: the picture froze, issue #174.)
+		g_window->presenter->RequestSwapchainRecreate();
 	}
 }
 
@@ -356,10 +364,62 @@ static void GameEventFinger([[maybe_unused]] const EventFinger& f) {
 #endif
 }
 
+// The PS button (an Xbox pad's Guide button) held for two seconds quits, as Close Game on the PS5's home screen (issue
+// #203: pads and Steam Big Picture had no way out): the game has no use for it, and a short press does nothing. With
+// KYTY_PAD_QUIT=backstart (or both) so do Back and Start held together (an Xbox pad's View and Menu, a PlayStation pad's
+// Create and Options), for a pad whose Guide button Steam or Windows' Game Bar takes; not by default, since some pads
+// switch their own mode (XInput, Switch) on that hold. off: neither. A pad that leaves cancels its holds.
+static SDL_TimerID g_quit_hold = 0, g_quit_combo = 0;
+
+static uint32_t QuitAfterHold(uint32_t /*interval*/, void* what) {
+	LOGF("Controller: %s held for 2 s, quitting\n", static_cast<const char*>(what));
+	SDL_Event quit {};
+	quit.type = SDL_QUIT;
+	(void)SDL_PushEvent(&quit);
+	return 0;
+}
+
+static bool PadQuits(bool combo) {
+	static const std::string_view mode = [] {
+		const char* value = std::getenv("KYTY_PAD_QUIT");
+		return std::string_view(value != nullptr ? value : "guide");
+	}();
+	return combo ? mode == "backstart" || mode == "both" : mode != "off" && mode != "backstart";
+}
+
+static void CancelQuitHolds() {
+	for (auto* timer: {&g_quit_hold, &g_quit_combo}) {
+		if (*timer != 0) (void)SDL_RemoveTimer(*timer);
+		*timer = 0;
+	}
+}
+
 static void GameEventController([[maybe_unused]] const EventController& f) {
 	// (A new mapping for a connected controller, e.g. from Steam: its buttons arrive mapped from then on.)
 	if (f.remapped) {
 		return;
+	}
+
+	if (f.removed) CancelQuitHolds();
+	if (f.button == SDL_CONTROLLER_BUTTON_GUIDE && (f.down || f.up) && PadQuits(false)) {
+		if (f.down && g_quit_hold == 0)
+			g_quit_hold = SDL_AddTimer(2000, QuitAfterHold, const_cast<char*>("the PS button"));
+		if (f.up && g_quit_hold != 0) {
+			(void)SDL_RemoveTimer(g_quit_hold);
+			g_quit_hold = 0;
+		}
+	}
+	if ((f.button == SDL_CONTROLLER_BUTTON_BACK || f.button == SDL_CONTROLLER_BUTTON_START) && (f.down || f.up) &&
+	    PadQuits(true)) {
+		auto*      pad  = SDL_GameControllerFromInstanceID(f.id);
+		const bool both = f.down && pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) != 0 &&
+		                  SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+		if (both && g_quit_combo == 0)
+			g_quit_combo = SDL_AddTimer(2000, QuitAfterHold, const_cast<char*>("Back and Start"));
+		if (f.up && g_quit_combo != 0) {
+			(void)SDL_RemoveTimer(g_quit_combo);
+			g_quit_combo = 0;
+		}
 	}
 
 #ifdef KYTY_DBG_INPUT
@@ -393,7 +453,13 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.down || f.up) {
-		const auto button = ControllerButtonToPadButton(f.button);
+		auto button = ControllerButtonToPadButton(f.button);
+		// A pad without a touchpad (an Xbox pad's View, others' Back or Select) presses it with that button (issue #197:
+		// otherwise the game's touchpad menu was out of reach); a PlayStation pad's Create button stays the system's.
+		if (f.button == SDL_CONTROLLER_BUTTON_BACK) {
+			const auto type = SDL_GameControllerGetType(SDL_GameControllerFromInstanceID(f.id));
+			if (type != SDL_CONTROLLER_TYPE_PS4 && type != SDL_CONTROLLER_TYPE_PS5) button = Controller::PAD_BUTTON_TOUCH_PAD;
+		}
 		if (button != 0) {
 			Controller::SetButton(f.id, button, f.down);
 		}
@@ -871,7 +937,8 @@ static void WindowCreate(WindowContext& context) {
 	SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #endif
 
-	if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
+	// (The timers: the PS button's hold to quit, QuitAfterHold.)
+	if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER) < 0) {
 		EXIT("%s\n", SDL_GetError());
 	}
 	HostInputInit();
@@ -997,6 +1064,14 @@ void WindowRun() {
 	EXIT_IF(g_window == nullptr);
 
 	g_window->Run();
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// The focus back to the window that had it before the game (KYTY_RETURN_FOCUS), before the caches are saved.
+	if (SDL_SysWMinfo info {}; g_window->window != nullptr) {
+		SDL_VERSION(&info.version);
+		if (SDL_GetWindowWMInfo(g_window->window, &info) == SDL_TRUE && info.subsystem == SDL_SYSWM_WINDOWS)
+			LocalPlatform::ReturnFocus(info.info.win.window);
+	}
+#endif
 	g_window->render_context->GetPipelineCache().StopWarmup();
 	g_window->render_context->GetPipelineCache().ReportSession();
 	g_window->render_context->GetPipelineCache().Save();

@@ -57,6 +57,9 @@ public:
 	[[nodiscard]] static bool IsSceneFrame(const Frame& frame) noexcept;
 	// Frame generation is on: it paces the frames it makes from the intervals between the game's (videoOut.cpp).
 	[[nodiscard]] static bool GeneratesFrames() noexcept;
+	// The swapchain made again before the next present (the window went in or out of full screen: FSR's frame generation
+	// swapchain reports nothing when the size stays the same, issue #174).
+	void                         RequestSwapchainRecreate() noexcept;
 	void                         Discard(Frame& frame);
 
 private:

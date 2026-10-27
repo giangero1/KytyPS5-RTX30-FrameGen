@@ -22,6 +22,7 @@
 #include "anti-lag.h"
 #include "fsr-native.h"
 #include "frame-gen-hudless.h"
+#include "live-counters.h"
 #include "local-platform.h"
 #include "perf-overlay.h"
 #if defined(_WIN32)
@@ -605,6 +606,36 @@ struct Presenter::Impl {
 		}
 		return &hud;
 	}
+	// Frames lost on the way to the display (issue #129: with DLSS and this thread a game at 30 fps showed ~5 presents a
+	// second there): every 30 s, when a frame was replaced while waiting or dropped as not due, or a present call took
+	// 50 ms or more, one log line. (Atomics: the vblank thread hands and replaces, the present thread presents.)
+	struct PresentStats {
+		std::atomic<uint64_t> handed {0}, presented {0}, replaced {0}, not_due {0}, present_us {0}, present_max_us {0};
+		std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+	} present_stats;
+	// Presenter::RequestSwapchainRecreate (the window's thread) for the present thread's next frame.
+	std::atomic<bool> recreate_requested {false};
+	void NotePresentCall(std::chrono::steady_clock::duration took) {
+		auto&          st = present_stats;
+		const uint64_t us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(took).count());
+		st.presented.fetch_add(1, std::memory_order_relaxed);
+		st.present_us.fetch_add(us, std::memory_order_relaxed);
+		if (us > st.present_max_us.load(std::memory_order_relaxed)) st.present_max_us.store(us, std::memory_order_relaxed);
+		const auto now = std::chrono::steady_clock::now();
+		if (now - st.since < std::chrono::seconds(30)) return;
+		const uint64_t handed = st.handed.exchange(0), presented = st.presented.exchange(0), replaced = st.replaced.exchange(0);
+		const uint64_t not_due = st.not_due.exchange(0), total_us = st.present_us.exchange(0), max_us = st.present_max_us.exchange(0);
+		const double   seconds = std::chrono::duration<double>(now - st.since).count();
+		st.since               = now;
+		if (replaced + not_due == 0 && max_us < 50000) return;
+		std::printf("Presenter: %.0f s: %llu frames handed over, %llu presented, %llu replaced while waiting, %llu not due; "
+		            "the present call %.2f ms on average, at most %.1f ms\n",
+		            seconds, static_cast<unsigned long long>(handed), static_cast<unsigned long long>(presented),
+		            static_cast<unsigned long long>(replaced), static_cast<unsigned long long>(not_due),
+		            presented != 0 ? static_cast<double>(total_us) / 1000.0 / static_cast<double>(presented) : 0.0,
+		            static_cast<double>(max_us) / 1000.0);
+		std::fflush(stdout);
+	}
 	// The presenter's thread (Presenter::PresentLoop) and what it presents next (Submit, SubmitBlank).
 	struct Waiting {
 		Frame*   frame  = nullptr;
@@ -627,11 +658,18 @@ struct Presenter::Impl {
 			std::lock_guard lock(waiting_mutex);
 			dropped = std::exchange(waiting, next);
 		}
+		if (next.frame != nullptr && !next.reuse) present_stats.handed.fetch_add(1, std::memory_order_relaxed);
 		waiting_changed.notify_one();
 		// (A game frame DLSS-G had inputs for never shown: the next one's motion spans two frames.)
 		if (dropped.frame != nullptr && !dropped.reuse && dropped.frame->fg.valid) FrameGen::NoteDroppedFrame();
 		// (A last frame shown again stays the last one.)
-		if (dropped.frame != nullptr) frames.Release(dropped.frame, dropped.reuse);
+		if (dropped.frame != nullptr) {
+			if (!dropped.reuse) {
+				LiveCounters::Add(LiveCounters::PresentsReplaced);
+				present_stats.replaced.fetch_add(1, std::memory_order_relaxed);
+			}
+			frames.Release(dropped.frame, dropped.reuse);
+		}
 	}
 
 	// A cleared frame: into `producer` (the GPU thread's command buffer, a guest flip of a blank buffer), else on the
@@ -1019,13 +1057,14 @@ void Swapchain::Create() {
 	create_info.clipped          = VK_TRUE;
 #if defined(_WIN32)
 	// KYTY_FULLSCREEN_EXCLUSIVE (GraphicContext::full_screen_exclusive, issue #166): exclusive fullscreen disallowed or
-	// allowed. (VkSurfaceFullScreenExclusiveInfoEXT is vulkan_win32.h's, not included here: its layout.)
+	// allowed. (VkSurfaceFullScreenExclusiveInfoEXT is vulkan_win32.h's, not included here: its layout.) The AMD default
+	// stays out of FSR's frame generation swapchain, which makes its own from this description.
 	struct {
 		VkStructureType sType                 = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
 		const void*     pNext                 = nullptr;
 		int32_t         full_screen_exclusive = 0; // VkFullScreenExclusiveEXT: 1 allowed, 2 disallowed
 	} exclusive;
-	if (graphics.full_screen_exclusive >= 0) {
+	if (graphics.full_screen_exclusive >= 0 && !(graphics.full_screen_exclusive_default && FrameGen::OwnsSwapchain())) {
 		exclusive.pNext                 = create_info.pNext;
 		exclusive.full_screen_exclusive = graphics.full_screen_exclusive == 0 ? 2 : 1;
 		create_info.pNext               = &exclusive;
@@ -1639,6 +1678,8 @@ void Presenter::Present(Frame& frame, bool reuse) {
 	const bool generated = FrameGen::Enabled() && frame.fg.valid && !reuse;
 	if (!generated && !m_impl->PresentDue()) {
 		// (PresentLoop waited until it was due.)
+		LiveCounters::Add(LiveCounters::PresentsNotDue);
+		if (!reuse) m_impl->present_stats.not_due.fetch_add(1, std::memory_order_relaxed);
 		m_impl->frames.Release(&frame, true);
 		return;
 	}
@@ -1663,6 +1704,11 @@ void Presenter::Present(Frame& frame, bool reuse) {
 	auto*      hud        = m_impl->UpdateHud(reuse);
 	// The guest's own frames choose the color space (PQ or SDR); black and blank flips keep the current one.
 	if (!frame.blank && swapchain.SetHdr(frame.hdr)) {
+		m_impl->RecoverSwapchain(Swapchain::Status::Recreate);
+	}
+	if (m_impl->recreate_requested.exchange(false, std::memory_order_acq_rel)) {
+		std::printf("Presenter: the swapchain made again (the window went in or out of full screen)\n");
+		std::fflush(stdout);
 		m_impl->RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
@@ -1727,7 +1773,9 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			                        swapchain.ImageCount());
 		}
 		if (!reuse) AntiLag::Present(frame.anti_lag_frame);
+		const auto present_start = std::chrono::steady_clock::now();
 		status = swapchain.Present();
+		const auto present_took = std::chrono::steady_clock::now() - present_start;
 		if (generate) {
 			FrameGen::AfterPresent();
 		}
@@ -1736,6 +1784,8 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			continue;
 		}
 
+		LiveCounters::Add(LiveCounters::Presents);
+		if (!reuse) m_impl->NotePresentCall(present_took);
 		m_impl->presented_overlay_revision.store(overlay_visual.revision,
 		                                         std::memory_order_release);
 		m_impl->window.UpdateTitle();
@@ -1744,6 +1794,10 @@ void Presenter::Present(Frame& frame, bool reuse) {
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
 	m_impl->frames.Release(&frame, reuse);
+}
+
+void Presenter::RequestSwapchainRecreate() noexcept {
+	m_impl->recreate_requested.store(true, std::memory_order_release);
 }
 
 void Presenter::Discard(Frame& frame) {

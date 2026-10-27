@@ -440,9 +440,17 @@ inline void Run(uint64_t id, const std::string& line) {
 			LiveTrace::g_read_marks(std::min(LiveTrace::g_mark_next.load(), LiveTrace::MarkSlots));
 		LiveTrace::Dump(arg2);
 		const double seconds = std::chrono::duration<double>(clock1 - clock0).count();
-		std::printf("LIVE_TRACE id=%" PRIu64 " records=%" PRIu64 " tsc_hz=%.0f path=%s\n", id,
+		// (The executable's load address: live-trace.py names the code addresses of the capture with it.)
+		uint64_t base = 0;
+#if defined(_WIN32)
+		if (!LocalPlatform::ModuleOf(reinterpret_cast<const void*>(&Flip), &base, nullptr, 0)) base = 0;
+#else
+		Dl_info self {};
+		if (dladdr(reinterpret_cast<void*>(&Flip), &self) != 0) base = reinterpret_cast<uint64_t>(self.dli_fbase);
+#endif
+		std::printf("LIVE_TRACE id=%" PRIu64 " records=%" PRIu64 " tsc_hz=%.0f base=%016" PRIx64 " path=%s\n", id,
 		            std::min<uint64_t>(LiveTrace::g_count.load(), LiveTrace::Capacity),
-		            static_cast<double>(tsc1 - tsc0) / seconds, arg2);
+		            static_cast<double>(tsc1 - tsc0) / seconds, base, arg2);
 	} else if (cmd == "census" && n >= 2) {
 		// census <seconds>: render-thread time per call kind and shader over the window.
 		LiveCensus::g_on.store(false);

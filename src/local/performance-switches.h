@@ -105,6 +105,9 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_READBACK_NARROW", &kyty_local_readback_narrow_mode},
 	    // Also creates the transfer queue at device creation (vulkanWindow.cpp).
 	    Switch {"KYTY_READBACK_QUEUE", &kyty_local_readback_queue_mode},
+	    // Default 2: on unless read guards are on (0 for an A/B). 1 also spans with
+	    // KYTY_READ_GUARD=1 (not tested).
+	    Switch {"KYTY_READBACK_SPAN", &kyty_local_readback_span_mode, 0, 2},
 	    // Images and command submission.
 	    Switch {"KYTY_IMAGE_BARRIER_DEDUPE", &kyty_local_image_barrier_dedupe},
 	    Switch {"KYTY_IMAGE_POOL", &kyty_local_image_pool_mode},

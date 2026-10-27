@@ -496,6 +496,12 @@ public:
     }
 	bool Generate(bool group_reads) {
 		if (group_reads) GroupReads();
+		// The plan keeps these for its life (the shader prefetch's for every program of the game: ~300 MB with 16 GB of
+		// RAM), without their growth's spare capacity; before the code takes the nodes' addresses.
+		result.nodes.shrink_to_fit();
+		result.read_groups.shrink_to_fit();
+		result.descriptor_words.shrink_to_fit();
+		result.descriptor_sizes.shrink_to_fit();
 		Xbyak::ClearError();
 		result.code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
 		if (Xbyak::GetError() != 0 || !result.code->getCode()) {

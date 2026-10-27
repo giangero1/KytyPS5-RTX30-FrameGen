@@ -31,10 +31,21 @@ namespace DemonsSoulsHdOutput {
 // The PS5 Pro path's output with the HD output: 1920x1080, or KYTY_OUTPUT_HEIGHT's size.
 [[nodiscard]] uint32_t UpscaledWidth();
 [[nodiscard]] uint32_t UpscaledHeight();
-// KYTY_OUTPUT_HEIGHT's output above 1080: the game lays its interface out in the HD layout's 1920x1080 in it, which
-// src/local/hud-anchor.h scales to the output (ScaleScope). (The 4K layout scaled down would be sharper on 1440, but the
-// game leaves out what lies past the output's size in its 3840x2160 layout: the souls, the items, the prompts.)
+// KYTY_OUTPUT_HEIGHT's output above 1080: the interface in its 4K layout at the output's size (InterfaceAtOutput), or
+// with KYTY_OUTPUT_LAYOUT=hd its HD layout's 1920x1080 in the output, which src/local/hud-anchor.h scales to it
+// (ScaleScope; InterfaceScaled). Scaled, the HD layout lost the thin strokes of its letters at 1.33x (a T read as an I,
+// issue #187), and the menus' 3D views (the character creator's, the equipment menu's) came 1.33x too large from the
+// top left corner (issue #202): the game draws them over the output in its pixels already.
 [[nodiscard]] bool InterfaceScaled();
+// The game's own layout code puts the 4K layout at 1.33 pixels per layout unit for 1440 (ScreenSize, found by
+// Psychowarden for issue #199), the same picture as the 4K output's scaled down, nothing scaled after. (The interface's
+// screen size left at 3840x2160 put what lay past the output's size in its layout outside it: the souls, the items,
+// the prompts.)
+[[nodiscard]] bool InterfaceAtOutput();
+// With InterfaceAtOutput and KYTY_RENDER_ASPECT wider than 16:9 (KYTY_WIDE_OUTPUT=0: squeezed into 16:9 instead): the
+// width of the wide output at KYTY_OUTPUT_HEIGHT (3416x1440 at 21:9; DemonsSoulsRenderSize makes it, issue #199), the
+// display buffers as wide, the interface in its 16:9 part (2560x1440); 0 otherwise.
+[[nodiscard]] uint32_t WideOutputWidth();
 void Install(Program* program);
 // Install found its places and took the game to the HD path.
 [[nodiscard]] bool Active();
@@ -65,5 +76,18 @@ inline constexpr std::string_view ImageScale = "49 8b 45 10 c5 f8 29 65 c0 48 8b
 inline constexpr std::string_view BackdropScale =
     "80 b8 98 01 00 00 01 0f 85 ?? ?? ?? ?? 48 8d 7b 08 e8 ?? ?? ?? ?? 49 8b 86 10 01 00 00";
 inline constexpr uint32_t BackdropDivisor = 13; // the lea and the call, 9 bytes
+// And for the pieces of the health and stamina bars (0x155924a, in 0x1559140): each texture's width over the divisor.
+// add rbx, 8; mov rdi, rbx; mov [rbp + disp32], rbx; call 0xdda210; mov rbx, [r14 + 0x18]; vmovss [rbp + disp32], xmm0.
+inline constexpr std::string_view GaugeScale = "48 83 c3 08 48 89 df 48 89 9d ?? ?? ?? ?? e8 ?? ?? ?? ?? 49 8b 5e 18 c5 fa 11 85";
+inline constexpr uint32_t         GaugeDivisor = 4; // mov rdi, rbx; the store; the call: 15 bytes
+inline constexpr uint32_t         GaugeStore   = 7; // the store of rbx, 7 bytes (kept)
+// The interface's screen size (0xde8910, in its per-frame setup; found by Psychowarden, issue #199): the size it is given,
+// scaled by 2 or 0.5 (0x24f9f10) when its layout and the video out's differ, then stored by 0xddb4f0 (the screen at +8:
+// its pixels over its 1080 layout units, 0xdda210, are the pixels per layout unit). The 43 bytes from the je over the
+// scaling to the store's lea rdi, [rbx + 8].
+inline constexpr std::string_view ScreenSize =
+    "74 29 31 c9 83 f8 03 48 8d 05 ?? ?? ?? ?? c5 fb 10 85 78 fc ff ff 0f 92 c1 c4 e2 79 18 0c 88 c5 f8 59 c1 c5 f8 13 "
+    "85 78 fc ff ff 48 8d 7b 08";
+inline constexpr uint32_t ScreenSizeBytes = 43;
 } // namespace DemonsSoulsHdOutput
 } // namespace Loader

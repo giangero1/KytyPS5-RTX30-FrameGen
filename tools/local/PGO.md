@@ -42,3 +42,9 @@ ab-exe ABBA，120 Hz 上限（`-Vblank 120`），走 10 s 后两个 6 s 窗口�
 textureCache 4 等）。在 ddc59a8e 上用同样四个场景重新训练（`tools\local\windows\pgo-multi.ps1`），ab-exe ABBA，120 Hz 上限：
 - 1-1：渲染线程 13.71 → 13.04 ms/帧（-4.9%），fps 70.0 → 72.8；
 - Latria：12.23 → 12.17 ms/帧，fps 75.8 → 76.5。
+
+2026-10-25（台式机，v20261025 发布前）：扫描 22 个 TU 里 82 个函数失配。v20261024 的可执行文件对比当前 HEAD（同一份 10-20
+profile），1-1、120 Hz 上限：fps 85.3 / 84.9，渲染线程 9.71 / 10.44 ms。在 HEAD 上用同样四个场景重新训练后，ab-exe ABBA（旧
+profile 为 A）：渲染线程 10.30 → 10.23 ms/帧，但四轮里 B 的 fps 都更低（84.3、86.5、83.5、84.2 对 81.0、80.7、78.3、78.7，
+平均 84.6 → 79.7）：新 profile 拖慢了渲染线程以外的线程。所以 v20261025 仍用 10-20 的 profile；新的另存为
+`_Build\pgo\windows\kyty-20261025.profdata`，没有提交。

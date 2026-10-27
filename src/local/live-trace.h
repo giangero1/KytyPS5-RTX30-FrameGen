@@ -42,6 +42,9 @@ enum Type : uint32_t {
 	SlowOsCall    = 35, // a: address, b: call << 56 | TSC ticks / 1024 (24 bits) << 32 | size in 4 KiB pages
 	FaultDone     = 36, // the handled fault of the thread's last FaultSite: a: 1 write / 0 read, b: fault address
 	GuestCommand  = 37, // render thread runs a guest thread's command (SendCommand): a: 1 begin / 0 end
+	RbEnqueue     = 38, // a readback copy for the copy engine (ReadbackQueue::Copy): a: its value, b: graphics tick it waits for
+	RbSubmit      = 39, // that copy handed to the driver (recording worker or GPU thread): a: its value
+	GpuMarkCaller = 40, // follows GpuMark of a barrier: a: mark slot, b: return address of the code that recorded it
 };
 
 // SlowOsCall ids: address-space calls that hold the process's memory locks (a page fault anywhere

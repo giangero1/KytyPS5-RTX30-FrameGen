@@ -639,12 +639,13 @@ bool FsrEnsureFrameGeneration(vk::Extent2D render) {
 #endif
 
 #ifdef KYTY_FRAMEGEN_FSR_HUD
-// The game's interface canvas (NoteUiCanvas: its guest address; the GPU thread's): 3840x2160, or the HD output's
-// 1920x1080 (loader/demonsSoulsHdOutput.h).
+// The game's interface canvas (NoteUiCanvas: its guest address; the GPU thread's): 3840x2160, the HD output's
+// 1920x1080, or KYTY_OUTPUT_HEIGHT's output where the interface is scaled to it (loader/demonsSoulsHdOutput.h).
 std::atomic<uint64_t> g_ui_canvas {0};
 
 vk::Extent2D UiCanvasExtent() {
 	namespace Hd = ::Loader::DemonsSoulsHdOutput;
+	if (Hd::InterfaceScaled() || Hd::InterfaceAtOutput()) return vk::Extent2D {Hd::UpscaledWidth(), Hd::UpscaledHeight()};
 	return Hd::Active() ? vk::Extent2D {Hd::HdWidth, Hd::HdHeight} : vk::Extent2D {3840, 2160};
 }
 
@@ -1701,7 +1702,7 @@ void BeforePresent(const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2
 	constants.motionVectors3D     = sl::Boolean::eFalse;
 	// (A frame left unshown before this one: its motion and matrices are to the game's previous frame, not to the one
 	// presented last.)
-	const bool discontinuity      = g_discontinuity.exchange(false, std::memory_order_relaxed);
+	const bool discontinuity      = g_discontinuity.exchange(false, std::memory_order_relaxed) || (usable && inputs->cut);
 	constants.reset               = usable && !discontinuity ? sl::Boolean::eFalse : sl::Boolean::eTrue;
 	constants.orthographicProjection = sl::Boolean::eFalse;
 	constants.motionVectorsDilated   = sl::Boolean::eFalse;
@@ -1919,6 +1920,12 @@ void NoteScene() {
 	g_scene.store(true, std::memory_order_relaxed);
 }
 
+static bool g_cut = false; // Kyty.Gpu: the current guest frame's upscale started a new history (NoteCut)
+
+void NoteCut() {
+	g_cut = true;
+}
+
 bool TakeScene() {
 	const bool scene = g_scene.exchange(false, std::memory_order_relaxed);
 	g_last_scene.store(scene, std::memory_order_relaxed);
@@ -1948,12 +1955,13 @@ void OnUpscale(ImageId depth, uint64_t depth_address, ImageId motion, uint64_t m
 
 void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer& command,
                    FrameInputs& inputs) {
-	inputs.valid = false;
-	inputs.token = nullptr;
+	inputs.valid       = false;
+	inputs.cut         = std::exchange(g_cut, false);
+	inputs.token       = nullptr;
 #ifdef KYTY_FRAMEGEN_STREAMLINE
-	inputs.token = g_upscale_token.exchange(nullptr, std::memory_order_acq_rel);
+	inputs.token       = g_upscale_token.exchange(nullptr, std::memory_order_acq_rel);
 #endif
-	const bool ready = g_sources.valid && g_camera.valid;
+	const bool ready   = g_sources.valid && g_camera.valid;
 	const auto sources = g_sources;
 	const auto camera  = g_camera;
 	g_sources.valid    = false;
@@ -2369,14 +2377,18 @@ bool FsrMarksHud() {
 	return g_fsr || g_fsr_native;
 }
 
-uint64_t FsrVideoMemoryReserve() {
-	// (Measured with a 2560x1440 swapchain: the driver's share of the video memory 1.33-1.38 GiB with FSR, 0.55-0.70
-	// without; and the HUD images.) KYTY_FSR_VRAM_RESERVE_MB overrides it.
-	static const uint64_t reserve = [] {
+uint64_t VideoMemoryReserve() {
+	// Frame generation's: FSR's measured with a 2560x1440 swapchain (the driver's share of the video memory 1.33-1.38 GiB
+	// with it, 0.55-0.70 without; and the HUD images), DLSS-G's (NGX's optical flow and interpolation, its swapchain
+	// images) and FSR's built in taken alike (issue #215: a 16 GB RTX 5080 with DLSS-G at 3440x1440 left the game a
+	// budget it counted as roomy, kept the texture pools and ran out); KYTY_FSR_VRAM_RESERVE_MB overrides it. The super
+	// resolution's (DLSS's model and history, or FSR 3's built in): 512 MiB more.
+	static const uint64_t generation = [] {
 		const char* value = std::getenv("KYTY_FSR_VRAM_RESERVE_MB");
 		return (value != nullptr ? std::strtoull(value, nullptr, 10) : 1536ull) << 20u;
 	}();
-	return g_fsr ? reserve : 0;
+	const bool upscaling = g_upscale || FsrNative::UpscalerRequested();
+	return (g_generate > 0 || g_fsr ? generation : 0) + (upscaling ? uint64_t {512} << 20u : 0);
 }
 
 void NoteUiCanvas(uint64_t address) {
@@ -2672,7 +2684,7 @@ void RecordPrepare(GraphicContext& graphics, vk::CommandBuffer command, const Fr
 		s.reset   = true;
 	}
 	// (A frame left unshown before this one: its motion is to the game's previous frame, not to the one shown last.)
-	if (g_fsr_discontinuity.exchange(false, std::memory_order_relaxed)) s.reset = true;
+	if (g_fsr_discontinuity.exchange(false, std::memory_order_relaxed) || (usable && inputs->cut)) s.reset = true;
 	const auto now   = std::chrono::steady_clock::now();
 	const float delta = s.last_frame.time_since_epoch().count() == 0
 	                        ? 16.7f
@@ -2763,7 +2775,8 @@ uint32_t Generate(GraphicContext& graphics, vk::CommandBuffer command, const Fra
                   vk::Rect2D region, std::span<const UpscaleImage> outputs, bool hdr) {
 #ifdef KYTY_FRAMEGEN_NGX
 	if (!PresenterGenerates()) return 0;
-	const bool discontinuity = g_fg_discontinuity.exchange(false, std::memory_order_relaxed);
+	const bool discontinuity =
+	    g_fg_discontinuity.exchange(false, std::memory_order_relaxed) || (inputs != nullptr && inputs->cut);
 	if (inputs == nullptr || !inputs->valid) {
 		// (Menus, movies, loading: the frame shown as it is; the next one with inputs starts DLSS-G again.)
 		g_fg_history = false;

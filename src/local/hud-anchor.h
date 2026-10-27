@@ -50,13 +50,16 @@ constexpr uint64_t                PixelShader = 0xbd39a2eba2d20d8bULL;
 constexpr uint64_t CopyShader = 0x05ca0d08ae41fd2eULL, HighlightShader = 0x5d9a2e8e34030f35ULL;
 constexpr uint32_t CanvasWidthDefault = 3840, CanvasHeightDefault = 2160;
 
-// The interface canvas: 3840x2160, or the HD output's 1920x1080 (its own layout, the same areas in clip coordinates and
-// the same shaders; the pixel shader's scale constants then 1/1920, 1/1080).
+// The interface canvas: 3840x2160, the HD output's 1920x1080 (its own layout, the same areas in clip coordinates and
+// the same shaders; the pixel shader's scale constants then 1/1920, 1/1080), or KYTY_OUTPUT_HEIGHT's output where the
+// game lays its 4K layout out at that size (DemonsSoulsHdOutput::InterfaceAtOutput: 2560x1440 for 1440).
 inline uint32_t CanvasWidth() {
-	return ::Loader::DemonsSoulsHdOutput::Active() ? ::Loader::DemonsSoulsHdOutput::HdWidth : 3840u;
+	namespace Hd = ::Loader::DemonsSoulsHdOutput;
+	return Hd::InterfaceAtOutput() ? Hd::UpscaledWidth() : Hd::Active() ? Hd::HdWidth : 3840u;
 }
 inline uint32_t CanvasHeight() {
-	return ::Loader::DemonsSoulsHdOutput::Active() ? ::Loader::DemonsSoulsHdOutput::HdHeight : 2160u;
+	namespace Hd = ::Loader::DemonsSoulsHdOutput;
+	return Hd::InterfaceAtOutput() ? Hd::UpscaledHeight() : Hd::Active() ? Hd::HdHeight : 2160u;
 }
 constexpr uint32_t                MaxVertices = 8192;
 
@@ -261,13 +264,18 @@ inline bool IsReticle(const HW::VertexShaderInfo& vs, uint32_t first) {
 	});
 }
 
+inline float OutputScale();
+inline bool  OutputTarget(const HW::Context& ctx);
+
 // KYTY_FRAMEGEN_BACKEND=fsr: an interface draw names the canvas (its render target) whose alpha marks the HUD for FSR
-// (FrameGen::NoteUiCanvas).
+// (FrameGen::NoteUiCanvas). With the interface scaled to KYTY_OUTPUT_HEIGHT's output the canvas is the output's size
+// (OutputTarget): at 1440 FSR found none and generated the HUD too, which flickered (issue #170).
 inline void NoteCanvas(const HW::Context& ctx, const HW::VertexShaderInfo& vs) {
 	const auto& target = ctx.GetRenderTarget(0);
-	if (target.base.addr == 0 || target.attrib2.width + 1u != CanvasWidth() ||
-	    target.attrib2.height + 1u != CanvasHeight())
-		return;
+	const bool  canvas = OutputScale() > 0.0f ? OutputTarget(ctx)
+	                                          : target.attrib2.width + 1u == CanvasWidth() &&
+	                                               target.attrib2.height + 1u == CanvasHeight();
+	if (target.base.addr == 0 || !canvas) return;
 	const uint64_t hash = HashAt(vs.es_regs.data_addr);
 	if (hash == PixelShader || std::find(ClipShaders.begin(), ClipShaders.end(), hash) != ClipShaders.end())
 		FrameGen::NoteUiCanvas(target.base.addr);
@@ -731,7 +739,8 @@ public:
 	KYTY_CLASS_NO_COPY(StretchScope);
 };
 
-// KYTY_OUTPUT_HEIGHT above 1080 (DemonsSoulsHdOutput::InterfaceScaled): the game lays its interface out in the HD
+// KYTY_OUTPUT_HEIGHT above 1080 with KYTY_OUTPUT_LAYOUT=hd (DemonsSoulsHdOutput::InterfaceScaled; by default the game
+// lays out its 4K layout at the output's size, nothing scaled here): the game lays its interface out in the HD
 // layout's 1920x1080 and turns the layout's pixels into clip coordinates by the canvas's own size (2560x1440 for 1440),
 // the viewport the whole canvas: the HUD, the menus, the movies and the loading screens showed at their HD pixels, in
 // the canvas's top left corner. Their draws into a target of the output's size get the viewport scaled by output /
@@ -753,12 +762,20 @@ inline bool OutputTarget(const HW::Context& ctx) {
 // The HD layout's other draws at 1920x1080 (01.007.000, KYTY_OUTPUT_TRACE): the movies (the intro, the title's backdrop)
 // and the loading screens.
 constexpr std::array<uint64_t, 2> HdLayoutShaders {0x05ca0d08ae41fd2eULL, 0xa64d43c72c1c5c87ULL};
+// Draws of the HD layout whose vertex shader also draws over the whole canvas (full-screen passes, not scaled): told by
+// the pixel shader too (01.007.000, KYTY_OUTPUT_TRACE, issue #187). The menus' glow behind the selected slot (it was
+// drawn at the slot's layout pixels: a green box above and left of it at 1440) and the glow of their title band (its
+// scissor in layout pixels).
+constexpr std::array<std::pair<uint64_t, uint64_t>, 2> HdLayoutPairs {
+    {{0x3ec043bd86013cafULL, 0x91cd581e82574995ULL}, {0x5d9a2e8e34030f35ULL, 0xae51f2cf2ca8c121ULL}}};
 
 inline bool Scaled(const HW::Context& ctx, const HW::VertexShaderInfo& vs, const HW::PixelShaderInfo& ps) {
 	if (OutputScale() <= 0.0f || !OutputTarget(ctx)) return false;
 	const uint64_t hash   = HashAt(vs.es_regs.data_addr);
 	const bool     scaled = hash == PixelShader || std::find(ClipShaders.begin(), ClipShaders.end(), hash) != ClipShaders.end() ||
-	                    std::find(HdLayoutShaders.begin(), HdLayoutShaders.end(), hash) != HdLayoutShaders.end();
+	                    std::find(HdLayoutShaders.begin(), HdLayoutShaders.end(), hash) != HdLayoutShaders.end() ||
+	                    std::find(HdLayoutPairs.begin(), HdLayoutPairs.end(), std::make_pair(hash, PixelShaderHash(ps))) !=
+	                        HdLayoutPairs.end();
 	static const bool trace = [] {
 		const char* value = std::getenv("KYTY_OUTPUT_TRACE");
 		return value != nullptr && *value != 0 && *value != '0';

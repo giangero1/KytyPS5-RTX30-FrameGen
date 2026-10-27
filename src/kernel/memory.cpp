@@ -14,6 +14,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/cache/gpuResourceManager.h"
+#include "graphics/host_gpu/renderer/demonsSouls.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "native-resource-state.h"
@@ -42,6 +43,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // IWYU pragma: keep
+#include <psapi.h>   // (K32QueryWorkingSetEx: CountReadGuardRace)
 #ifndef MEM_RESERVE_PLACEHOLDER
 #define MEM_RESERVE_PLACEHOLDER 0x00040000
 #endif
@@ -96,7 +98,8 @@ extern "C" {
 	return ram != 0 && ram <= (uint64_t {20} << 30u) ? 1u : 0u;
 }()};
 // KYTY_HOT_READS (live kyty_local_hot_reads, on by default): with guard pages, the pages the game read back lately keep
-// no access instead, their page of the backing view locked in RAM (GuestAddressSpace::NoteRead). 0: guards everywhere.
+// no access instead, their page of the backing view locked in RAM (GuestAddressSpace::NoteRead), while the PC has 1.5 GiB
+// of RAM left or more (KYTY_HOT_READS_MIN_AVAIL_MB, GuestAddressSpace::HotReadsPressure). 0: guards everywhere.
 [[gnu::used]] volatile std::atomic_uint32_t kyty_local_hot_reads {[] {
 	const char* value = std::getenv("KYTY_HOT_READS");
 	return value != nullptr && value[0] == '0' ? 0u : 1u;
@@ -1554,7 +1557,8 @@ void InstallGpuResources(Graphics::GpuResourceManager* resources) noexcept {
 		                ? "Memory: guest pages kept from reads by no access (KYTY_READ_GUARD=1: guard pages)\n"
 		            : kyty_local_hot_reads.load(std::memory_order_relaxed) != 0
 		                ? "Memory: guest pages kept from reads by guard pages, those read back lately by no access, "
-		                  "locked in RAM (KYTY_READ_GUARD=0: no access everywhere, KYTY_HOT_READS=0: guards everywhere)\n"
+		                  "locked in RAM, while 1.5 GiB of RAM or more is left (KYTY_READ_GUARD=0: no access everywhere, "
+		                  "KYTY_HOT_READS=0: guards everywhere, KYTY_HOT_READS_MIN_AVAIL_MB: another limit)\n"
 		                : "Memory: guest pages kept from reads by guard pages (KYTY_READ_GUARD=0: no access)\n");
 	}
 #endif
@@ -3368,10 +3372,37 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len) {
 	return result;
 }
 
+// The direct memory the game is told it has (sceKernelGetDirectMemorySize; sceKernelAvailableDirectMemorySize and
+// sceKernelAllocateMainDirectMemory search below it): for Demon's Souls 12 GiB, a base PS5's (other games: all of it,
+// as before). Demon's Souls' engine takes all it is told
+// at start-up (PlatformPageAllocator::Init, eboot 0x80c200, whose constants are a base PS5's 0x300000000 and a PS5 Pro's
+// 0x34c000000; on a devkit, whose GPI switch says so, more counts as debug memory) and over a session writes nearly all
+// of it: its texture streamer keeps loading textures until ~400 MiB are left (texturePoolLowMemoryLimitMiBs +
+// texturePoolLowMemStopStreamingOffsetMiBs). Told the 12.5 GiB of before (13.5 less the 1 GiB flexible memory), the
+// half GiB more only became texture cache: Boletaria and four worlds (16 GB policy) ended 0.46 GB lower in the PC's
+// memory at 12 GiB, the streamer at 3.5 instead of 4.0 GiB; four of the heaviest maps toured clean, and 1-3 walked at
+// 62.0 fps against 58.2 back to back (58.3 at 12 GiB an hour before: the same within the runs' spread). (Told 11 GiB it
+// held 2.4-2.8 GiB and Boletaria's memory fell by 1.2 GiB; the crashes once put on it came from the kill tour, whose
+// suicide kills break the game's physics at any size.) KYTY_DIRECT_MEMORY_MB=<n>: n MiB (0: all of it, 12.5 GiB).
+static uint64_t ReportedDirectMemorySize() {
+	static const uint64_t cap = [] {
+		constexpr uint64_t Base = uint64_t {12} << 30u;
+		const char*        value = std::getenv("KYTY_DIRECT_MEMORY_MB");
+		if (value == nullptr || *value == '\0') return Libs::Graphics::DemonsSouls::IsSupportedGame() ? Base : ~uint64_t {0};
+		const uint64_t mib = std::strtoull(value, nullptr, 10);
+		if (mib == 0) return ~uint64_t {0};
+		std::printf("Direct memory: at most %llu MiB told to the game (KYTY_DIRECT_MEMORY_MB)\n",
+		            static_cast<unsigned long long>(mib));
+		std::fflush(stdout);
+		return mib << 20u;
+	}();
+	return std::min<uint64_t>(PhysicalMemory::Size(), cap);
+}
+
 size_t KYTY_SYSV_ABI KernelGetDirectMemorySize() {
 	PRINT_NAME();
 
-	return PhysicalMemory::Size();
+	return ReportedDirectMemorySize();
 }
 
 int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t search_start, int64_t search_end,
@@ -3397,6 +3428,7 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t search_start, int64_t 
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	search_end = std::min<int64_t>(search_end, static_cast<int64_t>(ReportedDirectMemorySize()));
 	if (search_end <= search_start) {
 		LOGF_COLOR(Log::Color::Red, "\t[Fail]\n");
 		return NoMemory(__func__, __LINE__);
@@ -3578,7 +3610,7 @@ int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, i
 	     "\t memory_type  = %d\n",
 	     len, alignment, memory_type);
 
-	return KernelAllocateDirectMemory(0, static_cast<int64_t>(PhysicalMemory::Size()), len,
+	return KernelAllocateDirectMemory(0, static_cast<int64_t>(ReportedDirectMemorySize()), len,
 	                                  alignment, memory_type, phys_addr_out);
 }
 

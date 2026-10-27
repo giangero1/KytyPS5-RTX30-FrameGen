@@ -11,6 +11,7 @@
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
+#include "graphics/shader/recompiler/ir/passes/ExecSelects.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
@@ -110,11 +111,14 @@ void DumpShaderIr(const CompileOptions& options, const IR::Program& ir) {
 	for (size_t i = 0; i < ir.info.images.size(); ++i) {
 		const auto& image = ir.info.images[i];
 		text += fmt::format("image[{}] source={} class={} numeric={} dim={} mips={} read={} written={} "
-		                    "atomic={} depth_compare={} cube={} first_pc=0x{:x}\n",
+		                    "atomic={} depth_compare={} cube={} first_pc=0x{:x} max_layer={}\n",
 		                    i, image.source, static_cast<int>(image.resource_class),
 		                    static_cast<int>(image.numeric_class), static_cast<int>(image.dimension),
 		                    image.mip_count, image.read, image.written, image.atomic,
-		                    image.depth_compare, image.cube, image.first_use_pc);
+		                    image.depth_compare, image.cube, image.first_use_pc,
+		                    image.max_array_index == IR::ImageResource::NoArrayIndexBound
+		                        ? std::string("-")
+		                        : std::to_string(image.max_array_index));
 	}
 	for (size_t i = 0; i < ir.info.buffers.size(); ++i) {
 		const auto& buffer = ir.info.buffers[i];
@@ -770,6 +774,14 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	IR::ApplyResourceSpecialization(ir, specialization);
 	IR::RemoveIdentities(ir.blocks);
 	IR::EliminateDeadCode(ir.blocks);
+	if ((Frontend::TranslatorFeatureSet() & Frontend::TranslatorFeatureExecSelects) != 0) {
+		const auto selects = IR::EliminateExecSelects(ir.blocks);
+		if (selects.bypassed != 0 || selects.dropped != 0) {
+			LOGF("%s exec selects: bypassed=%" PRIu32 " dropped=%" PRIu32 "\n", GetDumpLabel(options), selects.bypassed,
+			     selects.dropped);
+			IR::EliminateDeadCode(ir.blocks);
+		}
+	}
 
 	const ShaderVertexInputInfo*  vertex  = nullptr;
 	const ShaderPixelInputInfo*   pixel   = nullptr;

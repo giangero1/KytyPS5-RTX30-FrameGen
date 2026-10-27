@@ -2311,6 +2311,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 
 	if (data_sel == 0 || interrupt_selector == 4) {
 		if (eop_event_type != 0x28 || gcr_cntl != 0) {
+			LiveCounters::Add(LiveCounters::GuestBarrierRelease);
 			cp.EmitGlobalBarrier();
 		}
 
@@ -2321,6 +2322,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 
 	if (release_dst == ReleaseMemDstMemory && dst_gpu_addr == nullptr) {
 		if (eop_event_type != 0x28 || gcr_cntl != 0) {
+			LiveCounters::Add(LiveCounters::GuestBarrierRelease);
 			cp.EmitGlobalBarrier();
 		}
 
@@ -2330,6 +2332,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	}
 
 	if (ReleaseMemGcrNeedsBarrier(eop_event_type, gcr_cntl)) {
+		LiveCounters::Add(LiveCounters::GuestBarrierRelease);
 		cp.EmitGlobalBarrier();
 	}
 

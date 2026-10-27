@@ -37,7 +37,7 @@ uint32_t TranslatorDeviceFeatures() {
 uint32_t TranslatorFeatureSet() {
 	// (KYTY_LANE_LOCAL_COOP=0/1: the cooperative halves off or on, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads
 	// at the entry or where they are read, KYTY_NATIVE_FLOAT_MIN_MAX=0/1 the float min/max emulated or native, whatever
-	// the store was made with and the GPU allows.)
+	// the store was made with and the GPU allows; KYTY_EXEC_SELECTS=0/1 the EXEC selects kept or dropped.)
 	const auto forced = [](const char* name) {
 		const char* value = std::getenv(name);
 		return value == nullptr ? -1 : std::string_view(value) != "0" ? 1 : 0;
@@ -45,6 +45,7 @@ uint32_t TranslatorFeatureSet() {
 	static const int cooperative  = forced("KYTY_LANE_LOCAL_COOP");
 	static const int slots_at_use = forced("KYTY_TABLE_SLOTS_AT_USE");
 	static const int min_max      = forced("KYTY_NATIVE_FLOAT_MIN_MAX");
+	static const int exec_selects = forced("KYTY_EXEC_SELECTS");
 	const auto       stored       = g_translator_features.load(std::memory_order_relaxed);
 	auto             features     = (stored & g_device_features.load(std::memory_order_relaxed)) |
 	                     g_device_required.load(std::memory_order_relaxed);
@@ -54,6 +55,7 @@ uint32_t TranslatorFeatureSet() {
 	apply(cooperative, TranslatorFeatureCooperativeHalves);
 	apply(slots_at_use, TranslatorFeatureTableSlotsAtUse);
 	apply(min_max, TranslatorFeatureNativeFloatMinMax);
+	apply(exec_selects, TranslatorFeatureExecSelects);
 	return features;
 }
 

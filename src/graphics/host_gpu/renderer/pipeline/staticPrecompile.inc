@@ -1244,9 +1244,9 @@ bool PipelineCache::StaticCacheCurrent(GraphicContext& graphics, const std::file
 			}
 		}
 		// Made without a translation feature of this emulator's for this GPU, and no precompile with it tried since: one
-		// makes the pipelines it changes.
+		// makes the pipelines it changes (those that wait for the next precompile aside).
 		namespace Translate = ShaderRecompiler::Frontend;
-		const auto wanted = Translate::TranslatorDeviceFeatures();
+		const auto wanted = Translate::TranslatorDeviceFeatures() & ~Translate::TranslatorFeaturesWithNextPrecompile;
 		if ((ReadStaticStamp().second & wanted) != wanted) return false;
 	}
 	if (graphics.pipeline_binaries_enabled) {
@@ -1395,9 +1395,16 @@ bool PipelineCache::MergePrecompileShards(GraphicContext& graphics, bool prune, 
 	const auto active  = graphics.pipeline_binaries_enabled ? StaticBinariesPath()
 	                     : StaticBlobsMode(graphics)         ? StaticBlobsPath()
 	                                                         : StaticCachePath();
-	const auto stamped = [&](bool merged) {
-		if (merged && (prune || stamp)) {
-			WriteStaticFeatures(prune);
+	// A merge that makes the store (none there before it) makes it of this precompile's pipelines alone, as --prune
+	// does: their translation features are the store's. A --quick precompile (which never prunes) left a store made
+	// from nothing stamped with none of them, and the emulator then translated without them and missed most of it
+	// (issue #189: "Translation features 0x3 off", 3,205 pipelines not among the store's, a compute pipeline compiled
+	// for 5 s in the prologue boss's fight on a 16 GB PC).
+	std::error_code exists_error;
+	const bool      fresh   = !std::filesystem::exists(active, exists_error);
+	const auto      stamped = [&](bool merged) {
+		if (merged && (prune || stamp || fresh)) {
+			WriteStaticFeatures(prune || fresh);
 			// (The store as of this precompile: with nothing new to merge it is not rewritten, and it kept its time from
 			// before the seeds of a newer emulator - out of date at every start, issue #143.)
 			std::error_code error;

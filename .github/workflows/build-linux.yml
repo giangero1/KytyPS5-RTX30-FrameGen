@@ -189,6 +189,16 @@ jobs:
           tag="$GITHUB_REF_NAME"
           [ "$GITHUB_REF_TYPE" = tag ] || tag="$PACKAGE"
           notes="Linux x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest."
+          # A tag's release holds both packages, and either job may make it (the other uploads to it): the same title
+          # and header whichever does (build.yml, build-linux.yml). v20261024's Linux job came first and titled it as
+          # the Linux package's.
+          title="$PACKAGE"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            title="KytyPS5-$tag"
+            notes="$(printf '%s\n\n%s' \
+              "Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000): KytyPS5-$tag.zip. Unzip it and double-click KytyLauncher.exe (or run.cmd); the README.md inside explains the rest." \
+              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest.")"
+          fi
           # The notes of this build (what changed, the per-PC shader caches, frame rates), when the commit has them.
           if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi
           # (A tag's release is the Windows package's too: latest. A manual run's own release is not.)
@@ -198,5 +208,5 @@ jobs:
             gh release upload "$tag" "$PACKAGE.zip" --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$tag" "$PACKAGE.zip" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "$PACKAGE" --notes "$notes" "$latest"
+              --title "$title" --notes "$notes" "$latest"
           fi

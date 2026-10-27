@@ -44,11 +44,15 @@ double NamedThreadsCpuSeconds(const char* name);
 // The process's threads: (thread id, name; empty when it has none). Windows only (Linux: none).
 std::vector<std::pair<uint32_t, std::string>> ProcessThreads();
 
-// A read-only host file kept open for the process (opened once a path, never closed) and its size, for positional
-// reads from any thread (ReadOpenFileAt). 0: it cannot be opened, or (Linux) none are kept: open it for each read.
+// A read-only host file kept open (one handle a path) and its size, for positional reads from any thread
+// (ReadOpenFileAt) until the call's DoneKeptReadFile; once unread for a while it is closed (Windows: 10 s,
+// KYTY_FILE_IDLE_CLOSE=<seconds>, 0 never) and a later call opens it again. 0: it cannot be opened, or (Linux) none are
+// kept: open it for each read.
 uint64_t OpenKeptReadFile(const std::string& path, uint64_t* size);
 // Up to `size` bytes at `offset` of a kept file; the bytes read (0 at the end or on an error).
 uint32_t ReadOpenFileAt(uint64_t file, uint64_t offset, void* buffer, uint32_t size);
+// The reads of an OpenKeptReadFile call ended (each call that returned a file has one): its handle is not used any more.
+void DoneKeptReadFile(const std::string& path);
 // A kept file read whole once, in the background (the first call for the path; Windows only): its later reads come from
 // the system file cache.
 void PrefetchKeptFile(const std::string& path);
@@ -75,6 +79,10 @@ void MakeCriticalThread();
 
 // The refresh rate in Hz of the display a window is on (its HWND on Windows; 0 when unknown or elsewhere).
 int DisplayRefreshHz(void* window);
+// KYTY_RETURN_FOCUS=<window handle> (the launcher's --play: the window that had the focus as it started, Steam's Big
+// Picture when Steam starts the game): the focus handed to that window and `window` (the game's, its HWND) hidden, as
+// the game quits (issue #217). Windows only.
+void ReturnFocus(void* window);
 // Vertical blanks of that display, counted by a thread of their own that waits for each (Windows:
 // D3DKMTWaitForVerticalBlankEvent on the window's display, again when the window moves to another one); a window
 // passed again replaces the first. false where there are none.
@@ -92,6 +100,16 @@ bool     ReadScratchFile(uint64_t file, uint64_t offset, void* data, size_t size
 void     CloseScratchFile(uint64_t file);
 // An existing file (a UTF-8 path) for ReadScratchFile and CloseScratchFile; 0 when it cannot be opened.
 uint64_t OpenFileForReading(const char* path);
+// A file kept between sessions (a UTF-8 path), opened or made for ReadScratchFile, WriteScratchFile and
+// CloseScratchFile by this process alone: 0 when it cannot be, or another process has it open (a second emulator).
+uint64_t OpenDataFile(const char* path);
+// A scratch or data file's size in bytes (0 when unknown), the file cut or extended to `size`, and its written bytes
+// sent to the disk (false when any of them fails).
+uint64_t ScratchFileSize(uint64_t file);
+bool     ResizeScratchFile(uint64_t file, uint64_t size);
+bool     FlushScratchFile(uint64_t file);
+// This executable's path, UTF-8 (empty when unknown).
+std::string ExecutablePath();
 
 // The process's committed private memory and resident working set, and the machine's physical memory, in
 // bytes (0 where the host cannot tell; KYTY_SIMULATE_RAM_MB=<n> reports n MiB of physical memory, for tests).

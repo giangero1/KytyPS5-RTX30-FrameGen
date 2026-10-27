@@ -1792,7 +1792,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 	return result;
 }
 
-ResourcePlan ExtractResourcePlan(const Program& program) {
+ResourcePlan ExtractResourcePlan(const Program& program, bool linear) {
 	ResourcePlan plan;
 	plan.stage                      = program.stage;
 	plan.shader_hash                = program.shader_hash;
@@ -1889,7 +1889,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 			                   plan.clean_flat_slots);
 		}
 	}
-	BuildLinearSrtPlan(plan);
+	if (linear) BuildLinearSrtPlan(plan);
 	return plan;
 }
 

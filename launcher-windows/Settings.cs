@@ -21,15 +21,19 @@ sealed class Settings {
 		new object[] {"render_dlss", 1080}, new object[] {"fsr", false}, new object[] {"output", "auto"},
 		new object[] {"lowlatency", false}, new object[] {"ui_language", ""},
 		// (Game page: the DualSense's own speaker.)
-		new object[] {"pad_speaker", true},
+		new object[] {"pad_speaker", true}, new object[] {"pad_speaker_volume", 100},
+		new object[] {"pad_vibration", 200}, new object[] {"pad_vibration_ms", 60},
+		new object[] {"pad_actuator", 400},
 		// (Experimental page.)
 		new object[] {"present_direct", false}, new object[] {"antilag", false}, new object[] {"keep_resident", false},
 		new object[] {"fps30", false},
 		// (Advanced page.)
-		new object[] {"extra_args", ""}, new object[] {"gpu", ""},
+		new object[] {"extra_args", ""}, new object[] {"gpu", ""}, new object[] {"reopen_launcher", false},
 		// (Graphics page: the DLSS model, a preset letter or the DLSS version's own choice; the file has seen the game output's
 		// Automatic.)
 		new object[] {"dlss_preset", ""}, new object[] {"output_auto", true},
+		// (Game page: the audio output the game is told, "" a TV.)
+		new object[] {"audio_output", ""},
 	};
 
 	readonly string path;

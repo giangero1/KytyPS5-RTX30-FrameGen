@@ -4,6 +4,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
+#include "graphics/host_gpu/renderer/demonsSouls.h"
 #include "kernel/eventQueue.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -1588,10 +1589,20 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 		const auto root      = Common::PathToString(LibKernel::FileSystem::GetRealFilename("/app0"));
 		const auto id        = title + (version.empty() ? "" : "_" + version);
 		const auto recording = "_PipelineCache/files/" + id + ".files";
-		SeedFileRecording(recording, "tools/local/static-precompile/files-" + id + ".files");
+		// (The EU and Asian editions take the US one's: Libs::Graphics::DemonsSouls::ShippedTitle.)
+		auto            released = "tools/local/static-precompile/files-" + id + ".files";
+		std::error_code error;
+		if (const auto shipped = Libs::Graphics::DemonsSouls::ShippedTitle(title);
+		    shipped != title && !std::filesystem::exists(released, error))
+			released = "tools/local/static-precompile/files-" + std::string(shipped) + id.substr(title.size()) + ".files";
+		SeedFileRecording(recording, released);
 		LocalPlatform::FollowKeptFiles(recording, root);
 	});
 	if (uint64_t kept_size = 0; const auto kept = LocalPlatform::OpenKeptReadFile(host_path, &kept_size)) {
+		const struct Done {
+			const std::string& path;
+			~Done() { LocalPlatform::DoneKeptReadFile(path); }
+		} done {host_path};
 		opening = Clock::now() - start;
 		if (file_offset >= kept_size) {
 			return OK;

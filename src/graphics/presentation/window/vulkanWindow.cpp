@@ -670,13 +670,20 @@ static void VulkanInitSubgroupSizeControl(vk::PhysicalDevice physical_device,
 	    device_properties.vendorID == 0x1002u &&
 	    ((id >= 0x7440u && id <= 0x75ffu) || id == 0x15bfu || id == 0x15c8u || id == 0x150eu || id == 0x1586u ||
 	     id == 0x1114u);
+	// The Steam Deck's GPU (Van Gogh, RDNA2; the OLED model's too) with Linux' RADV runs them too: 23% less GPU time in
+	// the game's compute programs at 1-1 (the Windows driver's RDNA2 crash above is AMD's compiler, not RADV's).
+	const bool steam_deck_radv = device_properties.vendorID == 0x1002u && (id == 0x163fu || id == 0x1435u) &&
+	                             std::string_view(device_properties.deviceName.data()).find("RADV") != std::string_view::npos;
 	const char* setting = std::getenv("KYTY_COMPUTE_WAVE64");
-	const bool  wanted  = setting != nullptr && *setting != '\0' ? std::string_view(setting) != "0" : amd_rdna3_or_later;
+	const bool  wanted  = setting != nullptr && *setting != '\0' ? std::string_view(setting) != "0"
+	                                                             : amd_rdna3_or_later || steam_deck_radv;
 	graphics.compute_wave64_native = graphics.compute_subgroup_size_control_enabled && wanted;
+	graphics.steam_deck_radv       = steam_deck_radv;
 	std::printf("Vulkan compute wave64: %s (%s, device 0x%04x:0x%04x)\n",
 	            graphics.SupportsComputeWave64() ? "native" : "emulated on 32-lane subgroups",
 	            setting != nullptr && *setting != '\0' ? "KYTY_COMPUTE_WAVE64"
 	            : amd_rdna3_or_later                    ? "AMD RDNA3 or later"
+	            : steam_deck_radv                       ? "Steam Deck GPU with RADV"
 	                                                    : "default",
 	            device_properties.vendorID, id);
 	// The cooperative halves (ShaderRecompiler::Frontend::TranslatorFeatures) only on NVIDIA GPUs, where they were
@@ -926,8 +933,15 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		supported_copy_indirect.pNext = supported_features2.pNext;
 		supported_features2.pNext     = &supported_copy_indirect;
 	}
+	const bool executable_extension = HasExtension(device_extensions, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+	vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR supported_executables {};
+	if (executable_extension) {
+		supported_executables.pNext = supported_features2.pNext;
+		supported_features2.pNext   = &supported_executables;
+	}
 	physical_device.getFeatures2(&supported_features2);
 	graphics.copy_memory_indirect_enabled = copy_indirect_extension && supported_copy_indirect.indirectCopy;
+	graphics.pipeline_statistics_enabled  = executable_extension && supported_executables.pipelineExecutableInfo;
 	LOGF("Vulkan indirect memory copies: %s\n", graphics.copy_memory_indirect_enabled ? "true" : "false");
 	graphics.maintenance5_enabled      = maintenance5_extension && supported_maintenance5.maintenance5;
 	graphics.pipeline_binaries_enabled = binary_extensions && supported_binaries.pipelineBinaries && graphics.maintenance5_enabled;
@@ -1131,6 +1145,12 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		copy_indirect.pNext        = const_cast<void*>(create_info.pNext);
 		create_info.pNext          = &copy_indirect;
 	}
+	vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR executables {};
+	if (graphics.pipeline_statistics_enabled) {
+		executables.pipelineExecutableInfo = VK_TRUE;
+		executables.pNext                  = const_cast<void*>(create_info.pNext);
+		create_info.pNext                  = &executables;
+	}
 	vk::PhysicalDeviceMemoryPriorityFeaturesEXT memory_priority {};
 	if (graphics.memory_priority_enabled) {
 		memory_priority.memoryPriority = VK_TRUE;
@@ -1210,9 +1230,9 @@ static void VulkanGetExtensions(SDL_Window* window, VulkanExtensions& r) {
 	}
 
 #if defined(_WIN32)
-	// KYTY_FULLSCREEN_EXCLUSIVE (issue #166): VK_EXT_full_screen_exclusive needs this instance extension.
-	if (FullscreenExclusiveRequest() >= 0 &&
-	    HasExtension(r.available_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) &&
+	// KYTY_FULLSCREEN_EXCLUSIVE (issue #166): VK_EXT_full_screen_exclusive needs this instance extension. (Unset too:
+	// an AMD GPU, known only after the instance, keeps out of exclusive fullscreen by default.)
+	if (HasExtension(r.available_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) &&
 	    !HasExtension(r.required_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
 		r.required_extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 	}
@@ -1651,18 +1671,31 @@ void WindowContext::CreateVulkan() {
 		AddPipelineBinaryExtensions(available_extensions, device_extensions);
 		AddCopyMemoryIndirectExtension(available_extensions, device_extensions);
 		AntiLag::AddDeviceExtension(available_extensions, device_extensions); // (KYTY_LOW_LATENCY)
+		// KYTY_PIPELINE_STATS=<hash,...> (diagnostic): the driver's statistics of those compute programs' pipelines
+		// (registers, spills, waves per SIMD: PIPESTATS lines, CreatePipelineInternal).
+		if (std::getenv("KYTY_PIPELINE_STATS") != nullptr &&
+		    HasExtension(available_extensions, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME))
+			device_extensions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
 #if defined(_WIN32)
 		// KYTY_FULLSCREEN_EXCLUSIVE (issue #166: on an RX 9060 XT fullscreen ran ~8% slower than a window until a Game Bar
-		// capture took it off the driver's own path): the swapchain then tells the driver whether exclusive fullscreen
-		// may be used (Swapchain::Create).
-		if (const int request = FullscreenExclusiveRequest();
+		// capture took it off the driver's own path; with exclusive fullscreen disallowed it ran at the window's fps): the
+		// swapchain then tells the driver whether exclusive fullscreen may be used (Swapchain::Create). Unset on an AMD
+		// GPU: disallowed; =1 allows it.
+		const int  asked      = FullscreenExclusiveRequest();
+		const bool by_default = asked < 0 && device_properties.vendorID == 0x1002u;
+		if (const int request = by_default ? 0 : asked;
 		    request >= 0 && HasExtension(available_extensions, "VK_EXT_full_screen_exclusive") &&
 		    HasExtension(r.required_extensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
 			device_extensions.push_back("VK_EXT_full_screen_exclusive");
-			graphic_ctx.full_screen_exclusive = request;
-			std::printf("Fullscreen: exclusive fullscreen %s (KYTY_FULLSCREEN_EXCLUSIVE=%d)\n",
-			            request == 0 ? "disallowed" : "allowed", request);
-		} else if (request >= 0) {
+			graphic_ctx.full_screen_exclusive         = request;
+			graphic_ctx.full_screen_exclusive_default = by_default;
+			if (by_default) {
+				std::printf("Fullscreen: exclusive fullscreen disallowed (AMD GPU; KYTY_FULLSCREEN_EXCLUSIVE=1 allows it)\n");
+			} else {
+				std::printf("Fullscreen: exclusive fullscreen %s (KYTY_FULLSCREEN_EXCLUSIVE=%d)\n",
+				            request == 0 ? "disallowed" : "allowed", request);
+			}
+		} else if (asked >= 0) {
 			std::printf("Fullscreen: KYTY_FULLSCREEN_EXCLUSIVE ignored: the driver lacks VK_EXT_full_screen_exclusive\n");
 		}
 #endif

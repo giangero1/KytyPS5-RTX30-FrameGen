@@ -8,7 +8,7 @@
 // made it and how long after, and gives the range its protection back for good: what keeping the texture only in video
 // memory would cost.
 //
-// KYTY_TEXTURE_OFFLOAD=1 (default with 20 GiB of RAM or less): the same for textures whose download was checked to give
+// KYTY_TEXTURE_OFFLOAD=1 (off by default, see GetMode): the same for textures whose download was checked to give
 // their guest bytes back exactly (16 MiB of images a scan: the downloads go with the frame's GPU work), and their pages
 // are dropped by the offload worker (Windows: DiscardVirtualMemory in the backing view a MiB at a time, the guest view's
 // pages trimmed; Linux: a hole punched in the backing store's memfd, which frees them in every view: the RAM given back,
@@ -70,17 +70,15 @@ namespace TextureOffload {
 
 enum class Mode { Off, Probe, Offload };
 
-// KYTY_TEXTURE_OFFLOAD=1|0 (default: on with 20 GiB of RAM or less, where the game's memory and the emulator's caches
-// press on it; with more, its restores' stalls buy nothing).
+// KYTY_TEXTURE_OFFLOAD=1|0 (default: off; it was on with 20 GiB of RAM or less until v20261024: on 16 GB PCs textures
+// went black at a distance and characters lost their hair (#5, #159, #157), mostly gone with it off though its own
+// checks counted nothing lost; the ~0.5 GB it saved is covered by the engine's free blocks given back
+// (loader/demonsSoulsPageFree.h) and the game files closed when idle).
 inline Mode GetMode() {
 #if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	static const Mode mode = [] {
 		const char* offload = std::getenv("KYTY_TEXTURE_OFFLOAD");
-		if (offload != nullptr && offload[0] != '\0') {
-			if (offload[0] == '1') return Mode::Offload;
-		} else if (const auto ram = LocalPlatform::PhysicalMemory(); ram != 0 && ram <= (uint64_t {20} << 30u)) {
-			return Mode::Offload;
-		}
+		if (offload != nullptr && offload[0] == '1') return Mode::Offload;
 		const char* probe = std::getenv("KYTY_TEXTURE_OFFLOAD_PROBE");
 		return probe != nullptr && probe[0] == '1' ? Mode::Probe : Mode::Off;
 	}();

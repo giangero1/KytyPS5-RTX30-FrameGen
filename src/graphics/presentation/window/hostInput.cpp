@@ -453,11 +453,21 @@ int PollMouse(uint64_t now_ms) {
 // The cursor over the window hides 3 s after the mouse last moved and shows again when it moves (issue #129). (The mouse
 // as a stick hides it anyway: relative mode.)
 constexpr uint64_t CURSOR_HIDE_MS  = 3000;
+constexpr int      CURSOR_MIN_MOVE = 4; // pixels
 static uint64_t    g_cursor_moved  = 0;
 static bool        g_cursor_hidden = false;
+static bool        g_cursor_known  = false;
+static int         g_cursor_x = 0, g_cursor_y = 0; // where the mouse last counted as moved
 
 static void NoteCursorEvent(const SDL_Event& event) {
 	if (event.type != SDL_MOUSEMOTION) return;
+	// (Motion of a few pixels is not counted: a mouse resting on the desk, or its software, can report tiny moves on its
+	// own, which kept the cursor shown for good, issue #188.)
+	const int dx = event.motion.x - g_cursor_x, dy = event.motion.y - g_cursor_y;
+	if (g_cursor_known && dx * dx + dy * dy < CURSOR_MIN_MOVE * CURSOR_MIN_MOVE) return;
+	g_cursor_known = true;
+	g_cursor_x     = event.motion.x;
+	g_cursor_y     = event.motion.y;
 	g_cursor_moved = SDL_GetTicks64();
 	if (g_cursor_hidden) {
 		SDL_ShowCursor(SDL_ENABLE);

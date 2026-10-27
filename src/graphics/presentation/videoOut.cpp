@@ -191,6 +191,7 @@ struct VideoOutConfig {
 	bool                                closing     = false;
 	int                                 flip_rate   = 0;
 	uint64_t                            last_flip_vblank = 0; // vblank_status.count at the last flip
+	uint64_t                            vrr_last         = 0; // VrrFlips: the performance counter the last flip kept to
 	uint64_t                            output_mode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
 	float                               gamma       = 1.0f;
 	VideoOutFlipStatus                  flip_status;
@@ -214,7 +215,9 @@ public:
 	void Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer);
 	void Complete(uint64_t request_id);
 	void WaitForSubmitSlot();
-	bool Flip(uint32_t micros);
+	// `between_vblanks`: a VrrFlips flip of a frame done since the last vblank.
+	bool Flip(uint32_t micros, bool between_vblanks = false);
+	[[nodiscard]] uint64_t ReadyDue();
 	void GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out);
 	void Wait(VideoOutConfig& cfg, int index);
 
@@ -231,7 +234,16 @@ private:
 		FlipRequestSource           source;
 		RequestState                state;
 		Graphics::Presenter::Frame* frame;
+		uint64_t                    done_qpc; // the performance counter at Complete
 	};
+
+	// VrrFlips or KYTY_FLIP_TIMES=1: every 30 s, how long done frames waited for their flip and how evenly they flipped
+	// (the vblank thread's own: only it flips).
+	struct FlipTimes {
+		uint64_t           since = 0, last = 0, flips = 0, between = 0, wait_ticks = 0, wait_max = 0;
+		std::vector<float> intervals_ms; // flip to flip
+	} m_times;
+	void NoteFlip(uint64_t now, uint64_t done, bool between_vblanks);
 
 	Graphics::Presenter& m_presenter;
 	Common::Mutex        m_mutex;
@@ -523,10 +535,55 @@ static int FrameGenFloor() {
 	return floor;
 }
 
+// KYTY_VRR=1 (a display with a variable refresh rate: G-SYNC, FreeSync; issue #221): a frame flips when it is done (the
+// vblank thread looks for one every ~1 ms), at most once a vblank period (the game's flip rate and the floors above count
+// in periods as well), as a PS5 does on such a display; the vblanks keep their clock. On the 60 Hz vblanks a game at 45
+// fps flipped after one vblank or two by turns (16.7 or 33.3 ms on screen) while it moved its world by its own frame
+// times (~22 ms): uneven motion even where the display waited for each frame. (1-1 at native 4K on 120 Hz vblanks, 89
+// fps: a flip interval differed from the one before by 8.3 ms on the vblanks, by 0.9 ms with these; the same fps, and
+// at the cap the same 16.67 ms.) A display of a fixed rate shows each frame at its next refresh, as before.
+static bool VrrFlips() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_VRR");
+		const bool  set   = value != nullptr && std::atoi(value) != 0;
+		if (set) {
+			std::printf("VRR flips: on (KYTY_VRR=1): each frame flips when it is done, at most %u a second\n",
+			            Config::GetVblankFrequency());
+			std::fflush(stdout);
+		}
+		return set;
+	}();
+	return on;
+}
+
+static uint64_t VblankPeriodTicks() {
+	static const uint64_t frequency = Common::Timer::QueryPerformanceFrequency();
+	return std::max<uint64_t>(frequency / std::max(Config::GetVblankFrequency(), 1u), 1);
+}
+
+// VrrFlips: the shortest time from a flip to the next for a frame with `floor` (in vblank periods, as below).
+static uint64_t VrrInterval(const VideoOutConfig& cfg, int floor) {
+	return static_cast<uint64_t>(std::max(floor, cfg.flip_rate) + 1) * VblankPeriodTicks();
+}
+
+// The vblanks beyond the next a frame's flip waits for since the last (IsFlipDueLocked).
+static int FlipFloor(const Graphics::Presenter::Frame* frame) {
+	int floor = 0;
+	if (frame != nullptr) {
+		if (Graphics::Presenter::FlipRateApplies(*frame)) floor = FlipRateFloor();
+		if (!Graphics::Presenter::IsSceneFrame(*frame)) floor = std::max(floor, SceneFreeFloor());
+		if (Graphics::Presenter::GeneratesFrames()) floor = std::max(floor, FrameGenFloor());
+	}
+	return floor;
+}
+
 // `floor`: at least floor + 1 vblanks since the last flip (beyond the game's own flip rate).
 static bool IsFlipDueLocked(const VideoOutConfig& cfg, uint64_t generation, int floor) {
 	if (!cfg.opened || cfg.closing || cfg.generation != generation) {
 		return false;
+	}
+	if (VrrFlips()) {
+		return Common::Timer::QueryPerformanceCounter() >= cfg.vrr_last + VrrInterval(cfg, floor);
 	}
 	if (floor > cfg.flip_rate) {
 		return cfg.vblank_status.count - cfg.last_flip_vblank >= static_cast<uint64_t>(floor) + 1u;
@@ -700,6 +757,7 @@ int VideoOutDriver::Impl::Open(int bus_type) {
 	config.pre_vblank_status         = VideoOutVblankStatus();
 	config.vblank_status             = VideoOutVblankStatus();
 	config.last_flip_vblank          = 0;
+	config.vrr_last                  = 0;
 
 	return handle;
 }
@@ -856,8 +914,9 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		const auto period  = std::max(frequency / refresh, uint64_t {1});
 
 		if (display_check-- == 0) {
-			display_check           = 120;
-			const uint32_t per_tick = display_refused ? 0 : m_presenter.DisplayVblanksPerTick(refresh);
+			display_check = 120;
+			// (VrrFlips: the frames flip between the vblanks, on the timer's.)
+			const uint32_t per_tick = display_refused || VrrFlips() ? 0 : m_presenter.DisplayVblanksPerTick(refresh);
 			if (per_tick != display_per_tick) {
 				if (per_tick != 0) {
 					std::printf("VSync: the %u Hz vblanks keep to the display's (%u to one)\n", refresh, per_tick);
@@ -903,7 +962,23 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			}
 			total_wait = 0;
 		}
-		if (!waited && total_wait > 0) {
+		bool flipped_between = false; // VrrFlips: a frame flipped before this vblank
+		if (!waited && total_wait > 0 && VrrFlips() && !m_presenter.IsGuestPaused()) {
+			// Until the vblank, a frame done meanwhile flips once due: the thread sleeps until then, else looks for one
+			// every ~1 ms.
+			const uint64_t deadline = sleep_begin + static_cast<uint64_t>(total_wait);
+			for (uint64_t now = sleep_begin; now < deadline && !token.stop_requested();
+			     now = Common::Timer::QueryPerformanceCounter()) {
+				const uint64_t due = m_flip_queue.ReadyDue();
+				if (due != 0 && now >= due && m_flip_queue.Flip(0, true)) {
+					flipped_between = true;
+					continue;
+				}
+				const uint64_t until = std::min(deadline, due > now ? due : now + frequency / 1000);
+				Common::Thread::SleepMicro(
+				    static_cast<uint32_t>(std::clamp<uint64_t>((until - now) * 1000000u / frequency, 1, 1000000)));
+			}
+		} else if (!waited && total_wait > 0) {
 			const auto remaining_us =
 			    (static_cast<uint64_t>(total_wait) * 1000000u + frequency - 1) / frequency;
 			Common::Thread::SleepMicro(static_cast<uint32_t>(
@@ -931,7 +1006,8 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 
 		VblankBegin();
-		bool presented = m_flip_queue.Flip(0);
+		// (A frame flipped since the last vblank is the newest: no idle refresh of it.)
+		bool presented = m_flip_queue.Flip(0) || flipped_between;
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh() && m_presenter.PresentIdle()) {
 			if (auto* frame = m_presenter.PrepareLastFrame(); frame != nullptr) {
 				m_presenter.Submit(*frame, true);
@@ -1196,7 +1272,8 @@ void FlipQueue::Complete(uint64_t request_id) {
 			m_mutex.Unlock();
 			EXIT("completed GPU flip has no prepared recording, id=%" PRIu64 "\n", request_id);
 		}
-		request->state = RequestState::Ready;
+		request->state    = RequestState::Ready;
+		request->done_qpc = Common::Timer::QueryPerformanceCounter();
 		m_submit_cond_var.Signal();
 		m_mutex.Unlock();
 		return;
@@ -1239,7 +1316,70 @@ void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
 	}
 }
 
-bool FlipQueue::Flip(uint32_t micros) {
+// VrrFlips: when the frame at the front, done, may flip (a performance counter; 0: none is done).
+uint64_t FlipQueue::ReadyDue() {
+	VideoOutConfig* cfg   = nullptr;
+	int             floor = 0;
+	{
+		Common::LockGuard lock(m_mutex);
+		if (m_processing || m_requests.empty() || m_requests.front().state != RequestState::Ready) return 0;
+		cfg   = m_requests.front().cfg;
+		floor = FlipFloor(m_requests.front().frame);
+	}
+	Common::LockGuard lock(cfg->mutex);
+	return std::max<uint64_t>(cfg->vrr_last + VrrInterval(*cfg, floor), 1);
+}
+
+static bool FlipTimesWanted() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_FLIP_TIMES");
+		return VrrFlips() || (value != nullptr && std::atoi(value) != 0);
+	}();
+	return on;
+}
+
+void FlipQueue::NoteFlip(uint64_t now, uint64_t done, bool between_vblanks) {
+	static const double ms_per_tick = 1000.0 / static_cast<double>(Common::Timer::QueryPerformanceFrequency());
+	auto&               t           = m_times;
+	if (t.since == 0) t.since = now;
+	t.flips++;
+	t.between += between_vblanks ? 1 : 0;
+	const uint64_t wait = done != 0 && now > done ? now - done : 0;
+	t.wait_ticks += wait;
+	t.wait_max = std::max(t.wait_max, wait);
+	// (Not across a pause or a load: 100 ms or more.)
+	if (const double interval = static_cast<double>(now - t.last) * ms_per_tick; t.last != 0 && interval < 100.0) {
+		t.intervals_ms.push_back(static_cast<float>(interval));
+	}
+	t.last = now;
+	const double seconds = static_cast<double>(now - t.since) * ms_per_tick / 1000.0;
+	if (seconds < 30.0) return;
+	// How evenly: the median interval, and how much an interval differs from the one before (the median and the 90th
+	// percentile: a frame on screen 16.7 ms, then 33.3, differs by 16.7; a hitch only moves the high end).
+	auto&      all      = t.intervals_ms;
+	const auto quantile = [](std::vector<float>& values, double q) {
+		if (values.empty()) return 0.0;
+		const auto at = values.begin() + static_cast<std::ptrdiff_t>(q * static_cast<double>(values.size() - 1));
+		std::nth_element(values.begin(), at, values.end());
+		return static_cast<double>(*at);
+	};
+	std::vector<float> changes;
+	changes.reserve(all.size());
+	for (size_t i = 1; i < all.size(); i++)
+		changes.push_back(std::abs(all[i] - all[i - 1]));
+	const double change = quantile(changes, 0.5), change90 = quantile(changes, 0.9), median = quantile(all, 0.5);
+	std::printf("Flips: %.0f s: %llu frames (%llu between vblanks), done to flip %.2f ms on average (at most %.1f ms), "
+	            "flipped every %.2f ms (median), changing by %.2f ms from one to the next (median; 90%%: %.2f ms)\n",
+	            seconds, static_cast<unsigned long long>(t.flips), static_cast<unsigned long long>(t.between),
+	            static_cast<double>(t.wait_ticks) * ms_per_tick / static_cast<double>(t.flips),
+	            static_cast<double>(t.wait_max) * ms_per_tick, median, change, change90);
+	std::fflush(stdout);
+	all.clear();
+	t.since = t.last = now;
+	t.flips = t.between = t.wait_ticks = t.wait_max = 0;
+}
+
+bool FlipQueue::Flip(uint32_t micros, bool between_vblanks) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
 	m_mutex.Lock();
@@ -1263,12 +1403,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_mutex.Unlock();
 
 	r.cfg->mutex.Lock();
-	int floor = 0;
-	if (r.frame != nullptr) {
-		if (Graphics::Presenter::FlipRateApplies(*r.frame)) floor = FlipRateFloor();
-		if (!Graphics::Presenter::IsSceneFrame(*r.frame)) floor = std::max(floor, SceneFreeFloor());
-		if (Graphics::Presenter::GeneratesFrames()) floor = std::max(floor, FrameGenFloor());
-	}
+	const int floor = FlipFloor(r.frame);
 	if (!IsFlipDueLocked(*r.cfg, r.generation, floor)) {
 		r.cfg->mutex.Unlock();
 		Common::LockGuard queue_lock(m_mutex);
@@ -1300,6 +1435,14 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_requests.pop_front();
 
 	if (r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation) {
+		const uint64_t now = Common::Timer::QueryPerformanceCounter();
+		if (VrrFlips()) {
+			// On time (within a quarter of a vblank period: the thread's wake-up): the next keeps to the schedule, at most
+			// the vblank rate on average; later (a frame done after it was due): from now.
+			const uint64_t due = r.cfg->vrr_last + VrrInterval(*r.cfg, floor);
+			r.cfg->vrr_last    = now - due < VblankPeriodTicks() / 4 ? due : now;
+		}
+		if (FlipTimesWanted()) NoteFlip(now, r.done_qpc, between_vblanks);
 		r.cfg->flip_status.count++;
 		r.cfg->last_flip_vblank                     = r.cfg->vblank_status.count;
 		r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();

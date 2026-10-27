@@ -47,11 +47,18 @@ public partial class App : Application {
 			var game = GameInfo.Read(context.Settings.Str("game"), context.PrecompileTool, context.Root);
 			if (game.Found) {
 				var commands = new Commands(context);
+				// The window that had the focus as this started (Steam's Big Picture when Steam starts it): the emulator
+				// hands the focus back to it as the game quits (issue #217: Windows gave it to another window, and Big
+				// Picture took no pad input until clicked).
+				var focus = Native.ForegroundWindow();
+				Environment.SetEnvironmentVariable("KYTY_RETURN_FOCUS", focus);
 				try {
 					var process = commands.Start(commands.PlayArguments(game, true), true);
 					// Steam counts the game as running while this process lasts (its controller layout, play time).
 					new Thread(() => {
 						process.WaitForExit();
+						// (Again, where the game ended without handing it back.)
+						Native.Focus(focus);
 						var code = process.ExitCode;
 						Dispatcher.BeginInvoke(new Action(() => Shutdown(code)));
 					}) { IsBackground = true }.Start();

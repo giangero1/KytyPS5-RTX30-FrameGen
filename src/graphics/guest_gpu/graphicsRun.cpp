@@ -23,6 +23,7 @@
 #include "libs/agc.h"
 #include "libs/errno.h"
 
+#include "async-upload.h"
 #include "live-trace.h"
 #include "live-trace-gpu.h"
 #include "live-census.h"
@@ -466,8 +467,12 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 }
 
-// A guest memory write of the command processor.
+// A guest memory write of the command processor: a label, or data the game or later work reads. The buffer copies
+// recorded before it are made first (KYTY_ASYNC_UPLOAD): the game takes a label as the GPU being done and may rewrite
+// the buffers those copies read at once, and a copy made after that took the new bytes for the earlier draws (issue
+// #196: lit ground and water flickered white; the frame boundary's wait, 5c6f80fa, came after the labels).
 static void WriteGuestMemory(void* dst, const void* src, uint32_t size) {
+	AsyncUpload::Drain();
 	std::memcpy(dst, src, size);
 }
 
@@ -784,6 +789,12 @@ bool GuestGpu::Process(Submission& submission) {
 	BdaDirtyRegions::Publish();
 	if (submission.type == SubmissionType::FrameBoundary) {
 		EXIT_IF(submission.started || submission.queue_id != 0);
+		// The frame's upload copies taken first (KYTY_ASYNC_UPLOAD: the upload worker reads guest memory after the
+		// render thread recorded them): past the boundary the game writes what that frame's work read (the next frame
+		// but one, double buffered), and a copy still pending took those bytes - lit ground and water flickered white
+		// for a frame on a fast PC with the game's async compute (issue #196). Without deferred submits each submission
+		// drained them; the boundary waits here only for the copies recorded since the last one.
+		AsyncUpload::Drain();
 		Common::LockGuard lock(m_queue_mutex);
 		EXIT_IF(submission.frame_epoch != m_consumed_frame);
 		++m_done_num;
@@ -2170,8 +2181,14 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 	switch (event_type) {
 		// CsPartialFlush, GsPartialFlush, PsPartialFlush.
 		case 0x00000007:
+			LiveCounters::Add(LiveCounters::GuestBarrierCs);
+			EmitGlobalBarrier();
+			break;
 		case 0x0000000f:
-		case 0x00000010: EmitGlobalBarrier(); break;
+		case 0x00000010:
+			LiveCounters::Add(LiveCounters::GuestBarrierGfx);
+			EmitGlobalBarrier();
+			break;
 		// CbDbDataWritebackInvalidate, CbDataWritebackInvalidate.
 		case 0x00000016:
 		case 0x00000031:
@@ -2179,6 +2196,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type,
 				     event_index);
 			}
+			LiveCounters::Add(LiveCounters::GuestBarrierCache);
 			EmitGlobalBarrier();
 			break;
 		// DbDataWritebackInvalidate, DbMetadataWritebackInvalidate, CbMetadataWritebackInvalidate.
@@ -2189,6 +2207,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type,
 				     event_index);
 			}
+			LiveCounters::Add(LiveCounters::GuestBarrierCache);
 			EmitGlobalBarrier();
 			break;
 		case 0x0000000d:

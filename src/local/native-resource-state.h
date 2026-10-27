@@ -54,4 +54,7 @@ extern volatile std::atomic<uint32_t> kyty_local_async_reprotect_mode;
 // 1: guest readbacks narrow a window that meets an image to the request's pages (bufferCache.cpp).
 extern volatile std::atomic<uint32_t> kyty_local_readback_narrow_mode;
 extern volatile std::atomic<uint32_t> kyty_local_readback_queue_mode;
+// 1: a guest readback window also takes the host buffers next to the request's; 2: the same
+// while read guards are off (bufferCache.cpp).
+extern volatile std::atomic<uint32_t> kyty_local_readback_span_mode;
 }

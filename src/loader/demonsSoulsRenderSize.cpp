@@ -220,14 +220,18 @@ static bool InstallSettings(Program* program, bool trinity) {
 	// Its own wide output is not made (InstallWideOutput sizes that output already).
 	const char* wide_output = std::getenv("KYTY_WIDE_OUTPUT");
 	uint32_t    squeezed_width = 0;
-	if (hd_pro && aspect != 0.0 && wide_output != nullptr && std::strcmp(wide_output, "0") == 0) {
+	// KYTY_OUTPUT_HEIGHT's output above 1080 with the interface in its 4K layout: the wide output at that height instead
+	// (DemonsSoulsHdOutput::WideOutputWidth, issue #199: 3416x1440 at 21:9 for a 1440p ultrawide screen, not 5120x2160
+	// scaled down).
+	const uint32_t wide_at_height = hd_pro && aspect != 0.0 ? DemonsSoulsHdOutput::WideOutputWidth() : 0;
+	if (wide_at_height == 0 && hd_pro && aspect != 0.0 && wide_output != nullptr && std::strcmp(wide_output, "0") == 0) {
 		const auto fitted = static_cast<uint32_t>(std::lround(pro_width / aspect / 8.0)) * 8u;
 		if (fitted != requested)
 			std::printf("Demon's Souls render size: %u at the wider aspect squeezed into the %ux%u output: %ux%u instead\n",
 			            requested, pro_width, pro_height, pro_width, fitted);
 		requested      = fitted;
 		squeezed_width = pro_width;
-	} else if (hd_pro && aspect != 0.0) {
+	} else if (wide_at_height == 0 && hd_pro && aspect != 0.0) {
 		std::printf("Demon's Souls render size: a wider aspect with the %ux%u output (the upscaler's, KYTY_HD_OUTPUT or "
 		            "KYTY_OUTPUT_HEIGHT) only squeezed (KYTY_WIDE_OUTPUT=0); 16:9\n",
 		            pro_width, pro_height);
@@ -311,11 +315,13 @@ static bool InstallSettings(Program* program, bool trinity) {
 	if (!patches.Apply()) return false;
 	if (aspect_store) g_wide_aspect = static_cast<double>(size.width) / size.height;
 	if (trinity) g_output = output;
-	if (trinity && (hd_pro || size.height < SuperResolutionLeastHeight)) {
-		(void)DemonsSoulsSuperResolution::SetLeastHeight(program, size.height);
-	}
-	if (trinity) std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
-	                        output.width, output.height, OutputWidth, OutputHeight);
+	if (trinity && (hd_pro || size.height < SuperResolutionLeastHeight) &&
+	    !DemonsSoulsSuperResolution::SetLeastHeight(program, size.height))
+		std::printf("Demon's Souls render size: the super resolution's least height of a known build not found; it "
+		            "runs from 1080 only\n");
+	if (trinity)
+		std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
+		            output.width, output.height, OutputWidth, OutputHeight);
 	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s\n",
 	            hd ? "HD" : "performance", size.width, size.height, hd ? ModeWidths[mode] : game_width,
 	            hd ? ModeHeights[mode] : game_height,

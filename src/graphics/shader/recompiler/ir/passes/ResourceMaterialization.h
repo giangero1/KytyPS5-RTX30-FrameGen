@@ -39,8 +39,9 @@ struct ResourceSpecialization {
 };
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
-// its values and is independent of the translated shader CFG.
-ResourcePlan ExtractResourcePlan(const Program& program);
+// its values and is independent of the translated shader CFG. Without `linear`, no linear SRT plan
+// (BuildLinearSrtPlan, made from the plan alone: the caller makes it when the plan is used).
+ResourcePlan ExtractResourcePlan(const Program& program, bool linear = true);
 
 // Resolves and specializes the immutable resource plan in one transaction. On failure both
 // destinations are unchanged.

@@ -17,6 +17,13 @@ namespace DemonsSouls {
 constexpr bool IsSupportedTitle(std::string_view title) {
 	return title == "PPSA01340" || title == "PPSA01341" || title == "PPSA01342";
 }
+// The title of the release's files to take when there are none of the game's own (the recording of the game's file opens,
+// libAmpr.cpp; precompile-windows.ps1 takes another region's hints itself): the US edition's for the Asian and EU ones,
+// the same build (the EU 01.005.000 eboot is the US one's code at the same addresses). A file it lists that an edition
+// does not have is not opened.
+constexpr std::string_view ShippedTitle(std::string_view title) {
+	return title == "PPSA01340" || title == "PPSA01342" ? std::string_view("PPSA01341") : title;
+}
 bool IsSupportedGame();
 // Chains of dispatches with no barrier between them until the guest's own wait or cache action (these titles only).
 // KYTY_COMPUTE_CHAIN=0 (live kyty_local_compute_chain_mode): barriers around every dispatch, as for other games.

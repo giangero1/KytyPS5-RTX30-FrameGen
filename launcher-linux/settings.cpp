@@ -42,6 +42,7 @@ const nlohmann::ordered_json& Defaults() {
 		d["extra_args"]          = "";
 		d["gpu"]                 = "";
 		d["dlss_preset"]         = "";
+		d["audio_output"]        = ""; // (Game page: "" a TV)
 		d["output_auto"]         = true;
 		// (Linux.)
 		d["mangohud"]         = true; // run_ds.sh's MANGO=1 default

@@ -1,10 +1,10 @@
 # KytyPS5 portable test build (Windows)
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
-**Demon's Souls (the PS5 remake)**. This `v2026.10.24-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `fc248f60` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
+**Demon's Souls (the PS5 remake)**. This `v2026.10.27-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `fc248f60` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
 https://github.com/giangero1/KytyPS5-RTX30-FrameGen. `BUILD-INFO.txt` identifies both the binary source and final release commit; verify the external ZIP checksum and internal `SHA256-MANIFEST.txt`.
 
-Thanks to [chenxiao07/KytyPS5 v20261024](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261024) and its contributors for RAM guard page refactoring (<=20 GB RAM blue screen and flickering fix), DualSense Bluetooth speaker crash fix and haptic tuning, 1440p output option and squeezed ultrawide, pipeline sweep retention for previous worlds, Intel Arc FSR 3 queue support, and automatic mouse cursor hiding. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
+Thanks to [chenxiao07/KytyPS5 v20261027](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261027) and its contributors for RAM guard page refactoring (<=20 GB RAM blue screen and flickering fix), DualSense Bluetooth speaker crash fix and haptic tuning, 1440p output option and squeezed ultrawide, pipeline sweep retention for previous worlds, Intel Arc FSR 3 queue support, and automatic mouse cursor hiding. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
 
 The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. The user reports 85–95+ displayed FPS in Boletaria; the earlier screenshot observations below remain unchanged. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
@@ -184,7 +184,8 @@ and effects at the render height, stretched at the end). On an RTX 5090 at Bolet
 limit there): DLSS from 720 to 1080p 75.2 fps, DLSS from 1080 to 4K 68.8, the game's TAA at 1080p 76.8.
 "1440p" (with DLSS or FSR 3 only; -Upscaler dlss -OutputHeight 1440 on a un.cmd line, contributed by Tutuzaooo)
 makes that output 2560x1440, for 1440p screens: the upscaler's own picture at the screen's size, neither the 4K one
-scaled down nor the 1080p one scaled up, the HUD and menus in the game's HD layout scaled to it. Its render heights:
+scaled down nor the 1080p one scaled up, the HUD and menus in the game's 4K layout drawn at 1440 (as the 4K output's,
+scaled down; `-Set KYTY_OUTPUT_LAYOUT=hd`: the game's HD layout scaled up, as before). Its render heights:
 1440 = DLAA, 960 = Quality, 840 = Balanced, 720 = Performance, 480 = Ultra Performance. With the game's TAA the
 output stays 4K.
 

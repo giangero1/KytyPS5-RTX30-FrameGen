@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "live-trace-gpu.h"
 
 #include <algorithm>
 #include <array>
@@ -455,6 +456,7 @@ TileManager::Result TileManager::Detile(vk::Buffer tiled, uint64_t tiled_offset,
                                         uint64_t tiled_capacity, uint64_t linear_capacity,
                                         std::span<const GpuTileInfo> infos, bool host_source,
                                         bool reuse_scratch) {
+	const LiveTrace::MarkSite site(LiveTrace::SiteTilerDetile);
 	const auto&    limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t descriptor_alignment =
 	    std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
@@ -487,6 +489,7 @@ TileManager::Result TileManager::Detile(vk::Buffer tiled, uint64_t tiled_offset,
 void TileManager::Tile(vk::Buffer linear, uint64_t linear_offset, uint64_t linear_capacity,
                        vk::Buffer tiled, uint64_t tiled_offset, uint64_t tiled_capacity,
                        std::span<const GpuTileInfo> infos) {
+	const LiveTrace::MarkSite site(LiveTrace::SiteTilerTile);
 	const auto&    limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t descriptor_alignment =
 	    std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
@@ -502,6 +505,7 @@ void TileManager::TileImage(Image& image, std::span<const vk::BufferImageCopy> r
                             vk::Buffer tiled, uint64_t tiled_offset, uint64_t tiled_capacity,
                             uint64_t linear_capacity, std::span<const GpuTileInfo> infos,
                             ColorTransform transform) {
+	const LiveTrace::MarkSite site(LiveTrace::SiteTilerImage);
 	EXIT_IF(regions.empty());
 	const auto&    limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t descriptor_alignment =
@@ -554,6 +558,7 @@ uint32_t TileManager::ConversionRows(uint64_t offset, uint64_t row_stride, uint6
 
 void TileManager::ConvertD16(Result source, Result target, D16Direction direction, bool d32,
                              const D16Layout& layout) {
+	const LiveTrace::MarkSite site(LiveTrace::SiteTilerD16);
 	vk::Pipeline* pipeline_pointer = nullptr;
 	if (direction == D16Direction::Promote) {
 		pipeline_pointer = d32 ? &m_d16_to_d32 : &m_d16_to_d24;
@@ -690,6 +695,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 }
 
 void TileManager::SwapBgra16(Result input, Result output, uint32_t pixels) {
+	const LiveTrace::MarkSite site(LiveTrace::SiteTilerBgra16);
 	if (m_swap_bgra16 == nullptr) {
 		m_swap_bgra16 = CreatePipeline(GPU_TILER_SWAP_BGRA16_SPV, std::size(GPU_TILER_SWAP_BGRA16_SPV),
 		                               "create BGRA16 swap pipeline");

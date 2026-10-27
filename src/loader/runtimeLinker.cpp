@@ -17,6 +17,7 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "loader/demonsSoulsIdle.h"
+#include "loader/demonsSoulsPageFree.h"
 #include "loader/demonsSoulsLanguages.h"
 #include "loader/demonsSoulsCopy.h"
 #include "loader/demonsSoulsGpuPages.h"
@@ -24,6 +25,9 @@
 #include "loader/demonsSoulsSceneGuard.h"
 #include "loader/demonsSoulsHdOutput.h"
 #include "loader/demonsSoulsSuperResolution.h"
+#include "loader/demonsSoulsLoaderGuard.h"
+#include "loader/demonsSoulsTextureMips.h"
+#include "loader/demonsSoulsEnginePools.h"
 #include "loader/demonsSoulsTouchGuard.h"
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
@@ -1619,6 +1623,7 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 		}
 	}
 	DemonsSoulsIdle::Install(m_programs.empty() ? nullptr : m_programs.front());
+	DemonsSoulsPageFree::Install(m_programs.empty() ? nullptr : m_programs.front());
 	for (auto* program : m_programs) DemonsSoulsCopy::Install(program);
 	DemonsSoulsGpuPages::Install(m_programs.empty() ? nullptr : m_programs.front());
 	// (The PS5 Pro path first: with the HD output too, that takes only the interface's part.)
@@ -1627,6 +1632,9 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	DemonsSoulsRenderSize::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsSceneGuard::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsTouchGuard::Install(m_programs.empty() ? nullptr : m_programs.front());
+	DemonsSoulsLoaderGuard::Install(m_programs.empty() ? nullptr : m_programs.front());
+	DemonsSoulsTextureMips::Install(m_programs.empty() ? nullptr : m_programs.front());
+	DemonsSoulsEnginePools::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsLanguages::Install(m_programs.empty() ? nullptr : m_programs.front());
 	StartAllModules();
 
@@ -1652,6 +1660,7 @@ void RuntimeLinker::Clear() {
 	Common::LockGuard lock(m_mutex);
 	GamePatch::Clear();
 	DemonsSoulsIdle::Clear();
+	DemonsSoulsPageFree::Clear();
 	DemonsSoulsCopy::Clear();
 	DemonsSoulsGpuPages::Clear();
 

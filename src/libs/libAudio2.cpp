@@ -958,7 +958,7 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(AudioOut2PortHandle port, AudioOut2PortS
 	EXIT_NOT_IMPLEMENTED(state == nullptr);
 
 	std::memset(state, 0, sizeof(AudioOut2PortState));
-	state->output          = 1;
+	state->output          = AudioInternal::MainOutputReported().connection;
 	state->num_channels    = 2;
 	state->volume          = 127;
 	state->reroute_counter = 0;
@@ -1133,7 +1133,7 @@ int KYTY_SYSV_ABI AudioOut2GetSpeakerArrayAmbisonicsCoefficients(AudioOut2Speake
 int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(AudioOut2SpeakerInfo* info, uint32_t flags) {
 	EXIT_NOT_IMPLEMENTED(info == nullptr);
 	std::memset(info, 0, sizeof(AudioOut2SpeakerInfo));
-	info->type             = 0;
+	info->type             = AudioInternal::MainOutputReported().speaker_type;
 	info->available_bits   = 0x03;
 	info->flags            = 0;
 	info->speaker_angle[0] = {-30, 0};

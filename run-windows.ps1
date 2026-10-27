@@ -45,6 +45,9 @@
 #                                            movies, the title and loading screens kept at 16:9 with black bars)
 #   .\run-windows.ps1 -Quality low            Demon's Souls draws less (low / lowest: shorter shadows and
 #                                            distant detail): faster where the CPU limits
+#   .\run-windows.ps1 -Antialiasing off      Demon's Souls without its own anti-aliasing (TAA) and the camera jitter
+#                                            that goes with it: a sharp picture with jagged edges (with the game's own
+#                                            upscaler only; at a render height equal to the output, nothing is scaled)
 #   .\run-windows.ps1 -TextureReduce 1       large textures without their largest level: half the size per side
 #                                            (2: a quarter; 0: whole), less video memory and upload; default 1
 #                                            with less than 12 GB of video memory, else 0 (the launcher's Graphics
@@ -82,6 +85,7 @@ param(
 	[int]$OutputHeight = 0,
 	[string]$Aspect = '',
 	[string]$Quality = '',
+	[ValidateSet('', 'off')][string]$Antialiasing = '',
 	[string]$TextureReduce = '',
 	[string[]]$Set = @(),
 	[string]$Patch = '',
@@ -294,6 +298,17 @@ if ($Quality -and $Quality -ne 'standard') {
 	if (!$qualityConvars.Contains($Quality)) { throw "-Quality takes low or lowest (or standard), not '$Quality'" }
 	if ($titleId -match '^PPSA0134[0-2]$') {
 		$environment['KYTY_GAME_CONVARS'] = (@($environment['KYTY_GAME_CONVARS'], $qualityConvars[$Quality]) | Where-Object { $_ }) -join ';'
+	}
+}
+# -Antialiasing off (issue #220): Demon's Souls' TAA off (r_aaMethod 0) and its projection jitter with it, which TAA
+# alone left on: a still scene's edges moved from frame to frame (8.5% of its pixels changed, 1% with the jitter off).
+# Not with -Upscaler: DLSS and FSR take the game's PS5 Pro path, whose upscaler is the anti-aliasing.
+if ($Antialiasing -eq 'off' -and $titleId -match '^PPSA0134[0-2]$') {
+	if ($Upscaler) {
+		Write-Warning "-Antialiasing off is for the game's own upscaler: left out with -Upscaler $Upscaler"
+	} else {
+		$environment['KYTY_GAME_CONVARS'] = (@($environment['KYTY_GAME_CONVARS'], 'r_aaMethod=0;r_aaEnableTemporalProjectMatrixJitter=false') |
+			Where-Object { $_ }) -join ';'
 	}
 }
 # -TextureReduce 0|1|2: large block-compressed textures held without their 1 or 2 largest levels (KYTY_TEXTURE_REDUCE;

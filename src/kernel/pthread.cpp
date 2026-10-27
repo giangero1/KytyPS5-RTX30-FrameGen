@@ -3646,6 +3646,11 @@ static void* RunThread(void* arg) {
 	os_thread_id = GetHostThreadId();
 #endif
 	thread->host_thread_id = os_thread_id;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	// The game's name for the thread on the host's (15 characters on Linux): profiles, top and the Deck's
+	// tools/local/deck/deckprof.py tell its threads apart.
+	if (!thread->name.empty()) (void)pthread_setname_np(pthread_self(), thread->name.substr(0, 15).c_str());
+#endif
 	if (GuestThreadLog())
 		std::printf("GUEST-THREAD start %s (tid %" PRIu64 "): cpumask 0x%llx priority %d policy %d stack 0x%llx+0x%llx %s\n",
 		            thread->name.c_str(), os_thread_id, static_cast<unsigned long long>(thread->attr->affinity),
