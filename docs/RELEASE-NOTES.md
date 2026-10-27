@@ -1,3 +1,31 @@
+# v2026.10.27-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and regression-verified `4b3bdc27` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261027](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261027)** (`06d69ef5`) and its contributors. Merged in `b08010e6`:
+
+- **Lighter Shaders (EXEC Selects Feature 8)**: PS5 shader register writes masked lane-by-lane omit redundant unread lane writes, making translated shaders 8.5% smaller and compute shaders run 4–14% fewer instructions on NVIDIA. Existing precompiled shaders remain 100% valid.
+- **VRR Displays (`-Set KYTY_VRR=1`)** (#221): On G-SYNC/FreeSync displays, frames flip immediately when completed rather than waiting for 60 Hz vblank intervals, eliminating micro-stutters below 60 FPS.
+- **Frame Generation Camera-Cut Reset** (#174): Frame generation resets history cleanly across camera cuts (`inputs.cut` / `NoteCut()`), eliminating ghosted blended frames between scene transitions and dialogue shots.
+- **VRAM Budget Accounting for DLSS-G & Super Resolution** (#215): DLSS frame generation and super resolution allocations are dynamically counted against the card's VRAM budget (`VideoMemoryReserve()`), preventing VRAM exhaustion during long play sessions.
+- **120 FPS Menu Texture Retention** (#221): Texture collection intervals are measured in real time (10 s / 20 s) at any frame rate, eliminating world-texture eviction freezes after keeping menus open.
+- **1440p 4K UI Layout & Ultrawide Display Buffer Fix** (#187, #198, #199, #202): Fullscreen menus and video backdrops retain correct aspect ratio on 1440p ultrawide setups without movie squeeze.
+- **Memory Management & Return on 16 GB PCs** (#159, #174): Faster working set memory return to Windows after world transitions and refined guard page thresholds (1.5 GB to 2 GB) for seamless stability.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas (`InterfaceScope`, `InterfaceTransformFor`)**, shared SR/FG frame tokens (`g_upscale_token`), and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+**Automated validation:** Focused tests passed: `demons_souls_output_tests`, `demons_souls_output_integration_tests`, `page_manager_tests`, `save_data_backup_tests`, `command_scheduler_timeline_tests`, `host_image_allocation_tests`, `texture_cache_depth_readback_tests`, and all 4 `LauncherCommandTests.ps1` permutations. The binary pair is hash-identical to the verified build output.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.10.24-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and gameplay-verified `fc248f60` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
