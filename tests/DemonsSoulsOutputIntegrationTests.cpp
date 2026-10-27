@@ -38,6 +38,7 @@ bool Active() { return false; }
 void SetMode(int) {}
 uint32_t UpscaledWidth() { return 1920; }
 uint32_t UpscaledHeight() { return 1080; }
+uint32_t WideOutputWidth() { return 0; }
 }
 }
 
