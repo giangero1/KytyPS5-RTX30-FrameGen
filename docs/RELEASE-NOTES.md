@@ -1,3 +1,31 @@
+# v2026.11.06-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and regression-verified `1ad2a2aa` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261106](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261106)** (`06cf66ce`) and its contributors. Merged in `1fb03a80`:
+
+- **Native Stereo Sound Mixing & Headphone Speech Enhancement**: Redesigned 5.1/7.1 to stereo downmixing. Inter-channel correlation reduced from 0.74 to 0.27, speech and vocal intelligibility boosted by +7 dB, completely eliminating audio desynchronization and headphone crackle.
+- **Scout Thread Ahead of Render Thread (+5–11% FPS)**: PM4 packet decoding and pipeline lookup run on a dedicated worker ahead of the main render thread, yielding 5–11% higher framerates in CPU-heavy Boletaria Castle scenes.
+- **NVIDIA Empty Fragment Shader Stencil Pass Optimization**: Omits execution of redundant empty pixel shaders on NVIDIA hardware during stencil evaluation, saving ~0.57ms per frame near Archstones and dense fog gates.
+- **8 GB VRAM Dynamic Budget Adaptation**: Automatically scales host memory reservation based on available GPU dedicated memory, preventing out-of-memory spikes on 8 GB cards during long play sessions.
+- **Vulkan Swapchain F11 Destruction Fix**: Cleaned swapchain teardown when switching fullscreen with F11, preventing device-loss hangs.
+- **01.005.000 Game Version Support**: Integrated `vmovddup` vector instruction emulation in guest code patcher for 01.005.000 update packages.
+- **DLSS Sharpening & Automatic Texture LOD Bias**: Added RCAS DLSS sharpening controls (`KYTY_DLSS_SHARPNESS=0.3/0.6/0.9`) and automatic `log2(render / output)` negative texture LOD bias so mipmaps retain razor-sharp output resolution detail.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas (`InterfaceScope`, `InterfaceTransformFor`)**, shared SR/FG frame tokens (`g_upscale_token`), and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+**Automated validation:** Focused tests passed: `demons_souls_output_tests`, `demons_souls_output_integration_tests`, `page_manager_tests`, `save_data_backup_tests`, `command_scheduler_timeline_tests`, `host_image_allocation_tests`, `texture_cache_depth_readback_tests`, and all 4 `LauncherCommandTests.ps1` permutations. The binary pair is hash-identical to the verified build output.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.10.27-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and regression-verified `4b3bdc27` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
