@@ -1,12 +1,12 @@
 # KytyPS5 portable test build (Windows)
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
-**Demon's Souls (the PS5 remake)**. This `v2026.10.27-upstream-merge` package contains the exact locally built and gameplay-verified binaries from `fc248f60` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
+**Demon's Souls (the PS5 remake)**. This `v2026.11.06-upstream-merge` package contains the exact locally built and verified binaries from `06cf66ce` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
 https://github.com/giangero1/KytyPS5-RTX30-FrameGen. `BUILD-INFO.txt` identifies both the binary source and final release commit; verify the external ZIP checksum and internal `SHA256-MANIFEST.txt`.
 
-Thanks to [chenxiao07/KytyPS5 v20261027](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261027) and its contributors for RAM guard page refactoring (<=20 GB RAM blue screen and flickering fix), DualSense Bluetooth speaker crash fix and haptic tuning, 1440p output option and squeezed ultrawide, pipeline sweep retention for previous worlds, Intel Arc FSR 3 queue support, and automatic mouse cursor hiding. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
+Thanks to [chenxiao07/KytyPS5 v20261106](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261106) and its contributors for native stereo sound mixing, the Scout thread (+5-11% FPS), NVIDIA empty fragment shader stencil optimization, dynamic 8 GB VRAM budget handling, and F11 swapchain fixes. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
 
-The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. The user reports 85–95+ displayed FPS in Boletaria; the earlier screenshot observations below remain unchanged. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
 ## RTX 3070: 1080p DLSS to 1440p with 2× frame generation
 
@@ -47,134 +47,6 @@ game's `sce_sys\param.json` and warns when the version is not one of these.
 
 This dump is the European release, whose language list has no Chinese, Japanese or Korean; the game files
 hold every language, and one value turns the others on: see [Game language](#game-language-chinese-japanese-korean-and-others).
-
-## System requirements
-
-| Item | Requirement | Notes |
-| --- | --- | --- |
-| OS | Windows 10 (1803 or later) or Windows 11, 64-bit | |
-| CPU | AVX2 required (Intel Core 4th generation / AMD Ryzen or later) | 8 cores or more recommended; the test PC has an i9-14900K |
-| RAM | **32 GB recommended, 16 GB works** | The game process takes about 20 GB while a save loads but uses only about 4 GB of it in play, so with 16 GB Windows moves the rest to the page file and loading takes longer. It needs about 34 GB of RAM plus page file: keep the page file "system managed" or set it to at least 32 GB (the launcher warns when Windows cannot provide it). The MEMORY_MANAGEMENT blue screen that PCs whose RAM ran full got (issue #50) is fixed; a full RAM still makes the game slow, so close other large programs (a browser) while playing |
-| GPU | NVIDIA RTX with **12 GB of VRAM recommended, 8 GB works** | About 11 GB of VRAM in use in the heaviest areas. With less than 12 GB, render targets and buffers keep the video memory and the textures that do not fit are read from system memory. The test PC with its video memory limited to 8 GB, walking past every enemy of a map (up to 120 fps): Boletaria's gate about 72 fps, Boletaria 1-2 98, 1-3 64 (its own limit on the processor, the same with all the video memory), Stonefang 2-1 87, Shrine of Storms 96, about what it runs with all its video memory. That measures where the textures go, not a slower GPU: an 8 GB card is usually a slower one too, and gives less. The test PC has an RTX 5090; users run it on AMD Radeon (RX 6000 and newer) and Intel Arc cards too, with problems of their own tracked in the issues |
-| GPU driver | The latest | The emulator uses Vulkan, which comes with the driver |
-| Disk | About 83 GB for the game, an SSD recommended | The emulator takes about 270 MB, the shader caches about 2.5–5 GB, and while playing the system temp folder needs another 4–5 GB |
-
-On the test PC (i9-14900K + RTX 5090, 2560×1440 window) the game holds its 60 fps in most places; the
-heaviest spots (Boletaria's gate area, the Tower of Latria) run at about 57–60 fps. With "Up to 120 fps"
-on (see the launcher below), most areas run at 70–100 fps; the release notes list every area. Much
-slower PCs may not run it or may stutter badly.
-
-On a CPU with performance and efficiency cores (Intel Core 12th generation and later), the launcher
-keeps the emulator's render threads on the performance cores (all but the one of CPU 0) by itself,
-which was about 2% faster than leaving them to Windows; the console shows them as "render threads on
-CPUs ...". To leave everything to Windows instead: `run.cmd -Set KYTY_RECORDING_CPUS=,KYTY_RENDER_CPUS=`.
-
-The game starts with the table path: most draws and compute dispatches read their resources straight
-from GPU memory instead of descriptor sets the emulator builds for each of them (Boletaria standing
-about 45 → 50–53 fps). The first visit to an area compiles its pipelines in the background, so the
-gain grows as you play. To start without it: `run.cmd -Set KYTY_TABLE_XPR=0,KYTY_TABLE_DISPATCH=0`.
-
-## Where to put the game files
-
-You need the unpacked PS5 game folder: the level that directly contains `eboot.bin` and the `sce_sys`
-folder (usually named `PPSA01341-app0`).
-
-- It can be anywhere; it does not need to be inside the emulator folder. An SSD is recommended.
-- The first launch opens a folder picker: select that folder. It is remembered in `game-path.txt`,
-  so you only choose it once.
-- To use another location: delete `game-path.txt` and launch again, or run
-  `run.cmd -Game "D:\Games\PPSA01341-app0"`.
-- Optional: the folder packed into one ZArchive file (`.zar`, about two thirds of its size) works
-  too, read without extracting it: choose it with the launcher's `.zar...` button, or run
-  `run.cmd -Game "D:\Games\PPSA01341-app0.zar"`. Pack it with `zarchive.exe <folder> <file.zar>`
-  (ZArchive, https://github.com/Exzap/ZArchive/releases). The folder stays the main way.
-- On a hard disk (HDD): pack the game into a `.zar` there and keep the emulator folder (with its
-  `_PipelineCache`, about 6 GB) on an SSD. Unpacked on a busy hard disk, every small read of the game
-  waited 100-500 ms: long area loads and freezes while walking; packed, with the emulator on the SSD, it
-  ran at full speed ([#91](https://github.com/chenxiao07/KytyPS5/issues/91)).
-
-### Add-on content (DLC)
-
-- Add-ons with files of their own: one folder each in `Content\PPSA01341\` inside the emulator folder,
-  holding the add-on's unpacked files (with its `sce_sys\param.json`). The game is told it owns them.
-- Add-ons without files (a deluxe edition's extras, say): one section each in `dlc_emu.ini` in the
-  emulator folder, with the add-on's content id:
-
-  ```ini
-  [PSAL]
-  content_id=EP9000-PPSA01341_00-XXXXXXXXXXXXXXXX
-  download_status=NO_EXTRA_DATA
-  service_label=0
-  ```
-
-- The run log lists each add-on the game is told it owns (`NpEntitlementAccess: ... reported as owned`).
-
-## Starting the game
-
-**Double-click `KytyLauncher.exe`** (or `launcher.cmd`) for the settings window, in English or Chinese. Its
-pages: **Play** (the game folder or `.zar`; checks of the game, graphics card, RAM, precompiled shaders and
-DLSS/FSR; the Play button), **Display** (resolution, aspect ratio, fullscreen, HDR, up to 120 fps, VSync, low
-latency), **Graphics** (upscaler, render height with each height's DLSS mode, game output, DLSS model, graphics
-preset, frame generation), **Game** (console
-language, cheats), **Shaders** (precompile, optionally on the efficiency cores only so the PC stays responsive;
-export shader hints), **Advanced** (performance overlay, red-zone protection, safe GPU mode, the graphics card on a
-PC with more than one, extra command-line options, the launcher's language, the logs folder) and **Experimental** (options still being tried out, each with
-the issue that collects how it goes: a 30 fps lock, direct presentation for VRR displays, keep memory resident,
-AMD Anti-Lag). It remembers the settings (`launcher-settings.json`) and needs nothing installed (.NET
-Framework 4.7.2, part of Windows 10 and 11). Windows may ask before its first start ("More info", "Run anyway"):
-it is not signed. The earlier PowerShell window (`launcher.ps1`) still works.
-`KytyLauncher.exe --play` starts the game right away with the launcher's settings, without its window: for a
-desktop shortcut, or Steam (Add a Non-Steam Game, pick `KytyLauncher.exe`, then Launch Options `--play` in its
-properties; Steam counts the game as running until it closes, so the controller layout applies). It shows no
-dialogs (after a driver update, precompile from the Shaders page) and opens the window when no game folder is set.
-"Up to 120 fps" (off by default) lets the game render up to 120 frames a second instead of the
-console's 60 where the PC is fast enough: play keeps its speed, and movies, menus and loading screens
-stay at 60.
-"VSync" (off by default) waits for the display's refresh, so the picture does not tear; displays with
-adaptive sync (G-SYNC, FreeSync) keep it. "HDR" (off by default) outputs HDR10 when "Use HDR" is on for the
-display in Windows' display settings (the game is told the TV takes HDR); otherwise the picture stays SDR.
-"Low latency" (off by default) keeps one finished frame waiting for the screen instead of about two, so what you
-press shows sooner: at 60 Hz about 15-23 ms from the game's frame to the screen instead of about 30. A frame that
-comes late is then no longer covered by a waiting one, so the frame pacing is a little less even.
-"Render height" (1440 by default, as on the PS5) is the height the game renders its 3D at before it
-upscales it to its 4K picture; lower heights (1296, 1152, 1080, 900) are faster where the graphics card
-limits the frame rate (a laptop RTX 3080 at Boletaria's start: 20.7 fps at 1440, 24.8 at 1080) and
-less sharp. The interface keeps the game output's size either way.
-"Aspect ratio" (16:9 by default, as on the PS5) renders the 3D wider for ultrawide displays: 21:9
-(3416x1440 at render height 1440) or 32:9, seeing more to the sides, not a stretched 16:9 picture. In
-play the HUD keeps its shape: health, magic, stamina and the equipment at the left edge, the souls at
-the right edge, the boss's health in the middle. The in-game menus, pre-rendered movies and loading
-screens are stretched to the width; the lock-on and enemy health bars stay on their targets. The
-"Resolution" list follows the aspect ratio (2560x1080, 3440x1440, 3840x1600, 5120x2160 at 21:9), and
-"Render height" offers the heights whose 3D the game's render target memory holds (it was made for its own
-3840x2160): up to 1800 at 21:9 (4264x1800), 1512 at 32:9 (5376x1512). Larger ones drew the 3D red or broken, and
-2160 at 21:9 ended the game at start-up; the emulator now lowers such a height by itself.
-"Graphics" (Standard by default, as on the PS5) sets how much the game draws. Low picks the level of
-detail as for a 720-line picture and ends sun shadows at 125 m (250 m); Lowest picks detail as for 480
-lines, ends sun shadows at 60 m and turns off ambient shadowing
-and the shadows of torches and other lamps. Each thing drawn costs the emulator processor time, so these
-help where the processor limits the frame rate (a laptop Ryzen 9 5900HX standing at the Gates of
-Boletaria: 21.9 fps at Standard, 25.6 at Lowest).
-"Upscaler" (Game by default, as on the PS5) with "DLSS (PS5 Pro path)" runs the game's own PS5 Pro mode:
-its 3D at the render height (1080 at least) is reconstructed by NVIDIA DLSS to the selected output size,
-while retaining the original 3840x2160 UI/HUD canvas. At the validated RTX 3070 profile, this is
-1920x1080 scene input -> 2560x1440 SR output. The launcher keeps a render height for each upscaler;
-DLSS starts at 1080. Upstream's original Performance/Quality descriptions assumed a 4K SR target and
-do not describe the scale ratio of this fork's 1440p output. NVIDIA RTX only, with
-NVIDIA's Streamline runtime as for frame generation below: on a PC without an NVIDIA RTX graphics card (AMD,
-Intel, GeForce GTX) the launcher offers no DLSS. "FSR 3 (PS5 Pro path)" does the same with AMD's FSR 3 in place of
-DLSS, on any graphics card, AMD and Intel included: it is built into the emulator, nothing to download
-(`run.cmd -Upscaler fsr`; on an RTX 5090 at Boletaria's start 75.8 fps from 1080 to 4K, a picture close to DLSS's).
-The render heights show their mode as with DLSS (FSR's "Native AA" at the output's own size). The in-game
-"Cinematic" mode stays native 4K without DLSS or FSR.
-With an "Aspect ratio" wider than 16:9, DLSS makes the picture at its full width: 5120x2160 at 21:9 (from
-2560x1080 at render height 1080), and the game finishes it at that size, with the HUD at the screen's edges,
-instead of a 3840x2160 picture widened on the screen. On an RTX 5090 at Boletaria's start that ran at 64.5 fps,
-the game's TAA at 21:9 at 59.3. Screens without the 3D (movies, the title, loading) are stretched to the
-width, as without DLSS. (Note: do not treat upstream RTX 5090 results as this RTX 3070 build's baseline validation.)
-"Game output" (4K by default, as on the PS5) with "1080p" runs the game's own HD mode, the one a PS5 takes on
-a 1080p TV: its post-processing and HUD at 1920x1080 instead of 3840x2160 scaled down to the window afterwards,
-and its 3D at most 1080 high (a higher render height is lowered to 1080). Less work for the graphics card: at
 Boletaria's start on an RTX 5090, 69.8 fps at 4K, 78.3 at 1080p. It suits 1080p screens; on larger ones the
 picture is softer than the 4K output's. With "DLSS (PS5 Pro path)" too, the game's PS5 Pro mode makes a
 1920x1080 output instead of its 4K one: DLSS turns the 3D at the render height (360 = Ultra Performance, 540 = Performance, 630 = Balanced, 720 and 900 = Quality, 1080 = DLAA)
@@ -182,7 +54,8 @@ into the 1080p picture, and the game finishes it at 1080p, HUD included. For 108
 that find DLSS's 4K output too heavy (RTX 20/30): the game's own 1080p mode has no upscaler (its 3D, anti-aliasing
 and effects at the render height, stretched at the end). On an RTX 5090 at Boletaria's start (its processor the
 limit there): DLSS from 720 to 1080p 75.2 fps, DLSS from 1080 to 4K 68.8, the game's TAA at 1080p 76.8.
-"1440p" (with DLSS or FSR 3 only; -Upscaler dlss -OutputHeight 1440 on a un.cmd line, contributed by Tutuzaooo)
+"1440p" (with DLSS or FSR 3 only; -Upscaler dlss -OutputHeight 1440 on a 
+un.cmd line, contributed by Tutuzaooo)
 makes that output 2560x1440, for 1440p screens: the upscaler's own picture at the screen's size, neither the 4K one
 scaled down nor the 1080p one scaled up, the HUD and menus in the game's 4K layout drawn at 1440 (as the 4K output's,
 scaled down; `-Set KYTY_OUTPUT_LAYOUT=hd`: the game's HD layout scaled up, as before). Its render heights:

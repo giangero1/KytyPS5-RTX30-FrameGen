@@ -1,6 +1,7 @@
 #include "common/hostException.h"
 
 #include "common/guardedCopy.h"
+#include "common/platform/sysVirtual.h"
 
 #include <atomic>
 #include <cstdio>
@@ -392,6 +393,7 @@ static void SignalHandler(int sig, siginfo_t* si, void* uctx) {
 #else
 
 // x86-64 page-fault error bits.
+constexpr uint64_t PAGE_FAULT_ERROR_PRESENT     = 0x01;
 constexpr uint64_t PAGE_FAULT_ERROR_WRITE       = 0x02;
 constexpr uint64_t PAGE_FAULT_ERROR_INSTRUCTION = 0x10;
 
@@ -422,7 +424,14 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
 	if (signal_number == SIGSEGV || signal_number == SIGBUS) {
 		info.type             = ExceptionType::AccessViolation;
 		const auto error_code = static_cast<uint64_t>(gregs[REG_ERR]);
-		// The texture offload's pages first, as on Windows: true runs the access again.
+		// A minor-mode page's missing PTE first (sysLinuxVirtual.cpp, KYTY_UFFD_MINOR): mapped again, the access runs again;
+		// so does a write whose page the kernel write-protects while its bits say none.
+		if (signal_number == SIGBUS &&
+		    SysVirtualResolveMinorFault(reinterpret_cast<uint64_t>(signal_info->si_addr),
+		                                (error_code & PAGE_FAULT_ERROR_PRESENT) != 0,
+		                                (error_code & PAGE_FAULT_ERROR_WRITE) != 0))
+			return;
+		// The texture offload's pages next, as on Windows: true runs the access again.
 		if (const auto probe = g_probe_handler.load(std::memory_order_acquire);
 		    probe != nullptr && probe(reinterpret_cast<uint64_t>(signal_info->si_addr),
 		                              static_cast<uint64_t>(gregs[REG_RIP]), context,

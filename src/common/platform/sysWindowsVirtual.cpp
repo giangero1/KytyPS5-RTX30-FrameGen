@@ -350,6 +350,12 @@ void SysVirtualWriteWatchMapped(uint64_t /*address*/, uint64_t /*size*/, Virtual
 
 void SysVirtualWriteWatchUnmapped(uint64_t /*address*/, uint64_t /*size*/) {}
 
+void SysVirtualZapNoAccess(bool /*on*/) {}
+
+bool SysVirtualResolveMinorFault(uint64_t /*address*/, bool /*present*/, bool /*write*/) {
+	return false;
+}
+
 bool SysVirtualFlushInstructionCache(uint64_t address, uint64_t size) {
 	if (::FlushInstructionCache(GetCurrentProcess(),
 	                            reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)),

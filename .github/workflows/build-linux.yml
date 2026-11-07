@@ -71,6 +71,8 @@ jobs:
           mkdir -p "$out/tools/local/static-precompile"
           cp "$build/kyty_emulator" "$build/kyty_shader_precompile" "$build/kyty_launcher" "$out"/
           cp tools/local/run_ds.sh precompile-linux.sh tools/local/dlss-bridge/get-dlss-linux.sh "$out"/
+          # The Steam Deck's launch script and its guide (docs/STEAM-DECK.md).
+          cp tools/local/deck/run-deck.sh docs/STEAM-DECK.md docs/STEAM-DECK.zh-CN.md "$out"/
           # DLSS: the bridge's source only (MIT); get-dlss-linux.sh downloads NVIDIA's SDK and builds it on the user's PC,
           # so the package carries none of NVIDIA's files.
           mkdir -p "$out/dlss-bridge"
@@ -83,7 +85,7 @@ jobs:
           cp tools/local/static-precompile/pass-states.json "$out/tools/local/static-precompile/"
           cp tools/local/static-precompile/hints-*.hints "$out/tools/local/static-precompile/" 2>/dev/null || true
           chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/kyty_launcher" "$out/run_ds.sh" \
-            "$out/precompile-linux.sh" "$out/get-dlss-linux.sh"
+            "$out/precompile-linux.sh" "$out/get-dlss-linux.sh" "$out/run-deck.sh"
           cat > "$out/README.md" <<'EOF'
           # KytyPS5 (Linux x64) for Demon's Souls (PPSA01341)
 
@@ -119,7 +121,11 @@ jobs:
           launch translates shaders in the background for a minute or two; later launches are faster.
 
           If the unpacker dropped the files' execute permission ("Permission denied"): `chmod +x kyty_emulator
-          kyty_shader_precompile kyty_launcher run_ds.sh precompile-linux.sh get-dlss-linux.sh`.
+          kyty_shader_precompile kyty_launcher run_ds.sh precompile-linux.sh get-dlss-linux.sh run-deck.sh`.
+
+          On a Steam Deck, take the release's Steam Deck package (`KytyPS5-steamdeck-*.zip`, built for it), or start the
+          game from this one with `run-deck.sh` (the Deck's fastest settings): `STEAM-DECK.md` in this package tells how
+          to copy the game and the emulator over, add it to Steam and what frame rates to expect.
 
           Keep the kernel's own CPU scheduler: the emulator places its threads itself (`KYTY_RENDER_CPUS`), and a
           sched_ext scheduler works against that (`scx_lavd`, which CachyOS suggests for games: about 10% slower on an
@@ -144,6 +150,7 @@ jobs:
           upscales the game's 3D on its PS5 Pro path in place of Sony's upscaler (sharpness `KYTY_FSR_SHARPNESS`, 0.0-1.0,
           default 0.6), and `KYTY_FRAMEGEN_BACKEND=fsr` turns on FSR 3 frame generation (2x), for example
           `KYTY_UPSCALER=fsr KYTY_FRAMEGEN_BACKEND=fsr ./run_ds.sh`.
+          AMD's FSR SDK DLLs are Windows files: there is nothing to add here, and FSR 4 is not available on Linux.
 
           Sizeable parts of this program are under the third-party licenses in `LICENSES/` and
           `LICENSE`.
@@ -156,6 +163,143 @@ jobs:
           name: ${{ steps.name.outputs.package }}
           path: _Build/package/
           if-no-files-found: error
+
+  # The Steam Deck package (docs/STEAM-DECK.md): the Steam Deck build (KYTY_STEAM_DECK: the Deck's defaults, the keyboard
+  # keys Steam's desktop layout sends left out; -march=znver2, the Deck's Zen 2 CPU) with run-deck.sh and the guides. Jobs
+  # of its own: a failure here leaves the Linux and Windows packages' release alone. PGO: the Linux profile, as
+  # build-deck.sh without the Deck's (tools/pgo/kyty-deck.profdata, trained on a Deck, is written by LLVM 19+: this
+  # runner's clang 18 cannot read it).
+  steamdeck:
+    name: Build (Steam Deck)
+    runs-on: ubuntu-24.04
+    outputs:
+      package: ${{ steps.name.outputs.package }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Package name
+        id: name
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            name="KytyPS5-steamdeck-$GITHUB_REF_NAME"
+          else
+            name="KytyPS5-steamdeck-$(date -u +%Y%m%d)-${GITHUB_SHA:0:8}"
+          fi
+          echo "package=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld ninja-build cmake git python3 glslang-tools \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
+            libxi-dev libxrandr-dev libxss-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libwayland-dev wayland-protocols
+
+      - name: Build
+        env:
+          KYTY_MARCH: znver2
+          KYTY_BUILD_DIR: _Build/deck
+          KYTY_CMAKE_ARGS: -DKYTY_STEAM_DECK=ON -DKYTY_BUILD_LINUX_LAUNCHER=OFF -DKYTY_PGO_USE=${{ github.workspace }}/tools/pgo/kyty-linux.profdata
+        run: |
+          ./build-linux.sh kyty_emulator
+          ./build-linux.sh kyty_shader_precompile
+
+      - name: Package
+        env:
+          PACKAGE: ${{ steps.name.outputs.package }}
+        run: |
+          set -euo pipefail
+          build=_Build/deck
+          out="_Build/package/$PACKAGE"
+          mkdir -p "$out/tools/local/static-precompile"
+          cp "$build/kyty_emulator" "$build/kyty_shader_precompile" "$out"/
+          cp tools/local/deck/run-deck.sh precompile-linux.sh docs/STEAM-DECK.md docs/STEAM-DECK.zh-CN.md "$out"/
+          cp LICENSE "$out"/
+          cp -r LICENSES "$out"/
+          cp tools/local/static-precompile/pass-states.json "$out/tools/local/static-precompile/"
+          cp tools/local/static-precompile/hints-*.hints "$out/tools/local/static-precompile/" 2>/dev/null || true
+          chmod +x "$out/kyty_emulator" "$out/kyty_shader_precompile" "$out/run-deck.sh" "$out/precompile-linux.sh"
+          cat > "$out/README.md" <<'EOF'
+          # KytyPS5 for the Steam Deck: Demon's Souls (PPSA01341)
+
+          An experimental PS5 emulator, built for the Steam Deck (its Zen 2 CPU, its defaults). `STEAM-DECK.md`
+          (中文: `STEAM-DECK.zh-CN.md`) tells how to copy the game over, add it to Steam, which GPU clock to set and
+          what frame rates to expect.
+
+          In short: unzip this into `~/KytyPS5`, put the game in `~/Games` (`PPSA01341-app0.zar`, or the folder
+          `PPSA01341-app0` with `eboot.bin` in it), add `run-deck.sh` to Steam as a non-Steam game, and set the GPU
+          clock to 1300 MHz in its performance profile.
+
+          If the unpacker dropped the files' execute permission ("Permission denied"): `chmod +x kyty_emulator
+          kyty_shader_precompile run-deck.sh precompile-linux.sh`.
+
+          Sizeable parts of this program are under the third-party licenses in `LICENSES/` and `LICENSE`.
+          EOF
+          ls -l "$out"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.package }}
+          path: _Build/package/
+          if-no-files-found: error
+
+  release-steamdeck:
+    name: Publish release (Steam Deck)
+    needs: steamdeck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PACKAGE: ${{ needs.steamdeck.outputs.package }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.steamdeck.outputs.package }}
+          path: package
+
+      - name: Release notes
+        uses: actions/checkout@v4
+        with:
+          path: notes
+          sparse-checkout: docs/RELEASE-NOTES.md
+          sparse-checkout-cone-mode: false
+
+      - name: Publish
+        shell: bash
+        run: |
+          (cd package && zip -qr "../$PACKAGE.zip" "$PACKAGE")
+          # A tag's release (the Windows or the Linux job usually makes it first: the same title and header whichever
+          # does), else a release of its own named after the package at this commit.
+          tag="$GITHUB_REF_NAME"
+          [ "$GITHUB_REF_TYPE" = tag ] || tag="$PACKAGE"
+          notes="Steam Deck build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000). Unzip it into ~/KytyPS5 and add run-deck.sh to Steam; STEAM-DECK.md inside explains the rest."
+          title="$PACKAGE"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            title="KytyPS5-$tag"
+            notes="$(printf '%s\n\n%s\n\n%s' \
+              "Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000): KytyPS5-$tag.zip. Unzip it and double-click KytyLauncher.exe (or run.cmd); the README.md inside explains the rest." \
+              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest." \
+              "Steam Deck build: KytyPS5-steamdeck-$tag.zip. Unzip it into ~/KytyPS5 and add run-deck.sh to Steam as a non-Steam game; STEAM-DECK.md inside explains the rest.")"
+          fi
+          if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi
+          latest=--latest=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then latest=--latest; fi
+          # (Another job may make the release between the look and the create: then this one uploads to it.)
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+             ! gh release create "$tag" "$PACKAGE.zip" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+                 --title "$title" --notes "$notes" "$latest"; then
+            gh release upload "$tag" "$PACKAGE.zip" --clobber --repo "$GITHUB_REPOSITORY"
+          fi
 
   release:
     name: Publish release
@@ -195,9 +339,10 @@ jobs:
           title="$PACKAGE"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             title="KytyPS5-$tag"
-            notes="$(printf '%s\n\n%s' \
+            notes="$(printf '%s\n\n%s\n\n%s' \
               "Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000): KytyPS5-$tag.zip. Unzip it and double-click KytyLauncher.exe (or run.cmd); the README.md inside explains the rest." \
-              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest.")"
+              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest." \
+              "Steam Deck build: KytyPS5-steamdeck-$tag.zip. Unzip it into ~/KytyPS5 and add run-deck.sh to Steam as a non-Steam game; STEAM-DECK.md inside explains the rest.")"
           fi
           # The notes of this build (what changed, the per-PC shader caches, frame rates), when the commit has them.
           if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi

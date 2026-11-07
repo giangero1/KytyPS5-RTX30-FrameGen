@@ -259,6 +259,7 @@ bool LaneWise(ValueOpcode opcode) {
 		case ValueOpcode::FPAdd32:
 		case ValueOpcode::FPSub32:
 		case ValueOpcode::FPFma32:
+		case ValueOpcode::FPMad32:
 		case ValueOpcode::FPMul32:
 		case ValueOpcode::FPMin32:
 		case ValueOpcode::FPMax32:

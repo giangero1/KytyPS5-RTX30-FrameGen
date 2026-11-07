@@ -326,6 +326,17 @@ if ($InputsOnly) {
 	Write-Host "wrote _PipelineCache\static\$gameId.shaders"
 	return
 }
+# The drive the store is made on (issue #225): its last step writes the store as one file of ~5.5 GB beside the shards
+# (~5.5 GB together), which a FAT32 drive cannot hold (4 GB at most per file) - the run failed there after all its work.
+$cacheRoot = [IO.Path]::GetPathRoot((Resolve-Path "$PSScriptRoot\_PipelineCache").Path)
+$cacheDrive = try { New-Object IO.DriveInfo $cacheRoot } catch { $null } # (none for a network share)
+if ($cacheDrive -and $cacheDrive.IsReady) {
+	if ($cacheDrive.DriveFormat -in @('FAT32', 'FAT')) {
+		throw "the drive $cacheRoot is $($cacheDrive.DriveFormat), which holds no file of 4 GB or more, and the shader store is one file of about 5.5 GB: move this folder to an NTFS or exFAT drive"
+	}
+	$freeGb = [math]::Floor($cacheDrive.AvailableFreeSpace / 1GB)
+	if ($freeGb -lt 12) { Write-Host "warning:    $freeGb GB free on $cacheRoot; the run needs about 12 GB at its end (the shards and the store at once)" }
+}
 # The shards an interrupted run finished first: what they hold is not compiled again.
 Wait-Precompile (Start-Precompile 'merge-before' @('--merge')) 'merge'
 # The plan: every pipeline of the run with the work item that makes it first (a dry run of each seed file on all CPUs,

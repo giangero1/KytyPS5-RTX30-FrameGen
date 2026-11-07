@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 #include "local/video-memory-policy.h"
 
+#include <functional>
 #include <map>
 #include <mutex>
 #include <tuple>
@@ -78,6 +79,8 @@ struct GraphicContext {
 	// its identity (pipelineCacheBlobs.h); in the precompile, its output.
 	const PipelineCacheBlobs*          pipeline_blobs                        = nullptr;
 	PipelineCacheBlobWriter*           pipeline_blob_writer                  = nullptr;
+	// A precompile is making pipelines: one the driver refuses is left out (shaders.cpp PipelineRefused).
+	bool                               precompiling                          = false;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
@@ -94,6 +97,7 @@ struct GraphicContext {
 	// copies (src/local/readback-queue.h); buffers are then shared with its family.
 	uint32_t                           readback_family = static_cast<uint32_t>(-1);
 	vk::Queue                          readback_queue  = nullptr;
+	Common::Mutex                      readback_queue_mutex; // (DeviceQueuesGuard; one thread submits at a time)
 	// Windows: a second queue of the graphics family used only for vkQueuePresentKHR. The
 	// driver can block a present in the kernel until earlier GPU work on its queue is done;
 	// on the graphics queue that held queue_mutex against the very submissions that work
@@ -184,15 +188,30 @@ struct GraphicContext {
 	// A log line on where the video memory goes (Windows' and VMA's figures): diagnostics.
 	void                   LogVideoMemory(const char* label) const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
-	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
+	// `guest_texture`: an image of the guest's (Image, image.cpp), not one of the emulator's own (presenter, frame generation, super
+	// resolution): KYTY_TEXTURE_HOST_MODE=pd places only those flexibly.
+	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image, bool guest_texture = false);
+	// (CreateImage: a texture made in the host-preferred type, KYTY_TEXTURE_HOST_AT; where it really is, logged.)
+	void                   NoteHostPreferredTexture(VmaAllocation allocation, double host_at);
 	void                   DeleteImage(VulkanImage& image);
 	// Frees the images kept for reuse (KYTY_IMAGE_POOL): video memory ran out.
 	void                   TrimImagePool();
 	void                   ReportMemoryFallback(const char* what, uint64_t bytes) const;
+	// Out of memory past every fallback (issue #228: VMA's answer is OUT_OF_DEVICE_MEMORY whatever refused it): the
+	// driver's own answer to the same size in video and in system memory, VMA's memory objects against the GPU's limit
+	// and the PC's RAM and commit, the first few times.
+	void                   DescribeAllocationFailure(const char* what, uint64_t bytes) const;
+	// That, then `create` again every 100 ms for up to 10 s while memory may come back (frees in flight, Windows growing
+	// its page file), with the images kept for reuse freed each time; true once it made it.
+	bool                   RetryAllocation(const char* what, uint64_t bytes, const std::function<bool()>& create);
 	// KYTY_SIMULATE_VRAM_MB: the video memory taken at start-up (left out of the budget and usage above).
 	// A budget under 12 GiB (CreateAllocator): less than the game's working set (Boletaria ~11 GB). Textures yield video
 	// memory to render targets and buffers (CreateImage); the pipeline warmup leaves its pipelines to first use.
 	bool                          small_video_memory = false;
+	// The default of the reduced texture levels (KYTY_TEXTURE_REDUCE, vma.cpp): a card of 12 GiB of video memory or
+	// less, by its size, not its budget, which other programs and frame generation move (issue #215: a 16 GB RTX 5080 at
+	// 12.06-12.21 GiB of budget, DLSS-G and DLSS on, ran with full textures at 11.7 GiB in use and no frame drops).
+	bool                          reduce_texture_levels = false;
 	// The game buffers' own VMA pool (BufferCache), whose blocks BufferCache::Defragment compacts. KYTY_BUFFER_DEFRAG:
 	// on with a small video memory, 0 off, 1 on any GPU. Null: off, game buffers in VMA's default pools.
 	VmaPool                       game_buffer_pool = nullptr;
@@ -215,6 +234,20 @@ private:
 	                            vk::ImageCreateFlags>,
 	                 std::pair<vk::Result, vk::ImageFormatProperties>>
 	    m_image_format_properties;
+};
+
+// Every queue the emulator submits to, held: a call that waits for the whole device (vkDeviceWaitIdle, as AMD's FSR
+// runtime does making and destroying its contexts) wants them left alone, and the validation layer caught the recording
+// worker submitting through it at an F11 (issue #174). Nothing new reaches the GPU meanwhile.
+class DeviceQueuesGuard {
+public:
+	// NOLINTNEXTLINE(google-runtime-references)
+	explicit DeviceQueuesGuard(GraphicContext& graphics)
+	    : m_queue(graphics.queue_mutex), m_readback(graphics.readback_queue_mutex), m_present(graphics.present_queue_mutex) {}
+	KYTY_CLASS_NO_COPY(DeviceQueuesGuard);
+
+private:
+	Common::LockGuard m_queue, m_readback, m_present;
 };
 
 struct VulkanImageState {

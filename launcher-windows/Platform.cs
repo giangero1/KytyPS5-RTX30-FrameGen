@@ -21,7 +21,7 @@ sealed class LauncherContext {
 	public readonly bool AmdGpu;          // an AMD Radeon graphics card (AMD Anti-Lag)
 	public readonly ulong RamBytes;
 	public readonly int DisplayHeight;    // the primary display's height in pixels (Game output: Automatic), or 0
-	public readonly bool FsrAvailable;    // AMD's signed amd_fidelityfx_vk.dll next to the emulator (FSR 3 frame generation)
+	public readonly bool FsrAvailable;    // AMD's signed FSR runtime next to the emulator (FSR frame generation)
 	public string Streamline { get; private set; } // NVIDIA's signed Streamline runtime folder, or null
 	public bool FrameGenAvailable { get { return Streamline != null && RtxGpu; } }
 
@@ -41,8 +41,12 @@ sealed class LauncherContext {
 		RamBytes = Native.TotalRam();
 		DisplayHeight = Native.DisplayHeight();
 		Streamline = ResolveStreamline();
-		var fsrDll = Path.Combine(Path.GetDirectoryName(EmulatorExe) ?? Root, "amd_fidelityfx_vk.dll");
-		FsrAvailable = Signature.SignedBy(fsrDll, "Advanced Micro Devices");
+		// AMD's runtime next to the emulator, signed by AMD: FSR SDK 2's loader with its frame generation DLL (FSR 4 frame
+		// generation on RX 9000 cards, FSR 3.1 on others), or FidelityFX SDK 1.1.4's amd_fidelityfx_vk.dll (FSR 3.1).
+		var folder = Path.GetDirectoryName(EmulatorExe) ?? Root;
+		Func<string, bool> amd = name => Signature.SignedBy(Path.Combine(folder, name), "Advanced Micro Devices");
+		FsrAvailable = (amd("amd_fidelityfx_loader_vk.dll") && amd("amd_fidelityfx_framegeneration_vk.dll")) ||
+		               amd("amd_fidelityfx_vk.dll");
 	}
 
 	// The launcher sits next to run-windows.ps1 in a package; in the source tree it is built to _Build\launcher.
@@ -269,17 +273,218 @@ static class Native {
 	[DllImport("user32.dll")]
 	static extern bool SetForegroundWindow(IntPtr window);
 
+	[DllImport("user32.dll")]
+	static extern bool IsWindowVisible(IntPtr window);
+
+	[DllImport("user32.dll")]
+	static extern bool BringWindowToTop(IntPtr window);
+
+	[DllImport("user32.dll")]
+	static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+
+	[DllImport("user32.dll")]
+	static extern bool AttachThreadInput(uint attach, uint to, bool on);
+
+	[DllImport("kernel32.dll")]
+	static extern uint GetCurrentThreadId();
+
+	[DllImport("user32.dll")]
+	static extern IntPtr GetWindow(IntPtr window, uint command);
+
+	[DllImport("user32.dll")]
+	static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+	delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+
+	[DllImport("user32.dll")]
+	static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+
+	[StructLayout(LayoutKind.Sequential)]
+	struct Rect {
+		public int Left, Top, Right, Bottom;
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	struct ProcessBasicInformation {
+		public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId;
+	}
+
+	[DllImport("ntdll.dll")]
+	static extern int NtQueryInformationProcess(IntPtr process, int informationClass, ref ProcessBasicInformation information,
+		int length, out int returned);
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct ProcessEntry {
+		public uint Size, Usage, ProcessId;
+		public IntPtr DefaultHeapId;
+		public uint ModuleId, Threads, ParentProcessId;
+		public int PriorityClassBase;
+		public uint Flags;
+		[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+		public string ExeFile;
+	}
+
+	[DllImport("kernel32.dll")]
+	static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint process);
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+	static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+	static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+
+	[DllImport("kernel32.dll")]
+	static extern bool CloseHandle(IntPtr handle);
+
 	// The window that has the focus now, as the emulator reads it from KYTY_RETURN_FOCUS (a number).
 	public static string ForegroundWindow() {
 		return GetForegroundWindow().ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
 	}
 
-	// The focus to a window ForegroundWindow named, if it is still there (Windows may refuse it to a process without it).
-	public static void Focus(string window) {
-		long handle;
-		if (long.TryParse(window, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out handle) &&
-		    handle != 0 && IsWindow(new IntPtr(handle)))
-			SetForegroundWindow(new IntPtr(handle));
+	// The process that started this one (Steam, when it starts the game), as the emulator reads it from
+	// KYTY_RETURN_FOCUS_PID: its largest window takes the focus back where the one in front at the start is gone.
+	public static string ParentProcess() {
+		var information = new ProcessBasicInformation();
+		int returned;
+		var parent = NtQueryInformationProcess(System.Diagnostics.Process.GetCurrentProcess().Handle, 0, ref information,
+			Marshal.SizeOf(information), out returned) == 0 ? information.InheritedFromUniqueProcessId.ToInt64() : 0;
+		return parent.ToString(System.Globalization.CultureInfo.InvariantCulture);
+	}
+
+	// The largest visible top-level window of a process or of one it started (Steam's windows, Big Picture's full screen
+	// one among them, belong to the steamwebhelper.exe it starts), or zero.
+	static IntPtr LargestWindowOf(uint process) {
+		var processes = new HashSet<uint> { process };
+		var snapshot = CreateToolhelp32Snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
+		if (snapshot != new IntPtr(-1)) {
+			var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
+			for (var more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry))
+				if (entry.ParentProcessId == process) processes.Add(entry.ProcessId);
+			CloseHandle(snapshot);
+		}
+		var best = IntPtr.Zero;
+		long area = 0;
+		EnumWindows((window, parameter) => {
+			uint owner;
+			Rect rect;
+			if (GetWindowThreadProcessId(window, out owner) != 0 && processes.Contains(owner) && IsWindowVisible(window) &&
+			    GetWindow(window, 4 /* GW_OWNER */) == IntPtr.Zero && GetWindowRect(window, out rect)) {
+				long size = (long)(rect.Right - rect.Left) * (rect.Bottom - rect.Top);
+				if (size > area) {
+					area = size;
+					best = window;
+				}
+			}
+			return true;
+		}, IntPtr.Zero);
+		return best;
+	}
+
+	// The focus to the window ForegroundWindow named, else to the largest of the process ParentProcess named. Windows
+	// refuses it to a process without the focus: then with the input of the foreground window's thread attached.
+	public static void Focus(string window, string parent) {
+		long handle, process;
+		var target = long.TryParse(window, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out handle)
+			? new IntPtr(handle) : IntPtr.Zero;
+		if (target == IntPtr.Zero || !IsWindow(target) || !IsWindowVisible(target))
+			target = long.TryParse(parent, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out process) && process > 0
+				? LargestWindowOf((uint)process) : IntPtr.Zero;
+		if (target == IntPtr.Zero || GetForegroundWindow() == target) return;
+		TakeForeground(target);
+	}
+
+	// `window` in front with the focus (Focus's way).
+	public static void TakeForeground(IntPtr window) {
+		if (SetForegroundWindow(window) && GetForegroundWindow() == window) return;
+		uint ignored;
+		var foreground = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+		var self = GetCurrentThreadId();
+		if (foreground == 0 || foreground == self || !AttachThreadInput(self, foreground, true)) return;
+		BringWindowToTop(window);
+		SetForegroundWindow(window);
+		AttachThreadInput(self, foreground, false);
+	}
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+	static extern int GetClassNameW(IntPtr window, System.Text.StringBuilder name, int length);
+
+	// The window in front, for the log: "window 0x..., '<class>' of <program>.exe", or "no window".
+	public static string ForegroundDescription() {
+		var window = GetForegroundWindow();
+		if (window == IntPtr.Zero) return "no window";
+		var name = new System.Text.StringBuilder(256);
+		GetClassNameW(window, name, name.Capacity);
+		uint process;
+		GetWindowThreadProcessId(window, out process);
+		string program = "?";
+		try {
+			using (var owner = System.Diagnostics.Process.GetProcessById((int)process)) program = owner.ProcessName + ".exe";
+		} catch (Exception) {
+		}
+		return string.Format(System.Globalization.CultureInfo.InvariantCulture, "window 0x{0:X}, '{1}' of {2}", window.ToInt64(), name, program);
+	}
+
+	// The program name of a process (ParentProcess's number), lower case without ".exe", or "".
+	public static string ProcessName(string id) {
+		int process;
+		if (!int.TryParse(id, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out process) || process <= 0)
+			return "";
+		try {
+			using (var owner = System.Diagnostics.Process.GetProcessById(process)) return owner.ProcessName.ToLowerInvariant();
+		} catch (Exception) {
+			return "";
+		}
+	}
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct StartupInfo {
+		public int cb;
+		public string lpReserved, lpDesktop, lpTitle;
+		public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+		public short wShowWindow, cbReserved2;
+		public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	struct ProcessInformation {
+		public IntPtr hProcess, hThread;
+		public int dwProcessId, dwThreadId;
+	}
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	static extern bool CreateProcessW(string application, System.Text.StringBuilder commandLine, IntPtr processAttributes,
+		IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startup,
+		out ProcessInformation information);
+
+	[DllImport("kernel32.dll")]
+	static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+	// `exe arguments` started outside the job this process is in: Steam counts a game as running while a process of its
+	// job lasts (issue #217). Broken away from the job where it allows that, else made by WMI's provider host
+	// (Win32_Process.Create), which is in no job. How it started (for the log), or null.
+	public static string StartOutsideJob(string exe, string arguments) {
+		const uint CreateBreakawayFromJob = 0x01000000;
+		var line = "\"" + exe + "\" " + arguments;
+		bool inJob;
+		if (!IsProcessInJob(System.Diagnostics.Process.GetCurrentProcess().Handle, IntPtr.Zero, out inJob)) inJob = true;
+		var startup = new StartupInfo { cb = Marshal.SizeOf(typeof(StartupInfo)) };
+		ProcessInformation information;
+		if (CreateProcessW(null, new System.Text.StringBuilder(line), IntPtr.Zero, IntPtr.Zero, false, inJob ? CreateBreakawayFromJob : 0,
+		                   IntPtr.Zero, null, ref startup, out information)) {
+			CloseHandle(information.hThread);
+			CloseHandle(information.hProcess);
+			return inJob ? "broken away from the game's job" : "started (the launcher was in no job)";
+		}
+		var refused = Marshal.GetLastWin32Error();
+		try {
+			using (var processes = new System.Management.ManagementClass("Win32_Process")) {
+				var result = processes.InvokeMethod("Create", new object[] { line, null, null, null });
+				if (Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture) == 0)
+					return "started by WMI (the job refused a break-away: error " + refused + ")";
+			}
+		} catch (Exception) {
+		}
+		return null;
 	}
 
 	[DllImport("kernel32.dll", SetLastError = true)]

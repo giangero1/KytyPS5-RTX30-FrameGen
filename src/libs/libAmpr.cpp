@@ -19,8 +19,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -1637,6 +1639,12 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 	Common::File file;
 	if (!file.Open(Common::PathFromUtf8(host_path), Common::File::Mode::Read)) {
 		LOGF("\tAPR read missing host file: %s\n", host_path.c_str());
+		// (In the run log too, the first few: a game whose file reads fail waits on its loading screen, issue #249.)
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::printf("APR: the game's file %s could not be opened\n", host_path.c_str());
+			std::fflush(stdout);
+		}
 		return LibKernel::KERNEL_ERROR_ENOENT;
 	}
 	opening = Clock::now() - start;

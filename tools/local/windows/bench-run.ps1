@@ -2,7 +2,7 @@ param([string]$Label = 'run', [int]$Rounds = 3, [string]$Exe = '', [string[]]$Ex
       [switch]$KeepRunning, [string]$PresentMode = '', [int]$Vblank = 0, [string[]]$Set = @(),
       [string]$Patch = '', [switch]$Fullscreen, [switch]$Hdr, [switch]$ShotOnly, [switch]$NoWalk,
       [int]$StartupSeconds = 100, [int]$StartupAttempts = 3, [switch]$NoPrecompile, [string]$Config = '',
-      [string]$Game = '', [switch]$LoadGame)
+      [string]$Game = '', [switch]$LoadGame, [switch]$KeepCinematics)
 # End to end: fresh baseline save, launch, skip to the game, walk the fixed path once the HUD
 # is really up, measure. Screen states are told apart by pixel statistics.
 $S = $PSScriptRoot
@@ -121,7 +121,8 @@ function State($source) {
 	} finally { if ($source -isnot [System.Drawing.Bitmap]) { $bmp.Dispose() } }
 }
 
-function Live { Get-Process kyty_emulator -ErrorAction SilentlyContinue | Where-Object { $_.Threads.Count -gt 1 } }
+# (Only this checkout's emulators: another checkout's session may be running one.)
+function Live { Get-Process kyty_emulator -ErrorAction SilentlyContinue | Where-Object { $_.Threads.Count -gt 1 -and $_.Path -like "$root*" } }
 for ($i = 0; $i -lt 60 -and (Live); $i++) {
 	Live | Stop-Process -Force -ErrorAction SilentlyContinue
 	Start-Sleep 1
@@ -210,7 +211,8 @@ while (((Get-Date) - $start).TotalSeconds -lt $StartupSeconds) {
 	if ($state -eq 'fog') { $fogSeen = $true }
 	$early = $answered -and $fogSeen -and $state -eq 'mono' -and $earlySkips -lt 3 -and
 	         ((Get-Date) - $lastSkip).TotalSeconds -ge 4
-	if ($state -eq 'cinematic' -or (($state -eq 'other' -or $state -eq 'mono') -and !$answered) -or $early) {
+	# -KeepCinematics: what follows the offline prompt plays (a save that starts in a cutscene).
+	if (!($KeepCinematics -and $answered) -and ($state -eq 'cinematic' -or (($state -eq 'other' -or $state -eq 'mono') -and !$answered) -or $early)) {
 		if ($early) { $earlySkips++ }
 		Press enter; Start-Sleep -Milliseconds 700; Press j 1500; Start-Sleep -Milliseconds 800
 		$lastSkip = Get-Date
@@ -227,7 +229,7 @@ if ($state -ne 'hud') { "no HUD in $StartupAttempts start-ups"; exit 1 }
 Start-Sleep 10
 if (!$NoWalk) { Key w 10000; Start-Sleep 10 }
 Shot 'scene.png' | Out-Null
-if ($ShotOnly) { powershell -NoProfile -File "$S\screen.ps1" -Out "$out\scene-$Label.png" -Scale 0.25 | Out-Null; "screenshot: $out\scene-$Label.png"; if (!$KeepRunning) { Stop-Process -Name kyty_emulator -Force -ErrorAction SilentlyContinue }; return }
+if ($ShotOnly) { powershell -NoProfile -File "$S\screen.ps1" -Out "$out\scene-$Label.png" -Scale 0.25 | Out-Null; "screenshot: $out\scene-$Label.png"; if (!$KeepRunning) { Live | Stop-Process -Force -ErrorAction SilentlyContinue }; return }
 $commands = (1..$Rounds | ForEach-Object { "measure 20 $Label-$_" }) -join ' ; '
 python tools\local\bench-windows.py live $commands | Select-String 'LIVE_MEASURE' | ForEach-Object { $_.Line }
-if (!$KeepRunning) { Stop-Process -Name kyty_emulator -Force -ErrorAction SilentlyContinue }
+if (!$KeepRunning) { Live | Stop-Process -Force -ErrorAction SilentlyContinue }

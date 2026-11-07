@@ -26,6 +26,7 @@ extern volatile std::atomic_uint32_t kyty_local_binding_scratch_mode;
 extern volatile std::atomic_uint32_t kyty_local_draw_run_ranges_mode;
 extern volatile std::atomic_uint32_t kyty_local_image_barrier_dedupe;
 extern volatile std::atomic_uint32_t kyty_local_pending_drain_mode;
+extern volatile std::atomic_uint32_t kyty_local_write_guard_mode;
 extern volatile std::atomic_uint32_t kyty_local_flush_defer;
 extern volatile std::atomic_uint32_t kyty_local_framegen_sleep;
 extern volatile std::atomic_uint32_t kyty_local_dispatch_batch;
@@ -34,6 +35,8 @@ extern volatile std::atomic<uint32_t> kyty_local_upload_prologue;
 extern volatile std::atomic_uint32_t kyty_local_async_lod_stats_mode;
 extern volatile std::atomic<uint32_t> kyty_local_buffer_reclaim_mode;
 extern volatile std::atomic<uint32_t> kyty_local_unmap_protect_skip_mode;
+extern volatile std::atomic<uint32_t> kyty_local_pm4_regfile;
+extern volatile std::atomic<uint32_t> kyty_local_upload_lanes;
 #if defined(KYTY_LOCAL_VULKAN_RECORDING)
 extern volatile std::atomic_uint32_t kyty_local_vulkan_recording_mode;
 extern volatile std::atomic_uint32_t kyty_local_deferred_submit_mode;
@@ -52,7 +55,9 @@ extern volatile std::atomic_uint32_t kyty_local_table_indirect_mode;
 extern volatile std::atomic_uint32_t kyty_local_table_store_budget;
 extern volatile std::atomic_uint32_t kyty_local_table_set_proofs;
 extern volatile std::atomic_uint32_t kyty_local_table_mru;
+extern volatile std::atomic<uint32_t> kyty_local_table_gather_memo; // KYTY_TABLE_GATHER_MEMO (local/table-xpr.inc TableGather)
 #endif
+extern volatile std::atomic_uint32_t kyty_local_scout_mode;
 }
 
 inline void InitializePerformanceSwitches() {
@@ -92,6 +97,12 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_SPIN_GATE", &kyty_local_spin_gate, 0, 2},
 	    Switch {"KYTY_BUFFER_RECLAIM", &kyty_local_buffer_reclaim_mode},
 	    Switch {"KYTY_UNMAP_PROTECT_SKIP", &kyty_local_unmap_protect_skip_mode},
+	    // The indirect register tables' plain stores without their calls (pm4Handlers.cpp Pm4Regfile; 2 = verify). Read
+	    // once a packet; the descriptors are proven once, at the first packet with it on, whatever the value.
+	    Switch {"KYTY_PM4_REGFILE", &kyty_local_pm4_regfile, 0, 2},
+	    // The upload worker's write protections over two lanes (async-upload.h; 1 one, 2 two, 3 two with the order checks).
+	    // Read once a batch; the second thread, made at the first split, sleeps whatever the value.
+	    Switch {"KYTY_UPLOAD_LANES", &kyty_local_upload_lanes, 1, 3},
 	    Switch {"KYTY_BDA_DIRTY_REGIONS", &kyty_local_bda_dirty_regions_mode},
 	    Switch {"KYTY_GLOBAL_BARRIER_DEDUPE", &kyty_local_global_barrier_dedupe},
 	    Switch {"KYTY_RANGE_SET_FAST", &kyty_local_range_set_fast_mode},
@@ -112,6 +123,10 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_IMAGE_BARRIER_DEDUPE", &kyty_local_image_barrier_dedupe},
 	    Switch {"KYTY_IMAGE_POOL", &kyty_local_image_pool_mode},
 	    Switch {"KYTY_PENDING_DRAIN", &kyty_local_pending_drain_mode},
+	    // 1: a guest write of the command processor lands at once, hidden from the game until the older upload jobs are
+	    // done (local/write-guard.h); 0, the default: it waits for them (per-page protection churn on the mapped views is
+	    // behind MEMORY_MANAGEMENT blue screens on small-memory Windows PCs, #5, #50).
+	    Switch {"KYTY_WRITE_GUARD", &kyty_local_write_guard_mode},
 	    // Submissions the GPU has still to run for a flush nothing waits on to be deferred (0: never).
 	    Switch {"KYTY_FLUSH_DEFER", &kyty_local_flush_defer, 0, 64},
 	    // DLSS-G frames' Reflex sleep (0: none).
@@ -139,8 +154,14 @@ inline void InitializePerformanceSwitches() {
 	    Switch {"KYTY_NATIVE_XPR_INSTANCES", &kyty_local_native_xpr_instance_mode},
 	    // Table draws (src/local/table-xpr.inc), with native XPR draws; 2 also continues clean runs.
 	    Switch {"KYTY_TABLE_XPR", &kyty_local_table_xpr_mode, 0, 2},
+	    // The scout thread (graphics/guest_gpu/scout.h; default 1, Steam Deck builds 0): 0 off, 1 tickets used, 2
+	    // verifier (tickets compared). It stands down while the spin gate is shut (KYTY_SPIN_GATE).
+	    Switch {"KYTY_SCOUT", &kyty_local_scout_mode, 0, 2},
 	    // Table dispatches (src/local/table-xpr.inc).
 	    Switch {"KYTY_TABLE_DISPATCH", &kyty_local_table_dispatch_mode},
+	    // The table path's gather: a V# unchanged at its index since the last draw keeps its resolved entry (no hash;
+	    // default on, 0 for an A/B).
+	    Switch {"KYTY_TABLE_GATHER_MEMO", &kyty_local_table_gather_memo},
 	    // Table dispatches of programs with an address probe's indirect image or reads by device address at offsets no
 	    // slot fixes (the light loops; default on, 0 for an A/B).
 	    Switch {"KYTY_TABLE_INDIRECT", &kyty_local_table_indirect_mode},
@@ -177,6 +198,8 @@ inline void InitializePerformanceSwitches() {
 		LocalPlatform::PinThreadToCpuList(cpus);
 		enabled += std::string(enabled.empty() ? "" : " ") + "KYTY_RENDER_CPUS=" + cpus;
 	}
+	if (const int core = LocalPlatform::KeepRenderCoreAlone(); core >= 0)
+		enabled += std::string(enabled.empty() ? "" : " ") + "KYTY_RENDER_CORE=" + std::to_string(core);
 	// Above the game's threads (KYTY_RENDER_PRIORITY=0: normal). Walking into a new area, the game's threads
 	// streaming it in held the render CPUs for whole time slices: frames of 35-50 ms where the render thread
 	// ran 10-14 ms, its samples parked for 20-26 ms at one instruction.

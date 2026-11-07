@@ -8,6 +8,7 @@
 #include "loader/guestCode.h"
 #include "loader/runtimeLinker.h"
 #include "local/local-platform.h"
+#include "local/slow-log.h"
 
 #include <algorithm>
 #include <array>
@@ -45,8 +46,8 @@ constexpr uint64_t PageSize = 0x4000, CaveOffset = 0x8000000 + 4 * PageSize;
 
 enum class Mode { Off, Count, Walk, GiveBack };
 
-// KYTY_ENGINE_FREE=giveback|walk|count|0 (default: giveback with 20 GiB of RAM or less on Windows, where the RAM the
-// engine's free blocks hold presses on the rest; off with more).
+// KYTY_ENGINE_FREE=giveback|walk|count|0 (default: giveback with 16 GiB or less for the emulator on Windows and Linux
+// (LocalPlatform::EmulatorMemory), where the RAM the engine's free blocks hold presses on the rest; off with more).
 Mode GetMode() {
 	static const Mode mode = [] {
 		if (const char* value = std::getenv("KYTY_ENGINE_FREE"); value != nullptr && *value != '\0') {
@@ -56,8 +57,8 @@ Mode GetMode() {
 			       : text == "giveback" || text == "1" ? Mode::GiveBack
 			                                           : Mode::Off;
 		}
-#if defined(_WIN32)
-		if (const auto ram = LocalPlatform::PhysicalMemory(); ram != 0 && ram <= (uint64_t {20} << 30u)) return Mode::GiveBack;
+#if defined(_WIN32) || defined(__linux__)
+		if (const auto ram = LocalPlatform::EmulatorMemory(); ram != 0 && ram <= (uint64_t {16} << 30u)) return Mode::GiveBack;
 #endif
 		return Mode::Off;
 	}();
@@ -315,6 +316,33 @@ uint64_t ProbeWorkingSetNs() {
 	(void)DiscardVirtualMemory(const_cast<uint8_t*>(page), 4096);
 	return static_cast<uint64_t>(NowNs() - start);
 }
+#elif defined(__linux__)
+// (The allocator's lock held, the block checked free) the bytes of [address, address + size) dropped: a hole punched in
+// the backing store over each piece (DiscardBacking: the pages leave every view, and the swap where they were swapped
+// out; zeros after). Not where the GPU caches' trackers watch a page: their userfaultfd protections (minor mode's dropped
+// PTEs, write protection) do not fault on a page punched under them, whose next access maps a new page. And no block is
+// made the host's first, as Windows does: that invalidated the caches over freed blocks, and the images and buffers that
+// also held live bytes were uploaded again on the render thread. A Steam Deck's world tour (worlds 2-5, Nexus, 1-1; 15 s
+// in each from 40 s after its load) had 1 and 9 frames over 50 ms in all without it, 17-25 with it (Valley 7-13), 7-8
+// with the giving back off; 3.1-5.5 GB given back, the emulator's swap 2.7-3.0 GB at the end instead of 5.2-5.35 and
+// 1.0-1.2 GB available instead of 0.3-0.55.
+bool DiscardLocked(uint64_t address, uint64_t size, uint64_t* given) {
+	thread_local std::vector<std::pair<const uint8_t*, uint64_t>> pieces;
+	pieces.clear();
+	if (Libs::LibKernel::Memory::GuestRangeWatched(address, size) ||
+	    !Libs::LibKernel::Memory::TryGetBackingPieces(address, size, pieces))
+		return false;
+	for (const auto& [pointer, length]: pieces)
+		if (Libs::LibKernel::Memory::DiscardBacking(reinterpret_cast<uint64_t>(pointer), length)) *given += length;
+	return false;
+}
+
+void TrimGuest(uint64_t /*address*/, uint64_t /*size*/) {}
+
+// (No working set lock: a punch waits only for faults on its own pages, and they for it.)
+uint64_t ProbeWorkingSetNs() {
+	return 0;
+}
 #endif
 
 void WalkerThread() {
@@ -338,7 +366,7 @@ void WalkerThread() {
 	constexpr uint64_t SlowProbeNs  = 2'000'000;
 	constexpr uint64_t PauseWalks = 15, MaxPauseWalks = 60;
 	[[maybe_unused]] uint64_t pause = PauseWalks, resume_walk = 0, slow_passes = 0;
-	uint64_t                  paused = 0, slowest_ns = 0, prepare_ns = 0; // (since the last report)
+	uint64_t                  paused = 0, slowest_ns = 0, prepare_ns = 0, prepare_max_ns = 0; // (since the last report)
 	// (address, size) of a free block -> the walk that first found it free, and whether its pages were given back.
 	struct Seen {
 		uint64_t first = 0;
@@ -392,9 +420,11 @@ void WalkerThread() {
 		std::sort(candidates.begin(), candidates.end(),
 		          [](const auto& a, const auto& b) { return a.first.size > b.first.size; });
 		uint64_t budget = PassBudget;
-#if defined(_WIN32)
-		uint64_t pass_hold_ns = 0, chunks = 0;
-		bool     slow = false, ended = false;
+#if defined(_WIN32) || defined(__linux__)
+		uint64_t      pass_hold_ns = 0, chunks = 0;
+		bool          slow = false, ended = false;
+		const int64_t pass_begin = NowNs();
+		const auto    given_before = given_total;
 		if (!candidates.empty() && walk >= resume_walk) {
 			const auto probe = ProbeWorkingSetNs();
 			slowest_ns       = std::max(slowest_ns, probe);
@@ -404,15 +434,21 @@ void WalkerThread() {
 			if (walk < resume_walk || slow || ended || budget == 0 || pass_hold_ns >= LockBudgetNs ||
 			    g_stop.load(std::memory_order_relaxed))
 				break;
+#if defined(_WIN32)
 			// Its pages the page manager watches (images' and buffers', read-only in the guest view) made the host's first, as
-			// before a host write: the caches over it invalidated (GPU-written bytes read back), the pages writable. The guest
-			// view's discard then takes them, ~0.07 ms a 256 KiB chunk: the backing view's took ~0.9 ms (and more while a world
-			// streams), and freed textures are most of what a trip leaves free (a 16 GB-policy trip gave back ~170 MiB in
-			// 30 s under the lock budget while 1.3-2.8 GiB stayed free). Without the allocator's lock: this waits for the
+			// before a host write of all of it that reads none (its bytes become zeros): the caches over it invalidated, the
+			// GPU-written bytes dropped (until 10-28 read back first, through the render thread), the pages writable. The
+			// guest view's discard then takes them, ~0.07 ms a 256 KiB chunk: the backing view's took ~0.9 ms (and more while
+			// a world streams), and freed textures are most of what a trip leaves free (a 16 GB-policy trip gave back ~170 MiB
+			// in 30 s under the lock budget while 1.3-2.8 GiB stayed free). Without the allocator's lock: this waits for the
 			// caches' locks. (A block the engine takes again meanwhile only has its caches invalidated, as a write would.)
+			// Linux skips watched pages instead (DiscardLocked).
 			const int64_t prepared = NowNs();
-			(void)Libs::LibKernel::Memory::TryPrepareHostWrite(run.address, run.size);
-			prepare_ns += static_cast<uint64_t>(NowNs() - prepared);
+			(void)Libs::LibKernel::Memory::TryPrepareHostOverwrite(run.address, run.size);
+			const auto prepare_took = static_cast<uint64_t>(NowNs() - prepared);
+			prepare_ns += prepare_took;
+			prepare_max_ns = std::max(prepare_max_ns, prepare_took);
+#endif
 			bool whole = true;
 			for (uint64_t at = 0; at < run.size; at += Chunk) {
 				if (budget == 0 || pass_hold_ns >= LockBudgetNs) {
@@ -465,6 +501,17 @@ void WalkerThread() {
 			}
 			if (whole) *given_flag = true;
 		}
+		// (KYTY_SLOW_LOG_MS: each pass that gave pages back, at its wall-clock time, to place it among the SLOW Frame lines.)
+		if (SlowLog::Threshold() > 0.0 && chunks != 0) {
+			std::printf("Engine frees pass: %.1f MiB given in %llu chunks, the allocator's lock held %.1f ms, %.1f ms in all "
+			            "unix_ms=%lld\n",
+			            static_cast<double>(given_total - given_before) / 1048576.0, static_cast<unsigned long long>(chunks),
+			            static_cast<double>(pass_hold_ns) / 1e6, static_cast<double>(NowNs() - pass_begin) / 1e6,
+			            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			                                       std::chrono::system_clock::now().time_since_epoch())
+			                                       .count()));
+			std::fflush(stdout);
+		}
 		slow = slow || (chunks != 0 && pass_hold_ns >= SlowAverageNs * chunks);
 		if (slow && ++slow_passes >= 2) {
 			resume_walk = walk + pause;
@@ -483,7 +530,8 @@ void WalkerThread() {
 				free_bytes += run.size;
 			std::printf("Engine frees: %llu free blocks, %.0f MiB, on the last walk (%llu+%llu pages, the allocator counts "
 			            "%llu+%llu: %s); %s %.0f MiB in 30 s (%.0f MiB since start), the allocator's lock held %.1f ms (at most "
-			            "%.2f ms), %.1f ms making blocks the host's; paused %llu time(s) while Windows' memory manager was slow "
+			            "%.2f ms), %.1f ms making blocks the host's (at most %.2f ms a block); paused %llu time(s) while the system's memory "
+			            "manager was slow "
 			            "(the slowest step %.2f ms)\n",
 			            static_cast<unsigned long long>(runs.size()), static_cast<double>(free_bytes) / 1048576.0,
 			            static_cast<unsigned long long>(totals.pages[0]), static_cast<unsigned long long>(totals.pages[1]),
@@ -492,9 +540,10 @@ void WalkerThread() {
 			            give_back ? "given back" : "walked only, would give back", static_cast<double>(given_report) / 1048576.0,
 			            static_cast<double>(given_total) / 1048576.0, static_cast<double>(hold_ns) / 1e6,
 			            static_cast<double>(hold_max_ns) / 1e6, static_cast<double>(prepare_ns) / 1e6,
-			            static_cast<unsigned long long>(paused), static_cast<double>(slowest_ns) / 1e6);
+			            static_cast<double>(prepare_max_ns) / 1e6, static_cast<unsigned long long>(paused),
+			            static_cast<double>(slowest_ns) / 1e6);
 			std::fflush(stdout);
-			given_report = hold_ns = hold_max_ns = paused = slowest_ns = prepare_ns = 0;
+			given_report = hold_ns = hold_max_ns = paused = slowest_ns = prepare_ns = prepare_max_ns = 0;
 			report_at                                                  = now + 30'000'000'000;
 		}
 	}

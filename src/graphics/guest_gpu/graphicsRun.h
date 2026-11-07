@@ -40,6 +40,12 @@ public:
 	[[nodiscard]] int GetFrameNum() const;
 
 	[[nodiscard]] static bool IsGpuThread() noexcept;
+	// KYTY_SERVE_IN_WAITS (live serve_in_waits, default 1): on, the GPU thread runs the guest commands queued for it (a
+	// game thread's readback fault among them) while it waits for the upload worker too, not only before each packet.
+	[[nodiscard]] static bool ServeInWaits() noexcept;
+	// GPU thread: runs the guest commands queued for it, if any (ProcessCommands); not from inside one of them.
+	static void               ServePendingCommands();
+	[[nodiscard]] static bool CommandsPending() noexcept;
 
 	// Offline tools (xpr_replay_tests) run the renderer on their own thread.
 	static void SetOfflineGpuThread(bool gpu_thread) noexcept;
@@ -67,6 +73,7 @@ private:
 		bool                      blocked           = false;
 		uint64_t                  flip_request_id   = 0;
 		uint64_t                  frame_epoch       = 0;
+		uint64_t                  scout_sequence    = 0; // queue 0's graphics submissions, numbered (scout.h)
 	};
 
 	void              Enqueue(Submission submission);
@@ -96,6 +103,9 @@ private:
 	bool                                           m_accepting         = true;
 	bool                                           m_stopping          = false;
 	bool                                           m_shutdown_complete = false;
+	// Under m_queue_mutex: the last graphics submission's number, and a reset a flip preparation carried (the next one's).
+	uint64_t                                       m_scout_sequence    = 0;
+	bool                                           m_scout_reset       = false;
 
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;

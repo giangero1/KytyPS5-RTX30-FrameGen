@@ -19,10 +19,12 @@
 #include "libs/libs.h"
 #include "native-resource-state.h"
 #include "texture-offload.h"
+#include "write-guard.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -84,7 +86,10 @@ extern "C" {
 // desktop in 5.5) and ran 22 min with them (10-23). (The texture offload's backing view takes guards too:
 // texture-offload.h Protect.) A live change applies to the protections made after it (guards made before are still
 // served).
-// On by default with 20 GiB of RAM or less only (KYTY_READ_GUARD=1|0 sets it): a guard is gone from its page the moment
+// On by default with 20 GiB of RAM or less only (the PC's, not LocalPlatform::EmulatorMemory as the other savings: with
+// that, v20261029 gave guards to a 24 GB PC whose other programs held the rest, its RAM then ran full, the hot reads
+// below stood aside, and textures were there one frame and gone the next, issue #242; KYTY_READ_GUARD=1|0 sets it): a
+// guard is gone from its page the moment
 // it raises the fault, and other threads read the page meanwhile without one. The game reads GPU-written pages from
 // several threads at once: with guards, whole areas lost their light, screen tiles turned black or the picture showed at
 // twice its size (issues #157, #158, #159; reproduced at the Tower of Latria with a 1080p render and DLSS: black and
@@ -93,6 +98,8 @@ extern "C" {
 // With guards, the pages the game reads back keep no access, their memory locked in RAM (kyty_local_hot_reads below):
 // the same tour with guards read a page before its guard was back ~0.9 times a frame, with them 0.001, every frame right.
 [[gnu::used]] volatile std::atomic_uint32_t kyty_local_read_guard {[] {
+	// (The emulator's RAM measured here, before main: what other programs hold, not yet what the emulator took.)
+	(void)LocalPlatform::EmulatorMemory();
 	if (const char* value = std::getenv("KYTY_READ_GUARD"); value != nullptr && *value != '\0') return value[0] == '0' ? 0u : 1u;
 	const auto ram = LocalPlatform::PhysicalMemory();
 	return ram != 0 && ram <= (uint64_t {20} << 30u) ? 1u : 0u;
@@ -890,8 +897,69 @@ private:
 	static constexpr uint64_t CommittedPageBits = 12, CommittedChunkBits = 30, CommittedChunks = 1024;
 	static constexpr uint64_t CommittedChunkWords = uint64_t {1} << (CommittedChunkBits - CommittedPageBits - 6);
 	std::array<std::atomic<std::atomic<uint64_t>*>, CommittedChunks> m_committed {};
+	// Raised after the bits change: the whole bitmap's generation and each chunk's (CommittedGranules).
+	std::atomic<uint64_t>                                m_commit_generation {1};
+	std::array<std::atomic<uint64_t>, CommittedChunks> m_chunk_generations {};
+	// CommittedGranules' copy: each chunk's granule bits as of its generation then, the bitmap generation they were
+	// read at, and the version of the granules (raised when a chunk's bits change).
+	struct ChunkGranules {
+		uint64_t                                         generation = 0;
+		std::array<uint64_t, CommittedChunkWords / 512> mask {};
+	};
+	std::mutex                                   m_granule_mutex;
+	std::array<ChunkGranules, CommittedChunks> m_granule_chunks {};
+	std::atomic<uint64_t>                        m_granules_read_at {0}, m_granule_version {1};
 
+public:
+	// Memory::CommittedGranules (`*version`: the granules' version the caller has). Bits read without m_mutex: a change
+	// racing this call raises the generation after its bits, so the next call reads them again.
+	bool CommittedGranules(uint64_t* version, std::vector<uint32_t>* out) {
+		static_assert(CommittedGranuleBits - CommittedPageBits == 9, "a granule is 8 bitmap words");
+		if (m_commit_generation.load(std::memory_order_acquire) == m_granules_read_at.load(std::memory_order_acquire) &&
+		    m_granule_version.load(std::memory_order_acquire) == *version)
+			return false;
+		std::lock_guard lock(m_granule_mutex);
+		const auto now = m_commit_generation.load(std::memory_order_acquire);
+		if (now != m_granules_read_at.load(std::memory_order_relaxed)) {
+			bool changed = false;
+			for (size_t index = 0; index < CommittedChunks; ++index) {
+				auto&      cached           = m_granule_chunks[index];
+				const auto chunk_generation = m_chunk_generations[index].load(std::memory_order_acquire);
+				if (chunk_generation == cached.generation) continue;
+				cached.generation = chunk_generation;
+				decltype(cached.mask) mask {};
+				if (const auto* words = m_committed[index].load(std::memory_order_acquire); words != nullptr) {
+					for (uint64_t word = 0; word < CommittedChunkWords; ++word)
+						if (words[word].load(std::memory_order_relaxed) != 0) mask[word / 512] |= uint64_t {1} << (word / 8 % 64);
+				}
+				if (mask != cached.mask) {
+					cached.mask = mask;
+					changed     = true;
+				}
+			}
+			if (changed) m_granule_version.fetch_add(1, std::memory_order_release);
+			m_granules_read_at.store(now, std::memory_order_release);
+		}
+		if (m_granule_version.load(std::memory_order_relaxed) == *version) return false;
+		*version = m_granule_version.load(std::memory_order_relaxed);
+		out->clear();
+		for (size_t index = 0; index < CommittedChunks; ++index) {
+			for (size_t part = 0; part < m_granule_chunks[index].mask.size(); ++part) {
+				for (auto bits = m_granule_chunks[index].mask[part]; bits != 0; bits &= bits - 1) {
+					out->push_back(static_cast<uint32_t>((index << (CommittedChunkBits - CommittedGranuleBits)) + part * 64 +
+					                                     static_cast<uint64_t>(std::countr_zero(bits))));
+				}
+			}
+		}
+		return true;
+	}
+
+private:
 	void MarkCommittedUnlocked(uint64_t start, uint64_t size, bool on) {
+		struct Raise {
+			VirtualRanges& owner;
+			~Raise() { owner.m_commit_generation.fetch_add(1, std::memory_order_release); }
+		} raise {*this};
 		const auto end = End(start, size);
 		// Set: the pages the range covers whole; cleared: every page it touches.
 		auto first = on ? (start + (uint64_t {1} << CommittedPageBits) - 1) >> CommittedPageBits : start >> CommittedPageBits;
@@ -921,6 +989,7 @@ private:
 					chunk[local >> 6].fetch_and(~mask, std::memory_order_release);
 				page += count;
 			}
+			m_chunk_generations[chunk_index].fetch_add(1, std::memory_order_release);
 		}
 	}
 
@@ -1366,6 +1435,10 @@ bool IsFullyMapped(uint64_t vaddr, uint64_t size) {
 	return g_virtual_ranges == nullptr || g_virtual_ranges->ClampRangeSize(vaddr, size) == size;
 }
 
+bool CommittedGranules(uint64_t* version, std::vector<uint32_t>* out) {
+	return g_virtual_ranges != nullptr && g_virtual_ranges->CommittedGranules(version, out);
+}
+
 void MappedParts(uint64_t vaddr, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>* parts) {
 	parts->clear();
 	if (g_virtual_ranges == nullptr) {
@@ -1504,6 +1577,12 @@ bool TryPrepareHostWrite(uint64_t vaddr, uint64_t size) {
 
 bool TryPrepareHostImageWrite(uint64_t vaddr, uint64_t size) {
 	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) && g_gpu_resources->InvalidateImages(vaddr, size);
+}
+
+bool GuestRangeWatched(uint64_t vaddr, uint64_t size) {
+	uint64_t first = 0, end = 0;
+	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	       g_gpu_resources->WatchedSpan(vaddr, size, &first, &end);
 }
 
 bool TryPrepareHostOverwrite(uint64_t vaddr, uint64_t size) {

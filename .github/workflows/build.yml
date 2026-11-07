@@ -75,18 +75,20 @@ jobs:
           Copy-Item _Build\streamline-src\include _Build\deps\streamline\sdk -Recurse
           Get-ChildItem _Build\deps\streamline\sdk\include -Name
 
-      # FSR 3.1 frame generation (src/local/frame-gen.cpp, KYTY_FRAMEGEN_BACKEND=fsr): AMD FidelityFX SDK 1.1.4's API
-      # headers (MIT, LICENSES/FidelityFX-SDK-MIT.txt) at build time; its runtime (amd_fidelityfx_vk.dll, signed by AMD)
-      # is the user's own, next to the emulator. Without them the build has no FSR.
-      - name: FidelityFX headers
+      # AMD's FSR runtime (src/local/frame-gen.cpp: KYTY_FRAMEGEN_BACKEND=fsr, and FSR 4 upscaling for KYTY_UPSCALER=fsr):
+      # AMD FSR SDK 2.4's API headers (MIT, LICENSES/FidelityFX-SDK-MIT.txt) at build time, in their layout; its runtime
+      # (the DLLs signed by AMD) is the user's own, next to the emulator. Without them the build has no AMD runtime path.
+      - name: FSR SDK headers
         shell: pwsh
         continue-on-error: true
         run: |
-          git clone --quiet --depth 1 --branch v1.1.4 --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git _Build\fidelityfx-src
-          git -C _Build\fidelityfx-src sparse-checkout set ffx-api/include
-          New-Item -ItemType Directory -Force _Build\deps\fidelityfx | Out-Null
-          Copy-Item _Build\fidelityfx-src\ffx-api\include _Build\deps\fidelityfx -Recurse
-          Get-ChildItem _Build\deps\fidelityfx\include\ffx_api -Name
+          git clone --quiet --depth 1 --branch v2.4.0 --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git _Build\fsr-sdk-src
+          git -C _Build\fsr-sdk-src sparse-checkout set Kits/FidelityFX/api/include Kits/FidelityFX/framegeneration/include Kits/FidelityFX/upscalers/include
+          foreach ($folder in 'api', 'framegeneration', 'upscalers') {
+            New-Item -ItemType Directory -Force "_Build\deps\fsr-sdk\Kits\FidelityFX\$folder" | Out-Null
+            Copy-Item "_Build\fsr-sdk-src\Kits\FidelityFX\$folder\include" "_Build\deps\fsr-sdk\Kits\FidelityFX\$folder" -Recurse
+          }
+          Get-ChildItem _Build\deps\fsr-sdk -Recurse -Name -Filter *.h
 
       # For other PCs: x86-64-v3 (AVX2), not the runner CPU's -march=native.
       - name: Build
@@ -196,9 +198,10 @@ jobs:
           title="$PACKAGE"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             title="KytyPS5-$tag"
-            notes="$(printf '%s\n\n%s' \
+            notes="$(printf '%s\n\n%s\n\n%s' \
               "Windows x64 build of ${GITHUB_SHA::8} for Demon's Souls (PPSA01341, versions 01.007.000 and 01.005.000): KytyPS5-$tag.zip. Unzip it and double-click KytyLauncher.exe (or run.cmd); the README.md inside explains the rest." \
-              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest.")"
+              "Linux x64 build: KytyPS5-linux-$tag.zip. Unzip it and run ./kyty_launcher (the settings window), or ./run_ds.sh with KYTY_GAME set to the game; the README.md inside explains the rest." \
+              "Steam Deck build: KytyPS5-steamdeck-$tag.zip. Unzip it into ~/KytyPS5 and add run-deck.sh to Steam as a non-Steam game; STEAM-DECK.md inside explains the rest.")"
           fi
           # The notes of this build (what changed, the per-PC shader caches, frame rates), when the commit has them.
           if [ -s notes/docs/RELEASE-NOTES.md ]; then notes="$(printf '%s\n\n%s' "$notes" "$(cat notes/docs/RELEASE-NOTES.md)")"; fi

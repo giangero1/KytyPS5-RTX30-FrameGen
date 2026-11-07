@@ -46,7 +46,7 @@ def main():
             totals[kind][0] += calls
             totals[kind][1] += ms
         for kind, (calls, ms) in sorted(totals.items(), key=lambda item: -item[1][1]):
-            print(f'  {KINDS.get(kind, kind):18s} {calls:9.1f} calls/frame {ms:8.3f} ms/frame')
+            print(f'  {str(KINDS.get(kind, kind)):18s} {calls:9.1f} calls/frame {ms:8.3f} ms/frame')
         return
     addresses, names = symbols(args.exe)
     rows = collections.Counter()

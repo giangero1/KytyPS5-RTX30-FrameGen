@@ -54,7 +54,8 @@ void Install(Program* program) {
 	// generation on left an RTX 2060 the game's TAA from 540 lines -, else the game's own TAA rather than a stretch.)
 	if (!fsr && !Libs::Graphics::FrameGen::UpscalerReady()) {
 		const char* reason = Libs::Graphics::FrameGen::UsesFsr()
-		                         ? "AMD FSR 3 frame generation runs without NVIDIA's Streamline, which DLSS needs"
+		                         ? "beside AMD FSR 3 frame generation it comes through NVIDIA's Streamline, which did not "
+		                           "start it (or KYTY_FSR_FG_DLSS=0)"
 		                         : "it needs an NVIDIA RTX GPU and NVIDIA's DLSS runtime: Streamline on Windows, "
 		                           "libkyty_dlss.so on Linux";
 		if (!Libs::Graphics::FsrNative::UpscaleInsteadOfDlss()) {

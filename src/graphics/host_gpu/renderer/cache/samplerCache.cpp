@@ -5,9 +5,19 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 namespace Libs::Graphics {
+
+namespace {
+std::atomic<float> g_upscale_lod_bias {0.0f};
+} // namespace
+
+void SetUpscaleLodBias(float bias) {
+	g_upscale_lod_bias.store(bias, std::memory_order_relaxed);
+}
 
 SamplerCache::~SamplerCache() {
 	for (const auto& [key, sampler]: m_samplers) {
@@ -16,8 +26,19 @@ SamplerCache::~SamplerCache() {
 	}
 }
 
-vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
-	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3]};
+bool UpscaleBiasApplies(bool pixel, uint32_t color_targets) {
+	static const uint32_t least = [] {
+		const char* value = std::getenv("KYTY_UPSCALE_LOD_BIAS_TARGETS");
+		return value != nullptr && *value != 0 ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 3u;
+	}();
+	return pixel && (color_targets == 0 || color_targets >= least);
+}
+
+vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r, bool material) {
+	// (A material's sampler is one of its own only while the upscaler's bias is on: else it would be the same one.)
+	const auto biased = static_cast<uint32_t>(material) *
+	                    static_cast<uint32_t>(g_upscale_lod_bias.load(std::memory_order_relaxed) != 0.0f);
+	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3], biased};
 	// Samplers live as long as the cache: a thread's recent lookups need neither the lock nor
 	// the map.
 	struct Recent {
@@ -144,6 +165,19 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 	sampler_info.addressModeW = to_vk_address_mode(r.ClampZ());
 	sampler_info.mipLodBias =
 	    static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f;
+	// The upscaler's texture LOD bias (SetUpscaleLodBias; issue #224): textures read at the output's resolution, not the
+	// 3D's. Only the materials' samplers (`material`, UpscaleBiasApplies), anisotropic and mipmapped: the frame's other
+	// passes read their images and lighting at levels they pick themselves, which a sampler's bias moves too.
+	if (const float bias = g_upscale_lod_bias.load(std::memory_order_relaxed) * static_cast<float>(biased);
+	    bias != 0.0f && aniso && static_cast<Prospero::SamplerMipFilter>(mip_filter) != Prospero::SamplerMipFilter::kNone &&
+	    !r.ForceUnormCoords()) {
+		sampler_info.mipLodBias += bias;
+		if (static bool noted = false; !noted) {
+			noted = true;
+			std::printf("Samplers: the materials' (anisotropic) read with the upscaler's texture LOD bias %.2f\n", bias);
+			std::fflush(stdout);
+		}
+	}
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
 	sampler_info.compareEnable           = (r.DepthCompareFunc() != 0 ? VK_TRUE : VK_FALSE);

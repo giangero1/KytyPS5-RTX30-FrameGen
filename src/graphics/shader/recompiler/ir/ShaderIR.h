@@ -705,6 +705,8 @@ struct Program: ResourcePlan {
 	bool                          lane_cooperative = false;
 	std::vector<uint32_t>         cooperative_reads;
 	std::vector<uint32_t>         cooperative_branches;
+	// A lane-local program's LDS accesses: the PCs a workgroup barrier goes before (Frontend::LdsBarriers).
+	std::vector<uint32_t>         lds_barriers;
 	uint32_t                      scratch_dwords = 0;
 	bool                          dispatcher_fallback = false;
 	CFG::FailureKind              cfg_failure_kind    = CFG::FailureKind::None;
@@ -727,6 +729,12 @@ struct Program: ResourcePlan {
 	bool                          table_slots_at_use = false;
 	// Float min/max as host instructions (Frontend::TranslatorFeatureNativeFloatMinMax).
 	bool                          native_float_min_max = false;
+	// Address loads from one base share a page walk (Frontend::TranslatorFeatureBdaGroupWalks).
+	bool                          bda_group_walks = false;
+	// Pixel shaders' DPP quad_perm moves read by quad operations (Frontend::TranslatorFeaturePixelQuadReads).
+	bool                          pixel_quad_reads = false;
+	// V_MAD/V_MAC/V_MADMK/V_MADAK_F32 (FPMad32) unfused (Frontend::TranslatorFeatureUnfusedMad).
+	bool                          unfused_mad = false;
 
 	std::optional<SpirvRequirements> spirv_requirements;
 };

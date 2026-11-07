@@ -39,6 +39,9 @@ inline constexpr uint32_t         OutputWidth = 3840, OutputHeight = 2160, Rende
 // Its mode 5 case (the PS5 Pro's, with super resolution: loader/demonsSoulsSuperResolution.h): the same pairs, then
 // the super resolution flag set, then the jump (01.007.000).
 inline constexpr std::string_view TrinityCase = "c5 fb 10 0d ?? ?? ?? ?? c5 fb 10 05 ?? ?? ?? ?? c6 45 ?? 01 eb";
+// 01.005.000's (issue #226): the pairs loaded with vmovddup, the flag set, and no jump - the last case, it runs into the
+// code after the cases (the setter's 0x8eea9b, the constructor's 0x8ef605).
+inline constexpr std::string_view TrinityCaseDuplicated = "c5 fb 12 0d ?? ?? ?? ?? c5 fb 12 05 ?? ?? ?? ?? c6 45 ?? 01";
 inline constexpr uint32_t         TrinityWidth = 2688, TrinityHeight = 1512;
 // The least render height the game's super resolution runs at (SuperResolution::IsEnabled).
 inline constexpr uint32_t SuperResolutionLeastHeight = 1080;
@@ -56,15 +59,18 @@ inline constexpr uint32_t SuperResolutionLeastHeight = 1080;
 //   (after mov r14, [rip + x]: 0x90090b217) and the size query (after mov [rsi + 4], edi:
 //   0x90090ac3f);
 // - the per-mode output widths after the render size tables (ModeWidths).
-inline constexpr std::string_view CinematicCase = "c5 fb 10 05 ?? ?? ?? ?? eb ?? c5 fb 10 0d";
-inline constexpr uint32_t         CinematicSource[8] {0x80ffffffu, 2560, 1440, 3840,
-                                                      2160,        3840, 2160, 1024};
-inline constexpr std::string_view UpscalerContext = "be 00 0f 00 00 ba 70 08 00 00 e8";
-inline constexpr std::string_view SetterFixedPair =
-    "c5 f8 28 c8 48 b9 00 0f 00 00 70 08 00 00 48 ba";
-inline constexpr std::string_view ConstructorFixedPair =
-    "4c 8b 35 ?? ?? ?? ?? 48 b9 00 0f 00 00 70 08 00 00";
-inline constexpr std::string_view QueryFixedPair = "89 7e 04 48 ba 00 0f 00 00 70 08 00 00 48 bf";
+inline constexpr std::string_view CinematicCase        = "c5 fb 10 05 ?? ?? ?? ?? eb ?? c5 fb 10 0d";
+// 01.005.000's: vmovddup xmm0, [rip + output]; vmovaps xmm1, xmm0; jmp (0x8eea8d, 0x8ef5f7; mode 2's look alike but load
+// the 1080p pair). Its mode 3 cases (ModeCaseDuplicated: 0x8eea7b, 0x8ef5e5) load their output from that same pair too.
+inline constexpr std::string_view CinematicCaseDuplicated = "c5 fb 12 05 ?? ?? ?? ?? c5 f8 28 c8 eb";
+inline constexpr uint32_t         CinematicSource[8]   {0x80ffffffu, 2560, 1440, 3840, 2160, 3840, 2160, 1024};
+inline constexpr std::string_view UpscalerContext      = "be 00 0f 00 00 ba 70 08 00 00 e8";
+inline constexpr std::string_view SetterFixedPair      = "c5 f8 28 c8 48 b9 00 0f 00 00 70 08 00 00 48 ba";
+// 01.005.000's setter: after mode 5's flag, mov byte [rbp - x], 1 (its last case runs into it; 0x8eeaab): the mov and its
+// immediate at the same offsets. (Its cases leave the output in xmm1 too.)
+inline constexpr std::string_view SetterFixedPairAfterFlag = "c6 45 ?? 01 48 b9 00 0f 00 00 70 08 00 00 48 ba";
+inline constexpr std::string_view ConstructorFixedPair = "4c 8b 35 ?? ?? ?? ?? 48 b9 00 0f 00 00 70 08 00 00";
+inline constexpr std::string_view QueryFixedPair       = "89 7e 04 48 ba 00 0f 00 00 70 08 00 00 48 bf";
 inline constexpr uint32_t         OutputWidths[5] {1920, 1920, 3840, 3840, 3840};
 inline constexpr uint32_t         OutputHeights[5] {1080, 1080, 2160, 2160, 2160};
 // The UI canvas and display mode float resolution tables in 01.007.000:

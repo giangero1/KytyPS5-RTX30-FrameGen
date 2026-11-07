@@ -21,19 +21,25 @@ sealed class Settings {
 		new object[] {"render_dlss", 1080}, new object[] {"fsr", false}, new object[] {"output", "auto"},
 		new object[] {"lowlatency", false}, new object[] {"ui_language", ""},
 		// (Game page: the DualSense's own speaker.)
-		new object[] {"pad_speaker", true}, new object[] {"pad_speaker_volume", 100},
+		new object[] {"keyboard_prompts", false}, new object[] {"pad_speaker", true}, new object[] {"pad_speaker_volume", 100},
 		new object[] {"pad_vibration", 200}, new object[] {"pad_vibration_ms", 60},
 		new object[] {"pad_actuator", 400},
 		// (Experimental page.)
-		new object[] {"present_direct", false}, new object[] {"antilag", false}, new object[] {"keep_resident", false},
+		new object[] {"present_direct", false}, new object[] {"vrr_flips", false}, new object[] {"antilag", false},
+		new object[] {"keep_resident", false},
 		new object[] {"fps30", false},
 		// (Advanced page.)
 		new object[] {"extra_args", ""}, new object[] {"gpu", ""}, new object[] {"reopen_launcher", false},
 		// (Graphics page: the DLSS model, a preset letter or the DLSS version's own choice; the file has seen the game output's
 		// Automatic.)
 		new object[] {"dlss_preset", ""}, new object[] {"output_auto", true},
+		// (Graphics page: the upscaler's sharpening, KYTY_DLSS_SHARPNESS's value ("" none) and KYTY_FSR_SHARPNESS's ("" its
+		// 0.6).)
+		new object[] {"dlss_sharpness", ""}, new object[] {"fsr_sharpness", ""},
 		// (Game page: the audio output the game is told, "" a TV.)
 		new object[] {"audio_output", ""},
+		// (Display page: with 21:9 or 32:9 the movies, the title and the loading screens at 16:9 between black bars.)
+		new object[] {"wide_bars", false},
 	};
 
 	readonly string path;
@@ -112,7 +118,10 @@ sealed class Settings {
 
 	// With a byte order mark: Windows PowerShell 5.1 (run-windows.ps1) reads a file without one as the ANSI code page,
 	// and a game folder or Streamline path with other letters than English ones would come out wrong.
-	public void Save() {
+	public void Save() { Save(false); }
+
+	// The controls editor reports persistence failures instead of silently losing a layout.
+	public void Save(bool reportErrors) {
 		if (ReadOnly) return;
 		var text = new StringBuilder();
 		text.Append("{\r\n");
@@ -122,8 +131,16 @@ sealed class Settings {
 		}
 		text.Append("}\r\n");
 		try {
-			File.WriteAllText(path, text.ToString(), new UTF8Encoding(true));
+			if (!reportErrors) File.WriteAllText(path, text.ToString(), new UTF8Encoding(true));
+			else {
+				var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+				try {
+					File.WriteAllText(temporary, text.ToString(), new UTF8Encoding(true));
+					if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
+				} finally { if (File.Exists(temporary)) File.Delete(temporary); }
+			}
 		} catch (Exception) {
+			if (reportErrors) throw;
 			// A read-only folder: the choices last until the window closes.
 		}
 	}

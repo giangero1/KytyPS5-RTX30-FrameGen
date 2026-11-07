@@ -17,6 +17,7 @@
 //   glide <x> <y> <z> <speed>     Demon's Souls 01.007.000: the player walks there (warp requests, no input)
 //   pad <lx> <ly> <rx> <ry> <buttons> <seconds>   scripted pad input (sticks 0..255, -1 the host's; buttons hex)
 //   screenshot <path>             the next frame shown, read back from the GPU, as a PPM file (screenshot.h)
+//   screenshots <path> <count>    the next <count> frames shown, 320 pixels wide, in one file (the flicker check)
 //   set <name> <value>            a live switch (live-switch.h), e.g. fsr_jitter_mode 1
 //   sleep <seconds>
 // Without KYTY_LIVE_FILE nothing runs; the flip hook is one relaxed increment.
@@ -35,6 +36,8 @@
 #include "live-switch.h"
 #include "slow-log.h"
 #include "time-census.h"
+
+#include "SDL.h"
 
 #include <algorithm>
 #include <array>
@@ -663,12 +666,33 @@ inline void Run(uint64_t id, const std::string& line) {
 		// screenshot <path>: the next frame shown, as a PPM file (screenshot.h; "SCREENSHOT <path>" once written).
 		Libs::Graphics::Screenshot::Request(arg1);
 		std::printf("LIVE_SCREENSHOT id=%" PRIu64 " path=%s\n", id, arg1);
+	} else if (cmd == "screenshots" && n >= 3) {
+		// screenshots <path> <count>: the next frames shown, small, in one file (screenshot.h, the flicker check).
+		Libs::Graphics::Screenshot::RequestSeries(arg1, static_cast<uint32_t>(std::strtoul(arg2, nullptr, 10)));
+		std::printf("LIVE_SCREENSHOTS id=%" PRIu64 " path=%s count=%s\n", id, arg1, arg2);
 	} else if (cmd == "set" && n >= 3) {
 		// set <name> <value>: a live switch (live-switch.h).
 		const bool ok = LiveSwitch::Set(arg1, std::strtoll(arg2, nullptr, 10));
 		std::printf("LIVE_SET id=%" PRIu64 " %s=%s ok=%d\n", id, arg1, arg2, ok ? 1 : 0);
 	} else if (cmd == "sleep" && n >= 2) {
 		std::this_thread::sleep_for(std::chrono::duration<double>(std::strtod(arg1, nullptr)));
+	} else if (cmd == "key" && n >= 2) {
+		// key <SDL key name> [seconds]: a key typed into the game window, as SDL events pushed on its queue (no window
+		// focus needed), e.g. `key F11`.
+		const SDL_Keycode code = SDL_GetKeyFromName(arg1);
+		if (code != SDLK_UNKNOWN) {
+			SDL_Event event {};
+			event.type                = SDL_KEYDOWN;
+			event.key.state           = SDL_PRESSED;
+			event.key.keysym.sym      = code;
+			event.key.keysym.scancode = SDL_GetScancodeFromKey(code);
+			SDL_PushEvent(&event);
+			std::this_thread::sleep_for(std::chrono::duration<double>(n >= 3 ? std::strtod(arg2, nullptr) : 0.1));
+			event.type      = SDL_KEYUP;
+			event.key.state = SDL_RELEASED;
+			SDL_PushEvent(&event);
+		}
+		std::printf("LIVE_KEY id=%" PRIu64 " key=%s ok=%d\n", id, arg1, code != SDLK_UNKNOWN ? 1 : 0);
 	} else if (cmd == "capture" && n >= 2) {
 		// capture <dir> [frames] [hash,hash,...]: every draw/dispatch of the next frames, with
 		// the constants of the listed shaders (frame-capture.h).

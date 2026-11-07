@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -174,6 +175,10 @@ public:
 	// newer precompile program lists more and makes the seeds again: what is new is compiled then).
 	static bool StaticInputsCurrent(GraphicContext& graphics, const std::filesystem::path& seeds);
 	static bool StaticCacheCurrent(GraphicContext& graphics, const std::filesystem::path& seeds);
+	// The static store was made without a translation feature this precompile translates with that changes nearly every
+	// shader (ShaderRecompiler::Frontend::TranslatorFeaturesBroad): the next precompile compiles it all again, not only
+	// what is new (issue #246: "only what is new" took an hour).
+	static bool StaticCacheRedoesAll();
 	// The caches the shards of a precompile saved next to the static cache, merged into it. With
 	// pipeline binaries and `prune`, the store becomes the shards' pipelines only (a whole run's: what
 	// older runs left that no seed makes any more is dropped).
@@ -304,6 +309,14 @@ public:
 	// Stops a warmup still running beside the game, and waits for it (the window's close; not under m_mutex).
 	void StopWarmup();
 	[[nodiscard]] PrefetchProgress GetPrefetchProgress() const;
+	// Pipelines compiled where first needed, not made of the static store's binaries: how many and how long, since the
+	// start (the panel's note while it happens, issue #129). Any thread.
+	struct PlayCompiles {
+		uint64_t count = 0, us = 0;
+	};
+	[[nodiscard]] PlayCompiles GetPlayCompiles() const {
+		return {m_play_compiles.load(std::memory_order_relaxed), m_play_compile_us.load(std::memory_order_relaxed)};
+	}
 
 private:
 	struct ProgramCache;
@@ -469,6 +482,17 @@ private:
 	// Pipelines made where first needed (CreateGraphicsPipeline, CreateComputePipeline), and the time it took.
 	uint64_t m_render_pipelines   = 0;
 	double   m_render_pipeline_ms = 0.0;
+	// Those of them compiled, not made of the static store's binaries (GetPlayCompiles).
+	std::atomic<uint64_t> m_play_compiles {0};
+	std::atomic<uint64_t> m_play_compile_us {0};
+	void                  NotePlayCompile(bool from_store, std::chrono::steady_clock::time_point begin) {
+		 if (from_store) return;
+		 m_play_compiles.fetch_add(1, std::memory_order_relaxed);
+		 m_play_compile_us.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+		                                                       std::chrono::steady_clock::now() - begin)
+		                                                       .count()),
+		                             std::memory_order_relaxed);
+	}
 	CompileWorkers& Workers();
 	CompileWorkers& TableWorkers();
 	CompileWorkers& OptimizeWorkers();
@@ -515,6 +539,8 @@ void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pi
 // unoptimized (Fast: Pipeline::unoptimized); Optimize compiles the optimized build of a Fast one (its
 // layouts given, `pipeline` null).
 enum class PipelineBuild { Full, Fast, Optimize };
+// The pipelines a precompile left out so far: the driver refused them (shaders.cpp).
+size_t PipelinesRefused();
 void CreatePipelineInternal(
     GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
     const PipelineRenderingState& rendering, const PipelineVertexInputState& vertex_input,

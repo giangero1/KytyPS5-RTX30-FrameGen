@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """deckbench.py: one measured run of Demon's Souls 01.007.000 on the Steam Deck, for tuning over SSH (deck.sh run).
 
-The dev folder (--dir, default ~/KytyPS5-dev) holds the emulator under test, bench-save/ (the PC's 1-1 bench save,
-copied into the folder's own _SaveData before each run: the player's saves in ~/KytyPS5 are never touched) and a link to
-~/KytyPS5/_PipelineCache (the pipelines compiled so far). The emulator starts in the desktop session (systemd-run --user:
+The folder (--dir, default ~/KytyPS5: the Deck's install, where builds go directly, USER 10-28) holds the emulator
+under test and bench-save/ (the PC's 1-1 bench save), copied into the folder's _SaveData before each run: the Deck's
+saves there are replaced (USER 10-28: they do not matter). The emulator starts in the desktop session (systemd-run --user:
 the session's DISPLAY and WAYLAND_DISPLAY), enters the game with the scripted pad (live `pad`, padboot.py's way),
 settles, measures with the Deck's telemetry (GPU busy/clock/power, CPU clocks, memory, swap) and stops.
 
@@ -105,13 +105,28 @@ class Live:
         k = self.peek(c + 0x38) if plausible(c) else 0
         return plausible(self.peek(k + 0x20)) if plausible(k) else False
 
+    def position(self):
+        # The player's position (H+0x20, three floats), None outside the game.
+        p = self.peek(CHR_INS_MAN)
+        c = self.peek(p + 0x258) if plausible(p) else 0
+        k = self.peek(c + 0x38) if plausible(c) else 0
+        h = self.peek(k + 0x20) if plausible(k) else 0
+        if not plausible(h):
+            return None
+        for line in self.send([f'peek {h + 0x20:x} 12']):
+            if line.startswith('LIVE_PEEK') and 'bytes=' in line:
+                data = bytes.fromhex(line.split('bytes=')[1].strip())
+                return struct.unpack('<3f', data) if len(data) == 12 else None
+        return None
+
     def press(self, buttons, held=0.15, after=3.0):
         self.send([f'pad -1 -1 -1 -1 {buttons:x} {held}'])
         time.sleep(held + after)
 
 
 class Telemetry(threading.Thread):
-    """GPU busy %, GPU clock, package power, CPU clocks, memory and swap every half second; with gpu_metrics
+    """GPU busy %, GPU clock, package power, CPU clocks, memory and swap, the GPU's memory (GTT: the RAM it took, VRAM: the
+    1 GiB carved out of it) every half second; with gpu_metrics
     (gpumetrics.py) the power by rail (cpu_w, gfx_w) and the share of samples each SMU limit held the clocks."""
 
     def __init__(self):
@@ -119,6 +134,7 @@ class Telemetry(threading.Thread):
         self.samples, self.stop = [], threading.Event()
         device = Path('/sys/class/drm/card0/device')
         self.busy = device / 'gpu_busy_percent'
+        self.gtt, self.vram = device / 'mem_info_gtt_used', device / 'mem_info_vram_used'
         self.hwmon = next(device.glob('hwmon/hwmon*'), None)
 
     @staticmethod
@@ -142,6 +158,8 @@ class Telemetry(threading.Thread):
                 'cpu_mhz': sum(cpu) / len(cpu) if cpu else None,
                 'mem_avail_mb': kb('MemAvailable'),
                 'swap_used_mb': kb('SwapTotal') - kb('SwapFree'),
+                'gtt_mb': self.read(self.gtt, 1 / 2**20),
+                'vram_mb': self.read(self.vram, 1 / 2**20),
                 **self.metrics(),
             })
 
@@ -163,7 +181,9 @@ class Telemetry(threading.Thread):
                 'limits': {name: round(count / len(self.samples), 2) for name, count in limits.most_common()},
                 'cpu_mhz': avg('cpu_mhz'),
                 'mem_avail_min_mb': round(min((s['mem_avail_mb'] for s in self.samples), default=0)),
-                'swap_used_max_mb': round(max((s['swap_used_mb'] for s in self.samples), default=0))}
+                'swap_used_max_mb': round(max((s['swap_used_mb'] for s in self.samples), default=0)),
+                'gtt_max_mb': round(max((s['gtt_mb'] or 0 for s in self.samples), default=0)),
+                'vram_max_mb': round(max((s['vram_mb'] or 0 for s in self.samples), default=0))}
 
 
 def emulator_running():
@@ -257,6 +277,8 @@ def run(args):
         result['boot_s'] = round(time.monotonic() - started)
         print(f'in game after {result["boot_s"]} s', flush=True)
         time.sleep(args.settle)
+        if args.where:
+            print(json.dumps({'position': live.position()}), flush=True)
         result['stand'] = measure(live, args.measure, f'{args.label}-stand')
         print(json.dumps(result['stand']), flush=True)
         if args.spin > 0:
@@ -264,6 +286,23 @@ def run(args):
             time.sleep(1)
             result['spin'] = measure(live, args.spin, f'{args.label}-spin')
             print(json.dumps(result['spin']), flush=True)
+        if args.glide:
+            # The player walks to a fixed point (live `glide`, no input) at --glide-speed m/s, measured on the way: the
+            # same route every run, where a stick walk's path varies.
+            start = live.position()
+            target = [float(v) for v in args.glide.split(',')]
+            live.send([f'glide {target[0]} {target[1]} {target[2]} {args.glide_speed}'])
+            time.sleep(1)
+            result['glide'] = measure(live, args.glide_seconds, f'{args.label}-glide')
+            result['glide']['from'] = start
+            result['glide']['to'] = live.position()
+            print(json.dumps(result['glide']), flush=True)
+        if args.walk > 0:
+            # Forward from the bench save's spot (1-1: down the first street, the camera looking ahead).
+            live.send([f'pad 128 0 -1 -1 0 {args.walk + 2}'])
+            time.sleep(1)
+            result['walk'] = measure(live, args.walk, f'{args.label}-walk')
+            print(json.dumps(result['walk']), flush=True)
         if args.shot:
             shot = folder / 'shots' / f'{args.label}.ppm'
             shot.parent.mkdir(exist_ok=True)
@@ -331,7 +370,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='action', required=True)
     r = sub.add_parser('run')
-    r.add_argument('--dir', default='~/KytyPS5-dev')
+    r.add_argument('--dir', default='~/KytyPS5')
     r.add_argument('--exe', default='')
     r.add_argument('--set', action='append', default=[], help='NAME=VALUE for the emulator (KYTY_GAME_CONVARS adds)')
     r.add_argument('--preset', choices=sorted(PRESETS), default='lowest')
@@ -339,6 +378,11 @@ def main():
     r.add_argument('--settle', type=float, default=20)
     r.add_argument('--measure', type=int, default=20)
     r.add_argument('--spin', type=int, default=0)
+    r.add_argument('--walk', type=int, default=0, help='seconds walking forward, measured (after --spin)')
+    r.add_argument('--glide', default='', help='x,y,z: the player walks there (live glide), measured (after --spin)')
+    r.add_argument('--glide-speed', type=float, default=4.0)
+    r.add_argument('--glide-seconds', type=int, default=10)
+    r.add_argument('--where', action='store_true', help='print the player position after settling')
     r.add_argument('--shot', action='store_true')
     r.add_argument('--prof', type=float, default=0, help='seconds of process CPU samples after measuring')
     r.add_argument('--tracem', type=float, default=0, help='seconds of GPU time per draw and dispatch after measuring')

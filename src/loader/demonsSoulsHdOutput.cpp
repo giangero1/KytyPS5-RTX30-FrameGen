@@ -22,9 +22,10 @@ bool                    g_layout_4k = false; // InterfaceAtOutput
 uint32_t                g_wide      = 0;     // WideOutputWidth
 std::array<uint64_t, 3> g_modes {};          // the three choices' immediates: video out, renderer, interface
 
-// A nop of `length` bytes (1-4) in place of a cmovne.
+// A nop of `length` bytes (1-5) in place of a cmovne or a load.
 void Nop(uint64_t address, uint32_t length) {
-	constexpr uint8_t nops[4][4] {{0x90}, {0x66, 0x90}, {0x0f, 0x1f, 0x00}, {0x0f, 0x1f, 0x40, 0x00}};
+	constexpr uint8_t nops[5][5] {{0x90}, {0x66, 0x90}, {0x0f, 0x1f, 0x00}, {0x0f, 0x1f, 0x40, 0x00}, {0x0f, 0x1f, 0x44, 0x00, 0x00}};
+	EXIT_IF(length == 0 || length > 5);
 	std::memcpy(reinterpret_cast<void*>(address), nops[length - 1], length);
 }
 
@@ -113,12 +114,14 @@ void Install(Program* program) {
 	const auto renderer  = GuestCode::FindUnique(*program, GuestCode::Pattern(RendererChoice));
 	const auto interface = GuestCode::FindUnique(*program, GuestCode::Pattern(InterfaceChoice));
 	const auto buffers   = GuestCode::Find(*program, GuestCode::Pattern(DisplayBuffer), 3);
-	const auto setter    = GuestCode::Find(*program, GuestCode::Pattern(DemonsSoulsRenderSize::SetterFixedPair), 2);
+	auto       setter    = GuestCode::Find(*program, GuestCode::Pattern(DemonsSoulsRenderSize::SetterFixedPair), 2);
+	if (setter.empty())
+		setter = GuestCode::Find(*program, GuestCode::Pattern(DemonsSoulsRenderSize::SetterFixedPairAfterFlag), 2);
 	const auto builder   = GuestCode::Find(*program, GuestCode::Pattern(DemonsSoulsRenderSize::ConstructorFixedPair), 2);
 	const auto query     = GuestCode::Find(*program, GuestCode::Pattern(DemonsSoulsRenderSize::QueryFixedPair), 2);
 	if (!video || !renderer || !interface || buffers.size() != 2 || setter.size() != 1 || builder.size() != 1 ||
 	    query.size() != 1) {
-		std::printf("Demon's Souls HD output: the display mode settings of a known build (01.007.000) not found; the 4K "
+		std::printf("Demon's Souls HD output: the display mode settings of a known build (01.007.000, 01.005.000) not found; the 4K "
 		            "output kept\n");
 		return;
 	}
@@ -163,17 +166,30 @@ void Install(Program* program) {
 	// bars' came twice as large (the user 10-20). The divisor kept at 2.0: mov eax, 0x40000000; vmovd xmm0, eax.
 	constexpr uint8_t divisor[16] {0xb8, 0x00, 0x00, 0x00, 0x40, 0xc5, 0xf9, 0x6e,
 	                               0xc0, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00};
-	if (const auto image = GuestCode::FindUnique(*program, GuestCode::Pattern(ImageScale))) {
-		Nop(*image, 4);
-		std::memcpy(reinterpret_cast<void*>(*image + 9), divisor, sizeof(divisor));
+	// (01.005.000's load before the vmovaps is a byte longer.)
+	auto     image      = GuestCode::FindUnique(*program, GuestCode::Pattern(ImageScale));
+	uint32_t image_load = 4;
+	if (!image) {
+		image      = GuestCode::FindUnique(*program, GuestCode::Pattern(ImageScaleR12));
+		image_load = 5;
+	}
+	if (image) {
+		Nop(*image, image_load);
+		std::memcpy(reinterpret_cast<void*>(*image + image_load + 5), divisor, sizeof(divisor));
 		std::printf("Demon's Souls HD output: the interface's images sized at the 4K scale\n");
 	} else {
 		std::printf("Demon's Souls HD output: the interface's image sizing not found; its images come twice as large\n");
 	}
 	// Another kind of image divides the same way: at 1080p the souls counter's backdrop, a gradient strip from the
 	// icon to the number at 4K, came as a small black square. The same 9 bytes, without the nop7.
-	if (const auto backdrop = GuestCode::FindUnique(*program, GuestCode::Pattern(BackdropScale))) {
-		std::memcpy(reinterpret_cast<void*>(*backdrop + BackdropDivisor), divisor, 9);
+	auto     backdrop    = GuestCode::FindUnique(*program, GuestCode::Pattern(BackdropScale));
+	uint32_t backdrop_at = BackdropDivisor;
+	if (!backdrop) {
+		backdrop    = GuestCode::FindUnique(*program, GuestCode::Pattern(BackdropScaleShort));
+		backdrop_at = BackdropShortDivisor;
+	}
+	if (backdrop) {
+		std::memcpy(reinterpret_cast<void*>(*backdrop + backdrop_at), divisor, 9);
 		std::printf("Demon's Souls HD output: the souls counter's backdrop sized at the 4K scale\n");
 	} else {
 		std::printf("Demon's Souls HD output: the souls counter's backdrop sizing not found; it comes as a small square\n");

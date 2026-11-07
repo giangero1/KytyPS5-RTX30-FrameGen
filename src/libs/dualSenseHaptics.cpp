@@ -5,6 +5,147 @@
 #include "libs/dualSenseBluetooth.h"
 #include "SDL_hidapi.h"
 
+#include "common/stringUtils.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+
+// Shared by the Windows and Linux routes below: the rumble motors driven from each haptic block, and the
+// knobs of that drive (the per-platform code opens the pad's endpoint and queues the blocks).
+namespace Libs::Controller::DualSenseHaptics {
+namespace {
+
+// How hard the rumble motors are driven from a haptic block's peak: 2.0 is the mainline's reference, 0
+// leaves the work to the actuators alone (faint), 4 doubles it. Strength is taste - too low reads as "I
+// cannot feel it", too high as "it buzzes through a whole spell charge" - so it is a setting, not a
+// constant: KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN.
+float    g_vibration_motor_gain = 2.0f;
+// How long the motors stay on after each block, and how fast the hold falls between blocks. Together
+// they are the tail of a hit: a report lasts motor_ms, and the level carries over at motor_decay per
+// 21.3 ms report. A hit is a single block, so 60 ms / 0.6 ends it in about 250 ms; longer or slower
+// reads as a hit that keeps rumbling (and a whole spell charge as one long one).
+uint32_t g_vibration_motor_ms    = 60;
+float    g_vibration_motor_decay = 0.6f;
+// The game's own level (before the vibration gain) a block needs to drive the motors: a quiet effect the game keeps
+// playing stays on the actuators, as on a PS5. An enchanted weapon's hum (0.005-0.01, the whole buff long) rumbled
+// until the buff ran out (issue #239); hits reach 0.25. KYTY_DUALSENSE_VIBRATION_MOTOR_ONSET. (Upstream 5aa407e.)
+float    g_vibration_motor_onset = 0.025f;
+// A block's level less its average over this time (0: off), as KYTY_PAD_RUMBLE_SUSTAIN_MS for other pads: a hit drives
+// the motors, an effect that goes on fades from them (onto the actuators alone, as on a PS5). Issue #239, again: in
+// v20261031 an enchanted weapon's hum came at 0.13-0.39 after the gain 4 (the earlier log's 0.02-0.04 was a quieter
+// spell), a minute long, over the onset all along; hits reach 0.8-1.0. KYTY_DUALSENSE_VIBRATION_MOTOR_SUSTAIN_MS.
+float    g_vibration_motor_sustain_ms = 500.0f;
+
+void ReadMotorSettings() {
+	// KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN=<float> scales the rumble motors' drive (0 leaves them off
+	// and the actuators alone, 2.0 is the mainline's reference, 4 doubles it).
+	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN"); value != nullptr) {
+		const auto gain = std::strtof(value, nullptr);
+		if (gain >= 0.0f && gain <= 16.0f) {
+			g_vibration_motor_gain = gain;
+		}
+	}
+	// KYTY_DUALSENSE_VIBRATION_MOTOR_MS=<0..500> and KYTY_DUALSENSE_VIBRATION_MOTOR_DECAY=<0..1>: the
+	// tail of a hit - how long each report lasts and how fast the hold falls between reports.
+	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_MS"); value != nullptr) {
+		const auto ms = std::strtoul(value, nullptr, 10);
+		// At least 1: SDL2 reads 0 ms as "no expiry", which would run until the next call.
+		if (ms >= 1 && ms <= 500) {
+			g_vibration_motor_ms = static_cast<uint32_t>(ms);
+		}
+	}
+	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_DECAY"); value != nullptr) {
+		const auto decay = std::strtof(value, nullptr);
+		// Below 1.0: at exactly 1 the hold never reaches the floor.
+		if (decay > 0.0f && decay < 1.0f) {
+			g_vibration_motor_decay = decay;
+		}
+	}
+	// KYTY_DUALSENSE_VIBRATION_MOTOR_ONSET=<0..1>: the game's level a block needs to drive the motors (0: any).
+	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_ONSET"); value != nullptr) {
+		const auto onset = std::strtof(value, nullptr);
+		if (onset >= 0.0f && onset <= 1.0f) {
+			g_vibration_motor_onset = onset;
+		}
+	}
+	// KYTY_DUALSENSE_VIBRATION_MOTOR_SUSTAIN_MS=<0..5000>: how long a steady effect keeps driving the motors (0: off).
+	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_SUSTAIN_MS"); value != nullptr) {
+		const auto ms = std::strtof(value, nullptr);
+		if (ms >= 0.0f && ms <= 5000.0f) {
+			g_vibration_motor_sustain_ms = ms;
+		}
+	}
+}
+
+extern float g_gain; // the route's vibration gain (the Windows and Linux sections below each define it)
+
+// Drives the pad's rumble motors from a block of haptic audio: the mainline's fallback for pads with no
+// haptic-audio path (its Queue(): peak -> SDL_RumbleGamepad), used here for a DualSense on Bluetooth,
+// where the actuators are heard far more than they are felt.
+void RumbleFromHaptics(float left, float right, float block_ms) {
+	// Hold with a decay instead of dropping to the block's own peak: consecutive hits arrive in separate
+	// blocks, and the motors should not fall silent in the gaps between them.
+	//
+	// The decay ends at a floor, on purpose. An asymptotic one never reached zero, so every block kept
+	// re-arming the motors with a smaller-but-nonzero strength and a single hit rumbled for over a
+	// second. 0.6 per 21.3 ms report falls from a full hit to the floor in about 190 ms, and the
+	// duration below adds its own tail - short enough to end with the hit, long enough to bridge two or
+	// three blocks.
+	constexpr float FLOOR = 0.01f;
+	static float    held[2] = {0.0f, 0.0f};
+	// (The average by the block's own length: the routes' writes can come in bursts. #239's stream, simulated: the
+	// motors on 50.1 of 60 s without, 3.4 s with 500 ms, each hit's first block still 0.66-0.75, full at the gain 2.)
+	static float average[2] = {0.0f, 0.0f};
+	if (g_vibration_motor_sustain_ms > 0.0f) {
+		const float weight = 1.0f - std::exp(-std::max(block_ms, 0.0f) / g_vibration_motor_sustain_ms);
+		average[0] += (left - average[0]) * weight;
+		average[1] += (right - average[1]) * weight;
+		left  = std::max(0.0f, left - average[0]);
+		right = std::max(0.0f, right - average[1]);
+	}
+	// (Under the onset a block only lets the hold fall: the peaks here carry the vibration gain. Upstream 5aa407e.)
+	const float onset = g_vibration_motor_onset * g_gain;
+	left              = left >= onset ? left : 0.0f;
+	right             = right >= onset ? right : 0.0f;
+	held[0] = std::max(std::max(left, 0.0f), held[0] * g_vibration_motor_decay);
+	held[1] = std::max(std::max(right, 0.0f), held[1] * g_vibration_motor_decay);
+	const bool live = held[0] >= FLOOR || held[1] >= FLOOR;
+	// Just crossed the floor: stop the motors explicitly. Relying on the report's own duration would not
+	// do - SDL2 reads 0 ms as "no expiry" - and a game that stops writing in the middle of a hit would
+	// otherwise leave them running at the last level, a fade that never finishes.
+	const bool stop = !live && (held[0] != 0.0f || held[1] != 0.0f);
+	if (!live) {
+		held[0] = held[1] = 0.0f;
+		if (!stop) {
+			return;
+		}
+	}
+	const auto to_motor = [](float value) {
+		return static_cast<uint16_t>(
+		    std::clamp(value * g_vibration_motor_gain, 0.0f, 1.0f) * 65535.0f);
+	};
+	const int count = SDL_NumJoysticks();
+	for (int i = 0; i < count; i++) {
+		auto* pad = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
+		if (pad == nullptr || SDL_GameControllerGetType(pad) != SDL_CONTROLLER_TYPE_PS5) {
+			continue;
+		}
+		if (stop) {
+			(void)SDL_GameControllerRumble(pad, 0, 0, 0);
+		} else {
+			(void)SDL_GameControllerRumble(pad, to_motor(held[0]), to_motor(held[1]),
+			                               g_vibration_motor_ms);
+		}
+		return;
+	}
+}
+
+} // namespace
+} // namespace Libs::Controller::DualSenseHaptics
+
 #if defined(_WIN32)
 
 #include <algorithm>
@@ -118,17 +259,6 @@ uint32_t   g_speaker_volume        = 100;
 // scale, where the controller's amplifier clips (heard as tearing). Off by default - it colours
 // what it touches, and the gain knobs are the first thing to try.
 bool       g_speaker_limiter       = false;
-// How hard the rumble motors are driven from a haptic block's peak: 2.0 is the mainline's reference, 0
-// leaves the work to the actuators alone (faint), 4 doubles it. Strength is taste - too low reads as "I
-// cannot feel it", too high as "it buzzes through a whole spell charge" - so it is a setting, not a
-// constant: KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN.
-float      g_vibration_motor_gain  = 2.0f;
-// How long the motors stay on after each block, and how fast the hold falls between blocks. Together
-// they are the tail of a hit: a report lasts motor_ms, and the level carries over at motor_decay per
-// 21.3 ms report. A hit is a single block, so 60 ms / 0.6 ends it in about 250 ms; longer or slower
-// reads as a hit that keeps rumbling (and a whole spell charge as one long one).
-uint32_t   g_vibration_motor_ms    = 60;
-float      g_vibration_motor_decay = 0.6f;
 
 // What the routes actually did, so a log can tell clipping from silence and from a stalled endpoint.
 uint64_t   g_speaker_writes        = 0;
@@ -223,30 +353,7 @@ void ReadSettings() {
 			g_gain = gain;
 		}
 	}
-	// KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN=<float> scales the rumble motors' drive (0 leaves them off
-	// and the actuators alone, 2.0 is the mainline's reference, 4 doubles it).
-	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_GAIN"); value != nullptr) {
-		const auto gain = std::strtof(value, nullptr);
-		if (gain >= 0.0f && gain <= 16.0f) {
-			g_vibration_motor_gain = gain;
-		}
-	}
-	// KYTY_DUALSENSE_VIBRATION_MOTOR_MS=<0..500> and KYTY_DUALSENSE_VIBRATION_MOTOR_DECAY=<0..1>: the
-	// tail of a hit - how long each report lasts and how fast the hold falls between reports.
-	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_MS"); value != nullptr) {
-		const auto ms = std::strtoul(value, nullptr, 10);
-		// At least 1: SDL2 reads 0 ms as "no expiry", which would run until the next call.
-		if (ms >= 1 && ms <= 500) {
-			g_vibration_motor_ms = static_cast<uint32_t>(ms);
-		}
-	}
-	if (const char* value = std::getenv("KYTY_DUALSENSE_VIBRATION_MOTOR_DECAY"); value != nullptr) {
-		const auto decay = std::strtof(value, nullptr);
-		// Below 1.0: at exactly 1 the hold never reaches the floor.
-		if (decay > 0.0f && decay < 1.0f) {
-			g_vibration_motor_decay = decay;
-		}
-	}
+	ReadMotorSettings();
 	// KYTY_DUALSENSE_SPEAKER_CHANNELS=01|23|all and KYTY_DUALSENSE_SPEAKER_GAIN=<float>: which
 	// channels the pad speaker port plays on (0-1 by default, as the mainline and this module's
 	// first version do) and how much level it gets. Both keep the pad's USB id selection.
@@ -291,10 +398,12 @@ void ReadSettings() {
 
 	// The settings actually in use, once: the values the routes and the motors run with.
 	std::printf("DualSense: settings: %s, vibration gain %.2f on channels %u-%u, motors %.2f (%u ms, "
-	            "decay %.2f), speaker gain %.2f on channels %u-%u, preamp %s, volume %u, limiter %s%s\n",
+	            "decay %.2f, onset %.3f, sustain %.0f ms), speaker gain %.2f on channels %u-%u, preamp %s, volume %u, "
+	            "limiter %s%s\n",
 	            g_enabled ? "on" : "off", static_cast<double>(g_gain), g_first_channel,
 	            g_first_channel + g_channel_count - 1u, static_cast<double>(g_vibration_motor_gain),
 	            g_vibration_motor_ms, static_cast<double>(g_vibration_motor_decay),
+	            static_cast<double>(g_vibration_motor_onset), static_cast<double>(g_vibration_motor_sustain_ms),
 	            static_cast<double>(g_speaker_gain),
 	            g_speaker_first_channel, g_speaker_first_channel + g_speaker_channel_count - 1u,
 	            g_speaker_preamp ? "on (+6 dB)" : "off", g_speaker_volume,
@@ -608,53 +717,6 @@ void Close(bool speaker) {
 	g_buffer_frames[index] = 0;
 }
 
-// Drives the pad's rumble motors from a block of haptic audio: the mainline's fallback for pads with no
-// haptic-audio path (its Queue(): peak -> SDL_RumbleGamepad), used here for a DualSense on Bluetooth,
-// where the actuators are heard far more than they are felt.
-void RumbleFromHaptics(float left, float right) {
-	// Hold with a decay instead of dropping to the block's own peak: consecutive hits arrive in separate
-	// blocks, and the motors should not fall silent in the gaps between them.
-	//
-	// The decay ends at a floor, on purpose. An asymptotic one never reached zero, so every block kept
-	// re-arming the motors with a smaller-but-nonzero strength and a single hit rumbled for over a
-	// second. 0.6 per 21.3 ms report falls from a full hit to the floor in about 190 ms, and the
-	// duration below adds its own tail - short enough to end with the hit, long enough to bridge two or
-	// three blocks.
-	constexpr float FLOOR = 0.01f;
-	static float    held[2] = {0.0f, 0.0f};
-	held[0] = std::max(std::max(left, 0.0f), held[0] * g_vibration_motor_decay);
-	held[1] = std::max(std::max(right, 0.0f), held[1] * g_vibration_motor_decay);
-	const bool live = held[0] >= FLOOR || held[1] >= FLOOR;
-	// Just crossed the floor: stop the motors explicitly. Relying on the report's own duration would not
-	// do - SDL2 reads 0 ms as "no expiry" - and a game that stops writing in the middle of a hit would
-	// otherwise leave them running at the last level, a fade that never finishes.
-	const bool stop = !live && (held[0] != 0.0f || held[1] != 0.0f);
-	if (!live) {
-		held[0] = held[1] = 0.0f;
-		if (!stop) {
-			return;
-		}
-	}
-	const auto to_motor = [](float value) {
-		return static_cast<uint16_t>(
-		    std::clamp(value * g_vibration_motor_gain, 0.0f, 1.0f) * 65535.0f);
-	};
-	const int count = SDL_NumJoysticks();
-	for (int i = 0; i < count; i++) {
-		auto* pad = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
-		if (pad == nullptr || SDL_GameControllerGetType(pad) != SDL_CONTROLLER_TYPE_PS5) {
-			continue;
-		}
-		if (stop) {
-			(void)SDL_GameControllerRumble(pad, 0, 0, 0);
-		} else {
-			(void)SDL_GameControllerRumble(pad, to_motor(held[0]), to_motor(held[1]),
-			                               g_vibration_motor_ms);
-		}
-		return;
-	}
-}
-
 bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t source_channels,
            bool is_float, bool speaker, const float* gains) {
 	std::lock_guard lock(g_mutex);
@@ -715,7 +777,7 @@ bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t sou
 		}
 		(void)DualSenseBluetooth::Queue(bt, mixed.data(), out_frames);
 		if (!speaker) {
-			RumbleFromHaptics(motor_peak[0], motor_peak[1]);
+			RumbleFromHaptics(motor_peak[0], motor_peak[1], static_cast<float>(frames) * 1000.0f / static_cast<float>(source_rate));
 		}
 		if (speaker) {
 			g_speaker_writes++;
@@ -850,7 +912,7 @@ bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t sou
 	if (!speaker) {
 		// The same motor drive the Bluetooth route uses, from the same block: the endpoint's actuator
 		// pair alone is faint too, and a wired pad should feel like a wireless one.
-		RumbleFromHaptics(peak, peak);
+		RumbleFromHaptics(peak, peak, static_cast<float>(frames) * 1000.0f / static_cast<float>(source_rate));
 	}
 
 	// What actually reaches the pad, so a log says whether the game fills this route at all, how loud
@@ -873,6 +935,365 @@ bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t sou
 		            static_cast<double>(peak), static_cast<double>(route_peak),
 		            static_cast<unsigned long long>(route_clips),
 		            static_cast<unsigned long long>(g_dropped_writes), padding, g_buffer_frames[index]);
+	}
+	return true;
+}
+
+} // namespace Libs::Controller::DualSenseHaptics
+
+#elif defined(__linux__)
+
+// Linux (KYTY_DUALSENSE_HAPTICS=1, default OFF here): the pad's USB audio interface is an output device of
+// SDL2's audio list too (PipeWire or PulseAudio name it "DualSense Wireless Controller ..."; ALSA "Wireless
+// Controller"), four channels, the actuators on the second pair. The vibration port opens that device
+// through SDL as the main output is opened (audio.cpp OpenSdlDevice), asks for four float channels at
+// 48 kHz, and queues each block into the actuator pair with the Windows route's mapping and gain; the pad
+// speaker route stays on the main output here (SpeakerActive() false), as it always did. Best effort as on
+// Windows: a block that would push the queue past MAX_QUEUE_MS is dropped. A Bluetooth pad has no audio
+// device; its reports (dualSenseBluetooth.cpp) are not wired here yet.
+//
+//   KYTY_DUALSENSE_HAPTICS_DEVICE=<text>   Linux only: the SDL audio device whose name holds this text
+//                                          (case-insensitive) is the pad; default: "dualsense", else
+//                                          "wireless controller".
+
+#include "libs/audio.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <vector>
+
+namespace Libs::Controller::DualSenseHaptics {
+
+namespace {
+
+constexpr uint32_t ROUTE_VIBRATION = 1U << 1U;
+constexpr int      WANTED_RATE     = 48000;
+constexpr uint8_t  WANTED_CHANNELS = 4;
+constexpr uint16_t WANTED_SAMPLES  = 256;
+constexpr uint32_t MAX_QUEUE_MS    = 60; // (the Windows client's buffer is about this deep)
+
+std::mutex g_mutex;
+bool       g_settings_read = false;
+bool       g_enabled       = false; // KYTY_DUALSENSE_HAPTICS (not "0") turns it on; the Windows default is on
+bool       g_log           = false;
+float      g_gain          = 4.0f; // as the Windows route: the actuators are felt, not heard
+bool       g_all_channels  = false;
+uint32_t   g_first_channel = 2; // the actuator pair; KYTY_DUALSENSE_HAPTICS_CHANNELS overrides it
+uint32_t   g_channel_count = 2;
+std::string g_device_match;
+
+std::string       g_device_name; // (empty: not found yet; looked for again while wanted, a pad plugs in late)
+// The game opened its vibration port: the route is wanted, and while it has no device (the pad's device listed a
+// moment after the port opened, a pad plugged in later, an unplug) the open is tried again from the guest's audio
+// thread, at most once a second (not on every 5 ms grain).
+bool                                  g_wanted = false;
+std::chrono::steady_clock::time_point g_next_try {};
+SDL_AudioDeviceID g_device = 0;
+SDL_AudioSpec     g_spec {};
+uint32_t          g_routes = 0;
+
+std::vector<float> g_mix; // one block, reused (Write runs on the guest's audio thread)
+uint64_t g_vibration_writes   = 0;
+uint64_t g_vibration_clips    = 0;
+uint64_t g_dropped_writes     = 0;
+float    g_vibration_peak_max = 0.0f;
+
+void ReadSettings() {
+	if (g_settings_read) {
+		return;
+	}
+	g_settings_read = true;
+	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS"); value != nullptr) {
+		g_enabled = std::string(value) != "0";
+	}
+	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_CHANNELS"); value != nullptr) {
+		const std::string channels = Common::ToLower(value);
+		if (channels == "all") {
+			g_all_channels = true;
+		} else if (channels == "01") {
+			g_first_channel = 0;
+			g_channel_count = 2;
+		} else if (channels == "23") {
+			g_first_channel = 2;
+			g_channel_count = 2;
+		} else if (!channels.empty() && std::isdigit(static_cast<unsigned char>(channels[0])) != 0) {
+			g_first_channel = static_cast<uint32_t>(channels[0] - '0');
+			g_channel_count = channels.size() > 1 && std::isdigit(static_cast<unsigned char>(channels[1])) != 0
+			                      ? static_cast<uint32_t>(channels[1] - '0')
+			                      : 1u;
+			g_channel_count = g_channel_count > g_first_channel ? g_channel_count - g_first_channel + 1u : 1u;
+		}
+	}
+	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_GAIN"); value != nullptr) {
+		const float gain = std::strtof(value, nullptr);
+		if (gain >= 0.0f && gain <= 64.0f) {
+			g_gain = gain;
+		}
+	}
+	ReadMotorSettings();
+	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_DEVICE"); value != nullptr && value[0] != 0) {
+		g_device_match = Common::ToLower(value);
+	}
+	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_LOG"); value != nullptr) {
+		g_log = std::string(value) != "0";
+	}
+}
+
+// The pad's output device in SDL's list: the name the caller gave (KYTY_DUALSENSE_HAPTICS_DEVICE), else
+// audio.cpp's finder, which takes a DualSense-named device and refuses an ambiguous list (two pads). Looked
+// for again while nothing was found: PipeWire adds the pad's device a moment after it is plugged in.
+bool FindDevice() {
+	if (!g_device_name.empty()) {
+		return true;
+	}
+	if (!Audio::EnsureSdlAudio()) {
+		return false;
+	}
+	const int devices = SDL_GetNumAudioDevices(0);
+	if (!g_device_match.empty()) {
+		for (int i = 0; i < devices; i++) {
+			const char* name = SDL_GetAudioDeviceName(i, 0);
+			if (name != nullptr && Common::ToLower(name).find(g_device_match) != std::string::npos) {
+				g_device_name = name;
+				break;
+			}
+		}
+	} else {
+		g_device_name = Audio::FindControllerAudioDevice();
+	}
+	if (g_device_name.empty()) {
+		static int reported = 0;
+		if (reported++ < 4) {
+			std::printf("DualSense: no pad output device among %d SDL audio devices (USB pad plugged in before the "
+			            "game? two pads are refused; AudioOut's device list names them, "
+			            "KYTY_DUALSENSE_HAPTICS_DEVICE=<text> picks one)\n",
+			            devices);
+		}
+		return false;
+	}
+	return true;
+}
+
+// The device's own channel count (SDL_GetAudioDeviceSpec), 0 when unknown: a stream opened with four channels
+// on a stereo profile is remixed by the sound server into the pad's SPEAKER, so a stereo-profile pad is refused.
+uint32_t DeviceChannels() {
+	const int devices = SDL_GetNumAudioDevices(0);
+	for (int i = 0; i < devices; i++) {
+		const char* name = SDL_GetAudioDeviceName(i, 0);
+		if (name == nullptr || g_device_name != name) {
+			continue;
+		}
+		SDL_AudioSpec spec {};
+		if (SDL_GetAudioDeviceSpec(i, 0, &spec) == 0) {
+			return spec.channels;
+		}
+		break;
+	}
+	return 0;
+}
+
+} // namespace
+
+static bool OpenLocked(bool force);
+
+bool Available() {
+	std::lock_guard lock(g_mutex);
+	ReadSettings();
+	if (!g_enabled || !g_wanted) {
+		return false;
+	}
+	return OpenLocked(false);
+}
+
+uint32_t SampleRate() {
+	std::lock_guard lock(g_mutex);
+	return g_device != 0 ? static_cast<uint32_t>(g_spec.freq) : 0u;
+}
+
+uint32_t EndpointChannels() {
+	std::lock_guard lock(g_mutex);
+	return g_device != 0 ? g_spec.channels : 0u;
+}
+
+bool SpeakerActive() { return false; }
+
+// The route's device, opened: `force` skips the retry's rate limit (the port's own Open). Called with g_mutex held.
+static bool OpenLocked(bool force) {
+	if ((g_routes & ROUTE_VIBRATION) != 0U && g_device != 0) {
+		return true; // this route is already playing (as the Windows route answers)
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (!force && now < g_next_try) {
+		return false;
+	}
+	g_next_try = now + std::chrono::seconds(1);
+	if (!FindDevice()) {
+		return false;
+	}
+	if (g_device == 0) {
+		if (const auto device_channels = DeviceChannels();
+		    device_channels != 0 && !g_all_channels && g_first_channel + g_channel_count > device_channels) {
+			std::printf("DualSense: \"%s\" is a %u-channel output: the actuators need the pad's 4-channel profile (PipeWire/"
+			            "PulseAudio: set the card's profile to Analog Surround 4.0 Output, e.g. in pavucontrol); not opened\n",
+			            g_device_name.c_str(), device_channels);
+			return false;
+		}
+		SDL_AudioSpec desired {};
+		desired.freq     = WANTED_RATE;
+		desired.format   = AUDIO_F32SYS;
+		desired.channels = WANTED_CHANNELS;
+		desired.samples  = WANTED_SAMPLES;
+		desired.callback = nullptr;
+		SDL_AudioSpec obtained {};
+		// The rate and the block size may differ (resampled below); the format stays float (SDL converts);
+		// the channel count is allowed to differ so a stereo-only device is seen, and then refused.
+		g_device = SDL_OpenAudioDevice(g_device_name.c_str(), 0, &desired, &obtained,
+		                               SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE |
+		                                   SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
+		if (g_device == 0) {
+			std::printf("DualSense: cannot open \"%s\": %s\n", g_device_name.c_str(), SDL_GetError());
+			return false;
+		}
+		if (obtained.channels < 2 || obtained.freq <= 0 ||
+		    (!g_all_channels && g_first_channel + g_channel_count > obtained.channels)) {
+			std::printf("DualSense: \"%s\" opened with %u channel(s) at %d Hz; the actuator pair needs four "
+			            "(the pad's Analog Surround 4.0 profile); not used\n",
+			            g_device_name.c_str(), obtained.channels, obtained.freq);
+			SDL_CloseAudioDevice(g_device);
+			g_device = 0;
+			return false;
+		}
+		g_spec = obtained;
+		SDL_PauseAudioDevice(g_device, 0);
+		std::printf("DualSense: haptics on \"%s\" (%d Hz, %u ch, format 0x%04x, %u-frame blocks), channels %s, gain %.2f\n",
+		            g_device_name.c_str(), g_spec.freq, g_spec.channels, g_spec.format, g_spec.samples,
+		            g_all_channels ? "all" : (g_first_channel == 2 && g_channel_count == 2 ? "23" : "custom"),
+		            static_cast<double>(g_gain));
+	}
+	g_routes |= ROUTE_VIBRATION;
+	return true;
+}
+
+bool Open(bool speaker) {
+	std::lock_guard lock(g_mutex);
+	ReadSettings();
+	if (!g_enabled || speaker) {
+		return false; // (the pad speaker port keeps the main output here)
+	}
+	g_wanted = true;
+	return OpenLocked(true);
+}
+
+void Close(bool speaker) {
+	std::lock_guard lock(g_mutex);
+	if (speaker) {
+		return;
+	}
+	g_wanted = false;
+	g_routes &= ~ROUTE_VIBRATION;
+	if (g_device != 0) {
+		SDL_ClearQueuedAudio(g_device);
+		SDL_CloseAudioDevice(g_device);
+		g_device = 0;
+		g_spec   = {};
+	}
+}
+
+bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t source_channels,
+           bool is_float, bool speaker, const float* gains) {
+	std::lock_guard lock(g_mutex);
+	if (speaker || data == nullptr || frames == 0 || source_channels == 0 || source_rate == 0 ||
+	    (g_routes & ROUTE_VIBRATION) == 0U || g_device == 0) {
+		return false;
+	}
+	if (SDL_GetAudioDeviceStatus(g_device) == SDL_AUDIO_STOPPED) {
+		// The pad was unplugged (SDL stops its device; the queue would never drain): closed, and looked for again.
+		std::printf("DualSense: \"%s\" stopped (unplugged?): closed; looked for again while the port is open\n",
+		            g_device_name.c_str());
+		SDL_ClearQueuedAudio(g_device);
+		SDL_CloseAudioDevice(g_device);
+		g_device = 0;
+		g_spec   = {};
+		g_device_name.clear();
+		g_routes &= ~ROUTE_VIBRATION;
+		return false;
+	}
+	const auto target_rate     = static_cast<uint32_t>(g_spec.freq);
+	const auto target_channels = static_cast<uint32_t>(g_spec.channels);
+	const auto channels        = g_all_channels ? target_channels : g_channel_count;
+	const auto out_frames      = source_rate == target_rate
+	                                 ? frames
+	                                 : static_cast<uint32_t>(static_cast<uint64_t>(frames) * target_rate / source_rate);
+	if (out_frames == 0) {
+		return false;
+	}
+	// Behind: drop rather than delay the guest's audio thread (and keep a hit from arriving late).
+	const auto frame_bytes = target_channels * sizeof(float);
+	const auto queued      = SDL_GetQueuedAudioSize(g_device);
+	if (queued / frame_bytes > static_cast<uint64_t>(target_rate) * MAX_QUEUE_MS / 1000u) {
+		g_dropped_writes++;
+		return false;
+	}
+
+	auto& out = g_mix;
+	out.assign(static_cast<size_t>(out_frames) * target_channels, 0.0f);
+	float peak = 0.0f;
+	for (uint32_t i = 0; i < out_frames; i++) {
+		const auto source_index =
+		    source_rate == target_rate ? i : static_cast<uint32_t>(static_cast<uint64_t>(i) * source_rate / target_rate);
+		if (source_index >= frames) {
+			break;
+		}
+		// Mono fills every channel of the route, stereo maps one to one (as the Windows route).
+		for (uint32_t c = 0; c < channels; c++) {
+			const auto source_channel = source_channels == 1 ? 0u : (c < source_channels ? c : source_channels - 1u);
+			float      value          = 0.0f;
+			if (is_float) {
+				value = reinterpret_cast<const float*>(data)[static_cast<size_t>(source_index) * source_channels + source_channel];
+			} else {
+				value = static_cast<float>(reinterpret_cast<const int16_t*>(data)[static_cast<size_t>(source_index) * source_channels +
+				                                                                 source_channel]) /
+				        32768.0f;
+			}
+			value *= g_gain;
+			if (gains != nullptr) {
+				value *= gains[source_channel];
+			}
+			if (value > 1.0f || value < -1.0f) {
+				g_vibration_clips++;
+			}
+			value = std::clamp(value, -1.0f, 1.0f);
+			peak  = std::max(peak, std::fabs(value));
+			if (g_all_channels) {
+				for (uint32_t target = 0; target < target_channels; target++) {
+					out[static_cast<size_t>(i) * target_channels + target] = value;
+				}
+				continue;
+			}
+			const auto channel = g_first_channel + c;
+			if (channel < target_channels) {
+				out[static_cast<size_t>(i) * target_channels + channel] = value;
+			}
+		}
+	}
+	if (SDL_QueueAudio(g_device, out.data(), static_cast<Uint32>(out.size() * sizeof(float))) < 0) {
+		g_dropped_writes++;
+		return false;
+	}
+	RumbleFromHaptics(peak, peak, static_cast<float>(frames) * 1000.0f / static_cast<float>(source_rate));
+
+	g_vibration_writes++;
+	g_vibration_peak_max = std::max(g_vibration_peak_max, peak);
+	if (g_log && (g_vibration_writes <= 4 || (g_vibration_writes % 512) == 0)) {
+		std::printf("DualSense: vibration write %llu: %u frames at %u Hz, %u ch, %s, gains %s%.2f, peak %.3f (max %.3f), "
+		            "clipped %llu, dropped %llu, queued %u bytes\n",
+		            static_cast<unsigned long long>(g_vibration_writes), frames, source_rate, source_channels,
+		            is_float ? "float" : "s16", gains != nullptr ? "" : "(none) ",
+		            static_cast<double>(gains != nullptr ? gains[0] : 1.0f), static_cast<double>(peak),
+		            static_cast<double>(g_vibration_peak_max), static_cast<unsigned long long>(g_vibration_clips),
+		            static_cast<unsigned long long>(g_dropped_writes), queued);
 	}
 	return true;
 }

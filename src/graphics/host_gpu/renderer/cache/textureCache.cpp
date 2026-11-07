@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
+#include "graphics/guest_gpu/scout.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -111,9 +112,9 @@ constexpr uint64_t PartialDirtyCandidateSize = 2 * PartialDirtyGranule;
 constexpr uint64_t PartialUploadMaxShare = 2;
 // Staged runs of picked subresources closer than this are staged as one run.
 constexpr uint64_t PartialStageGap = uint64_t {64} << 10;
-// UploadImageChunked: images from this size whose bytes no cached buffer holds whole, uploaded this much of guest
-// memory at a time.
-constexpr uint64_t ChunkedUploadMin   = uint64_t {256} << 20;
+// UploadImageChunked: images from this size (or half the staging ring, where that is less: an image past it would take
+// a buffer of its own size) whose bytes no cached buffer holds whole, uploaded this much of guest memory at a time.
+constexpr uint64_t ChunkedUploadMax   = uint64_t {256} << 20;
 constexpr uint64_t ChunkedUploadPiece = uint64_t {64} << 20;
 
 [[nodiscard]] bool DecodeDccClear(const TextureCache::ImageDesc& desc, vk::Format format,
@@ -384,7 +385,8 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	};
 	// Collection starts where the video memory use reaches the budget less its headroom (GetTotalMemoryBudget):
 	// below it a kept image costs nothing, a deleted one an upload when the game uses it again.
-	m_trigger_gc_memory = m_graphics.GetTotalMemoryBudget();
+	m_trigger_gc_memory       = m_graphics.GetTotalMemoryBudget();
+	m_start_trigger_gc_memory = m_trigger_gc_memory;
 #if KYTY_TEXTURE_OFFLOAD_SUPPORTED
 	if (TextureOffload::AnyEnabled()) {
 		const bool offload = TextureOffload::GetMode() == TextureOffload::Mode::Offload;
@@ -545,16 +547,18 @@ bool TextureCache::SafeToDownload(const Image& image) {
 // Collector runs (flips) before memory an image could not be made for is asked for again.
 constexpr uint64_t FailedRetryTicks = 30;
 
-// The collectors count ages in flips, a 60 Hz vblank's: at -Fps120's 120 Hz they come twice as often, and the ~10 s
-// (StaleTicks) and ~20 s (RetireTicks) below were 5 and 10 s (issue #221: an RTX 4080 SUPER at its video memory budget
-// lost the textures a 5 s menu kept from being drawn and made ~1.3 GB of them again as it closed, frames of 1.2-4.8 s).
-static uint64_t FlipsPer60Hz() {
-	static const uint64_t factor = std::max<uint64_t>(1, Config::GetVblankFrequency() / 60);
-	return factor;
-}
+// The collectors count ages in time (m_tick_clock), not flips: at -Fps120 the 600 and 1200 flips they were came in 5
+// and 10 s (issue #221: an RTX 4080 SUPER at its video memory budget lost the textures a 5 s menu kept from being drawn
+// and made ~1.3 GB of them again as it closed, frames of 1.2-4.8 s), and flips scaled by the vblank rate were 4 times
+// as long with a 240 Hz vblank and the game at 45-60 fps (issue #215). Never an image used in the last MinIdleTicks
+// flips (a long frame is no idle time).
+constexpr auto     StaleTime    = std::chrono::seconds(10);
+constexpr auto     RetireTime   = std::chrono::seconds(20);
+constexpr uint64_t MinIdleTicks = 120;
 
 // KYTY_TEST_RECLAIM=<n>: the first n images that must exist, of 1 MiB and more, asked for from the 600th flip on, are
-// taken as not made once (ReclaimImageMemory, then made again).
+// taken as not made once (ReclaimImageMemory, then made again); KYTY_TEST_RECLAIM_ROUNDS=2: twice (the second round's
+// downloads too).
 [[gnu::noinline]] static bool TestReclaim(const ImageInfo& info, uint64_t tick) {
 	static std::atomic<int64_t> left {[] {
 		const char* value = std::getenv("KYTY_TEST_RECLAIM");
@@ -564,23 +568,41 @@ static uint64_t FlipsPer60Hz() {
 	       left.fetch_sub(1, std::memory_order_relaxed) > 0;
 }
 
+static uint32_t TestReclaimRounds() {
+	static const uint32_t rounds = [] {
+		const char* value = std::getenv("KYTY_TEST_RECLAIM_ROUNDS");
+		return value != nullptr ? std::clamp<uint32_t>(static_cast<uint32_t>(std::strtoul(value, nullptr, 10)), 1, 2) : 1u;
+	}();
+	return rounds;
+}
+
 ImageId TextureCache::InsertImage(const ImageInfo& info, bool may_fail) {
 	auto id = m_slot_images.insert(m_graphics, m_scheduler, info, may_fail);
 	// An image that must exist (a render target, a depth image, a copy's) the GPU could not make: room is made at once
-	// (the second time all there is) and it is made again; failing still ends the emulator, as it did at once before.
+	// (the second time all there is, the images the GPU wrote too) and it is made again; then again for a while, as a
+	// buffer is (GraphicContext::RetryAllocation); failing still ends the emulator, as it did at once before.
 	// Issue #53: a 16 GB RX 7800 XT whose video memory another program had taken switched to the cinematic mode (AMD
-	// gives these images no system memory).
-	if (!may_fail && (m_slot_images[id].CreateFailed() || TestReclaim(info, m_gc_tick))) {
+	// gives these images no system memory). Issue #252: an 8 GB RX 6650 XT with FSR 3 frame generation at 3840x1200,
+	// 1.3 GB over its budget, freed 143 MiB of textures for a 135 MiB target and still had no room: the textures freed
+	// sat between others in VMA's 64 MiB blocks (2 of 121 memory objects went), and the target needs its own.
+	const bool test = !may_fail && TestReclaim(info, m_gc_tick);
+	if (!may_fail && (m_slot_images[id].CreateFailed() || test)) {
+		if (!test) m_failed_tick = m_gc_tick + 1; // (the collector takes more for a while: RunGarbageCollector)
 		for (uint32_t round = 0;; ++round) {
 			RetireImage(id); // (never registered)
-			const size_t freed = ReclaimImageMemory(info.data.size, round != 0);
-			id                 = m_slot_images.insert(m_graphics, m_scheduler, info, false);
-			if (!m_slot_images[id].CreateFailed()) break;
-			if (round != 0 || freed == 0) {
-				EXIT("failed to create image: extent=%ux%ux%u format=%d layers=%u levels=%u: no memory for it\n",
-				     info.extent.width, info.extent.height, info.extent.depth, static_cast<int>(info.pixel_format),
-				     info.resources.layers, info.resources.levels);
-			}
+			(void)ReclaimImageMemory(info.data.size, round != 0);
+			id = m_slot_images.insert(m_graphics, m_scheduler, info, false);
+			if (!m_slot_images[id].CreateFailed() && !(test && round + 1 < TestReclaimRounds())) break;
+			if (round == 0) continue;
+			const bool made = m_graphics.RetryAllocation("an image", info.data.size, [&] {
+				RetireImage(id); // (never registered)
+				id = m_slot_images.insert(m_graphics, m_scheduler, info, false);
+				return !m_slot_images[id].CreateFailed();
+			});
+			if (made) break;
+			EXIT("failed to create image: extent=%ux%ux%u format=%d layers=%u levels=%u: no memory for it\n",
+			     info.extent.width, info.extent.height, info.extent.depth, static_cast<int>(info.pixel_format),
+			     info.resources.layers, info.resources.levels);
 		}
 	}
 	if (m_slot_images[id].CreateFailed()) {
@@ -590,6 +612,10 @@ ImageId TextureCache::InsertImage(const ImageInfo& info, bool may_fail) {
 		m_failed_tick = m_gc_tick + 1;
 		return {};
 	}
+	// (A slot reused goes on counting: what held the one before sees its sum move.)
+	m_slot_images[id].serial_slot = id.index;
+	ImageSerials::Ensure(id.index);
+	ImageSerials::Move(id.index);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
@@ -599,24 +625,44 @@ ImageId TextureCache::InsertImage(const ImageInfo& info, bool may_fail) {
 
 // The images no draw or dispatch used for 16 flips whose bytes guest memory holds (none the GPU wrote: one used again is
 // made again from them) go at once, least recently used first, until twice the room asked for (at least 256 MiB) is
-// freed (`all`: every one); the GPU finishes the work in flight first (it may read them still). (The collector frees
-// images unused for 30 flips at the earliest, and a mode switch needs the room in the flip it makes its targets. A
-// table set touches its images at least every 8 flips: TableImageSet::TouchTicks.)
+// freed (`all`: every one, and those the GPU wrote, their bytes downloaded to guest memory first, as the collector takes
+// them while memory is short: RunGarbageCollector); the GPU finishes the work in flight first (it may read them still).
+// (The collector frees images unused for 30 flips at the earliest, and a mode switch needs the room in the flip it makes
+// its targets. A table set touches its images at least every 8 flips: TableImageSet::TouchTicks.)
 size_t TextureCache::ReclaimImageMemory(uint64_t bytes, bool all) {
-	constexpr uint64_t UnusedTicks = 16;
-	const auto           start = std::chrono::steady_clock::now();
-	const uint64_t       goal  = all ? UINT64_MAX : std::max(bytes * 2, uint64_t {256} << 20u);
-	uint64_t             freed = 0;
+	constexpr uint64_t UnusedTicks  = 16;
+	const auto         start        = std::chrono::steady_clock::now();
+	const uint64_t     goal         = all ? UINT64_MAX : std::max(bytes * 2, uint64_t {256} << 20u);
+	const uint64_t     download_max = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download).Size() / 2;
+	uint64_t           freed = 0, written_bytes = 0;
+	size_t             written = 0;
 	std::vector<ImageId> victims;
 	if (m_gc_tick >= UnusedTicks) {
 		m_lru_cache.ForEachItemBelow(m_gc_tick - UnusedTicks, [&](ImageId id) {
 			const auto* owner = m_slot_images.try_get(id);
-			if (owner == nullptr || !owner->registered || owner->depth_id || owner->IsGpuModified()) return false;
+			if (owner == nullptr || !owner->registered || owner->depth_id) return false;
+			// (A tiled one too large for the download buffer stays, as in the collector.)
+			if (owner->IsGpuModified() && (!all || (owner->info.IsTiled() && SafeToDownload(*owner) &&
+			                                        owner->info.data.size > download_max)))
+				return false;
 			victims.push_back(id);
 			freed += owner->AccountedSize();
 			return freed >= goal;
 		});
 	}
+	// (One the GPU wrote whose download did not start stays. Not safe to download: a GPU buffer write is newer.)
+	std::erase_if(victims, [&](ImageId id) {
+		auto& owner = m_slot_images[id];
+		if (!owner.IsGpuModified()) return false;
+		if (SafeToDownload(owner) && !TryDownloadImage(id)) {
+			freed -= owner.AccountedSize();
+			return true;
+		}
+		owner.ClearGpuModified();
+		written++;
+		written_bytes += owner.AccountedSize();
+		return false;
+	});
 	std::erase_if(victims, [&](ImageId id) { return !DetachImage(id); });
 	if (!victims.empty()) {
 		m_scheduler.Wait(m_scheduler.CurrentTick());
@@ -631,10 +677,11 @@ size_t TextureCache::ReclaimImageMemory(uint64_t bytes, bool all) {
 	}
 	static std::atomic<uint32_t> reports {0};
 	if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
-		std::printf("Texture cache: no memory for a %llu MiB image, %zu images unused for %llu flips freed (%llu MiB) "
-		            "in %.1f ms\n",
+		std::printf("Texture cache: no memory for a %llu MiB image, %zu images unused for %llu flips freed (%llu MiB; %zu "
+		            "of them the GPU wrote, %llu MiB) in %.1f ms\n",
 		            static_cast<unsigned long long>(bytes >> 20u), victims.size(),
-		            static_cast<unsigned long long>(UnusedTicks), static_cast<unsigned long long>(freed >> 20u),
+		            static_cast<unsigned long long>(UnusedTicks), static_cast<unsigned long long>(freed >> 20u), written,
+		            static_cast<unsigned long long>(written_bytes >> 20u),
 		            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 		std::fflush(stdout);
 	}
@@ -678,12 +725,66 @@ bool TextureCache::RegistrationsSince(uint64_t address, uint64_t size, uint64_t 
 	return false;
 }
 
+void TextureCache::MoveRegistrationSerials(const Image& image) {
+	if (!ImageSerials::g_on.load(std::memory_order_relaxed)) return; // (KYTY_TABLE_SERIALS off: no serial moves)
+	ImageSerials::Move(image.serial_slot);
+	for (const auto other: FindImagesInRegion(image.info.data.address, image.info.data.size, true))
+		if (const auto* found = m_slot_images.try_get(other)) ImageSerials::Move(found->serial_slot);
+}
+
+void TextureCache::MoveMeta(uint64_t begin, uint64_t end) {
+	if (ImageSerials::g_on.load(std::memory_order_relaxed)) {
+		const std::lock_guard lock(m_meta_slots_lock);
+		for (auto it = m_meta_slots.lower_bound(begin); it != m_meta_slots.end() && it->first < end; ++it)
+			ImageSerials::Move(it->second);
+	}
+	m_meta_epoch.fetch_add(1, std::memory_order_release);
+}
+
+void TextureCache::NoteMetaUse(uint64_t address, uint32_t slot) {
+	if (address == 0 || slot == UINT32_MAX) return;
+	const std::lock_guard lock(m_meta_slots_lock);
+	for (auto [it, end] = m_meta_slots.equal_range(address); it != end; ++it)
+		if (it->second == slot) return;
+	m_meta_slots.emplace(address, slot);
+	m_meta_by_slot[slot].push_back(address);
+}
+
+void TextureCache::NoteMetaSlot(const Image& image, bool add) {
+	const auto address = image.info.metadata.range.address;
+	if (image.info.metadata.kind == ImageMetadataKind::None || address == 0) return;
+	if (add) return NoteMetaUse(address, image.serial_slot); // (A parked image taken back holds its entry already.)
+	const std::lock_guard lock(m_meta_slots_lock);
+	for (auto [it, end] = m_meta_slots.equal_range(address); it != end; ++it)
+		if (it->second == image.serial_slot) {
+			m_meta_slots.erase(it);
+			if (const auto found = m_meta_by_slot.find(image.serial_slot); found != m_meta_by_slot.end()) {
+				if (const auto at = std::ranges::find(found->second, address); at != found->second.end()) found->second.erase(at);
+			}
+			return;
+		}
+}
+
+// KYTY_TABLE_SERIALS: every metadata entry of a slot whose image is gone (its own, NoteMetaSlot, and each view's a table
+// draw noted, NoteMetaUse): none would move the serial of an image there, and a new image in the slot notes its own. Not
+// at an unregistration: a parked image comes back (TakeParkedImage) to the sets that hold it, which note no view again.
+void TextureCache::ForgetMetaSlot(uint32_t slot) {
+	const std::lock_guard lock(m_meta_slots_lock);
+	const auto            found = m_meta_by_slot.find(slot);
+	if (found == m_meta_by_slot.end()) return;
+	for (const auto address: found->second)
+		for (auto [it, end] = m_meta_slots.equal_range(address); it != end;) it = it->second == slot ? m_meta_slots.erase(it) : std::next(it);
+	m_meta_by_slot.erase(found);
+}
+
 void TextureCache::RegisterImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.registered || image.info.data.Empty()) {
 		EXIT("TextureCache: invalid image registration\n");
 	}
 	StampRegistrationPages(image, m_resolution_epoch.fetch_add(1, std::memory_order_release) + 1);
+	MoveRegistrationSerials(image); // (KYTY_TABLE_SERIALS)
+	NoteMetaSlot(image, true);
 	ImagePageTable::PageRange pages {};
 	if (!ImagePageTable::TryGetPageRange(image.info.data.address, image.info.data.size, pages)) {
 		EXIT("TextureCache: image registration is outside the guest address space\n");
@@ -719,6 +820,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 		                 true);
 	}
 	StampRegistrationPages(image, m_resolution_epoch.fetch_add(1, std::memory_order_release) + 1);
+	MoveRegistrationSerials(image); // (KYTY_TABLE_SERIALS)
 	++m_image_granule_releases;
 	UntrackImage(id, "unregister");
 	ImagePageTable::PageRange pages {};
@@ -788,8 +890,9 @@ bool TextureCache::DetachImage(ImageId id) {
 		     (image->info.metadata.kind == ImageMetadataKind::Htile &&
 		      metadata->second.type == MetaDataInfo::Type::HTile))) {
 			// A later binding may have reused this address for another metadata type.
+			const auto meta_address = metadata->first;
 			m_surface_metas.erase(metadata);
-			m_meta_epoch.fetch_add(1, std::memory_order_release);
+			MoveMeta(meta_address);
 		}
 	}
 	UnregisterImage(id);
@@ -2246,8 +2349,8 @@ void TextureCache::InitializeImage(ImageId id) {
 			if (image.IsBufferModified()) {
 				for (const auto& [begin, end]: image.BufferModifiedRanges()) Image::AddRange(ranges, begin, end);
 			}
-			uploaded = image.info.data.size >= ChunkedUploadMin ? UploadImageChunked(image, &ranges)
-			                                                    : UploadImageSubresources(image, ranges);
+			uploaded = image.info.data.size >= ChunkedUploadMin() ? UploadImageChunked(image, &ranges)
+			                                                      : UploadImageSubresources(image, ranges);
 			if (uploaded) image.staged_ring = nullptr;
 		}
 		if (!uploaded && UploadImageChunked(image)) {
@@ -2498,11 +2601,15 @@ bool TextureCache::UploadImageSubresources(Image& image, const std::vector<std::
 // buffer: one each lived until the submission completed, as much again. (An image a cached buffer holds whole too: its
 // pieces copy from that buffer, where its whole detile asked for a scratch buffer of the image's size - a user's 8 GB
 // GPU had neither the video nor the system memory for one of 2 GiB, and the emulator exited, 10-13.)
+uint64_t TextureCache::ChunkedUploadMin() const {
+	return std::min(ChunkedUploadMax, std::max(m_buffer_cache.StagingSize() / 2, ChunkedUploadPiece));
+}
+
 bool TextureCache::UploadImageChunked(Image& image, const std::vector<std::pair<uint64_t, uint64_t>>* only) {
 	const auto& info    = image.info;
 	const auto  binding = UploadBinding(image);
 	const auto  base    = info.data.address;
-	if (binding == BindingType::DepthTarget || (only == nullptr && info.data.size < ChunkedUploadMin) ||
+	if (binding == BindingType::DepthTarget || (only == nullptr && info.data.size < ChunkedUploadMin()) ||
 	    info.IsVolume() || base % 256 != 0) {
 		return false;
 	}
@@ -2815,7 +2922,10 @@ void TextureCache::PrepareDccClear(ImageId id, const ImageDesc& desc) {
 	auto&      image       = m_slot_images[id];
 	bool       changed     = !(image.info.metadata == desc.info.metadata);
 	if (changed) ++image.validity;
+	if (changed && image.registered) NoteMetaSlot(image, false);
 	image.info.metadata    = desc.info.metadata;
+	if (changed && image.registered) NoteMetaSlot(image, true);
+	if (changed) ImageSerials::Move(image.serial_slot);
 	auto [entry, inserted] = m_surface_metas.try_emplace(
 	    desc.info.metadata.range.address, MetaDataInfo {.type = MetaDataInfo::Type::Dcc});
 	MetaFilterAdd(desc.info.metadata.range.address);
@@ -2828,7 +2938,7 @@ void TextureCache::PrepareDccClear(ImageId id, const ImageDesc& desc) {
 		EXIT("TextureCache: image reuses non-DCC metadata\n");
 	}
 	// (Only when the record changed: every DCC target acquisition passes here.)
-	if (changed) m_meta_epoch.fetch_add(1, std::memory_order_release);
+	if (changed) MoveMeta(desc.info.metadata.range.address);
 	if (metadata.clear_mask == 0 || image.info.resources.levels != 1 ||
 	    desc.info.metadata.range.size == 0 || metadata.fill_size < desc.info.metadata.range.size) {
 		return;
@@ -3677,7 +3787,10 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 		// acquisition passes here.
 		bool changed        = !(image.info.metadata == desc.info.metadata);
 		if (changed) ++image.validity;
+		if (changed && image.registered) NoteMetaSlot(image, false);
 		image.info.metadata = desc.info.metadata;
+		if (changed && image.registered) NoteMetaSlot(image, true);
+		if (changed) ImageSerials::Move(image.serial_slot);
 		auto [metadata, inserted] =
 		    m_surface_metas.try_emplace(desc.info.metadata.range.address,
 		                                MetaDataInfo {.type       = MetaDataInfo::Type::HTile,
@@ -3691,7 +3804,7 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 			                    .clear_mask = image.info.htile_clear_mask};
 			changed          = true;
 		}
-		if (changed) m_meta_epoch.fetch_add(1, std::memory_order_release);
+		if (changed) MoveMeta(desc.info.metadata.range.address);
 	}
 	CommitGpuWrite(image, scoped);
 	if (desc.info.HasStencil()) {
@@ -3862,6 +3975,11 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 		EXIT("TextureCache: invalid memory-invalidation range\n");
 	}
 	std::scoped_lock lock {m_lock};
+	// (KYTY_SLOW_LOG_MS: the time under the lock, which the render thread waits for.)
+	SlowLog::Scope slow([&](double ms) {
+		std::printf("SLOW TextureCache::InvalidateMemory %.1f ms under its lock addr=0x%llx size=0x%llx\n", ms,
+		            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size));
+	});
 	ReleaseDownloadPages(address, size);
 	InvalidateCpuAliases(address, size);
 }
@@ -4099,6 +4217,7 @@ bool TextureCache::TryDownloadImage(ImageId id) {
 			const auto begin     = std::max(run_begin, range.address);
 			const auto end       = std::min(run_end, range.address + range.size);
 			LibKernel::Memory::WriteBacking(begin, mapped + (begin - range.address), end - begin, "image");
+			if (Scout::Running()) Scout::NoteHostWrite(begin, end - begin, true);
 			m_page_manager.UpdatePageWatchers<false>(run_begin, run_end - run_begin);
 			first = last;
 		}
@@ -4553,6 +4672,8 @@ void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch
 						source += piece.size;
 					}
 				}
+				if (Scout::Running())
+					for (const auto& range: raw->ranges) Scout::NoteHostWrite(range.begin, range.end - range.begin, true);
 				for (const auto& range: raw->ranges) m_page_manager.UpdateReadWatchers<false>(range.begin, range.end - range.begin);
 				const auto us = static_cast<uint64_t>(
 				    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - raw->start).count());
@@ -4574,6 +4695,8 @@ void TextureCache::RestoreOffloaded(uint64_t vaddr, uint64_t size, uint8_t touch
 			bytes += range.end - range.begin;
 		}
 	}
+	if (Scout::Running())
+		for (const auto& range: ranges) Scout::NoteHostWrite(range.begin, range.end - range.begin, true);
 	for (const auto& range: ranges) m_page_manager.UpdateReadWatchers<false>(range.begin, range.end - range.begin);
 	const auto us = static_cast<uint64_t>(
 	    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
@@ -4832,7 +4955,7 @@ bool TextureCache::ClearMeta(uint64_t address) {
 	}
 	found->second.clear_mask = UINT32_MAX;
 	found->second.fill_known = false;
-	m_meta_epoch.fetch_add(1, std::memory_order_release); // (a clear pending: cached answers ask again)
+	MoveMeta(address); // (a clear pending: cached answers ask again)
 	return true;
 }
 
@@ -4847,7 +4970,7 @@ bool TextureCache::ClearMeta(uint64_t address, uint32_t fill_value) {
 	found->second.clear_mask = UINT32_MAX;
 	found->second.fill_value = fill_value;
 	found->second.fill_known = true;
-	m_meta_epoch.fetch_add(1, std::memory_order_release);
+	MoveMeta(address);
 	return true;
 }
 
@@ -4876,7 +4999,7 @@ void TextureCache::TrackDccFill(uint64_t address, uint64_t size, uint32_t fill_v
 	// image descriptor confirms its role; never reinterpret CMask/FMask/HTile as DCC.
 	const auto found = m_surface_metas.try_emplace(address).first;
 	MetaFilterAdd(address);
-	m_meta_epoch.fetch_add(1, std::memory_order_release);
+	MoveMeta(address);
 	if (found->second.type == MetaDataInfo::Type::PendingDcc ||
 	    found->second.type == MetaDataInfo::Type::Dcc) {
 		found->second.clear_mask = dcc_clear_mask;
@@ -4896,7 +5019,7 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	}
 	if (is_clear) {
 		found->second.clear_mask |= 1u << slice;
-		m_meta_epoch.fetch_add(1, std::memory_order_release);
+		MoveMeta(address);
 	} else {
 		found->second.clear_mask &= ~(1u << slice);
 	}
@@ -4966,7 +5089,7 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 		}
 		for (size_t i = 0; i < bits.size(); ++i) m_meta_filter[i].store(bits[i], std::memory_order_release);
 	}
-	m_meta_epoch.fetch_add(1, std::memory_order_release);
+	MoveMeta(address, address + size);
 	auto images = FindImagesInRegion(address, size, false);
 	for (const auto id: images) {
 		auto owner = m_slot_images.try_get(id);
@@ -4999,42 +5122,45 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::EraseSlot(ImageId id) {
+	ImageSerials::Move(m_slot_images[id].serial_slot);
+	ForgetMetaSlot(m_slot_images[id].serial_slot);
 	m_slot_images.erase(id);
 	m_erase_epoch.fetch_add(1, std::memory_order_release);
 }
 
 // Per flip, whatever the memory use (the collector below runs only near the video memory budget, never on a 32 GB GPU):
-// images no draw or dispatch used for RetireTicks flips go, at most MaxRetirements a flip, as stale buffers do
+// images no draw or dispatch used for RetireTime go, at most MaxRetirements a flip, as stale buffers do
 // (BufferCache::RetireStaleBuffers). Kept, their page watchers took a fault at every write the game made when it gave
 // that memory to other data (the third loop of the user's 1-1 route: partial dirty faults 17 -> 164 a frame, write
 // faults 73 -> 232), and they held their video memory for good. One the game draws again is made again from its bytes.
 // Passed over (to the back of the list): images whose bytes only the GPU has (no download here), depth images with a
 // stencil association (deleting depth deletes it too), unregistered ones.
 // Texture pools of the world the game is in stay where the budget is 12 GiB or more (the collector below takes them,
-// oldest first, when it runs): one-level arrays of ChunkedUploadMin and up that shaders only sample. The game samples a
+// oldest first, when it runs): one-level arrays of ChunkedUploadMax and up that shaders only sample. The game samples a
 // pool through views from a few first layers to a last one that moves as it streams, and leaves one for minutes as the
 // camera moves on: retired, the next view made it again whole from guest memory (2-2 and 5-2 tours: 1.3-2 GB, 150-460
 // ms frames, 2-3 times a map), where the image kept serves it or gives its layers on the GPU (HoldLayers). A kept
 // pool's watchers take a fault per MiB the game writes at most (partial dirty state). One last used before the game
 // entered its world (SceneTags) goes as before: the memory of the worlds left comes back.
 void TextureCache::RetireStaleImages(uint64_t tick) {
-	const uint64_t   RetireTicks    = 1200 * FlipsPer60Hz();
 	constexpr size_t MaxRetirements = 16;
 	if (const auto generation = SceneTags::Generation(); generation != m_scene_generation) {
 		m_scene_generation = generation;
 		m_scene_tick       = tick;
 	}
-	if (tick <= RetireTicks) return;
+	if (tick <= MinIdleTicks) return;
+	const uint64_t below = std::min(m_tick_clock.Before(tick, RetireTime), tick - MinIdleTicks);
+	if (below == 0) return;
 	thread_local std::vector<ImageId> stale, kept;
 	stale.clear();
 	kept.clear();
 	const bool keep_pools = !m_graphics.small_video_memory;
-	m_lru_cache.ForEachItemBelow(tick - RetireTicks, [&](ImageId id) {
+	m_lru_cache.ForEachItemBelow(below, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered) return false;
 		// (Left at its age: the collector's.)
 		if (keep_pools && owner->info.resources.levels == 1 && owner->info.resources.layers > 1 &&
-		    owner->info.data.size >= ChunkedUploadMin && GuestTexture(*owner) &&
+		    owner->info.data.size >= ChunkedUploadMax && GuestTexture(*owner) &&
 		    m_lru_cache.TickOf(owner->lru_id) >= m_scene_tick)
 			return false;
 		if (owner->depth_id || owner->IsGpuModified())
@@ -5081,6 +5207,7 @@ void TextureCache::RetireStaleImages(uint64_t tick) {
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
+	m_tick_clock.Begin(tick);
 	const auto now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
 	    std::chrono::steady_clock::now().time_since_epoch()).count());
 	if (m_video_pressure.Due(now_ms)) {
@@ -5113,13 +5240,16 @@ void TextureCache::RunGarbageCollector() {
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
-	if (m_graphics.CanReportMemoryUsage() && !m_graphics.small_video_memory) {
+	if (m_graphics.CanReportMemoryUsage()) {
 		// The budget Windows gives now, not the one at start-up: another program's video memory lowers it (a Discord
 		// stream: 15.2 -> 13.9 GB on a 16 GB GPU), and past it Windows moves the game's memory out of video memory
 		// (60 -> 20-30 fps). Its lowest of the last 30 s (KytyGcLiveBudgetValue), less GetTotalMemoryBudget's headroom
-		// as at start-up. (As before below 12 GiB of budget.)
+		// as at start-up. Below 12 GiB of budget it only lowers the start-up trigger (issue #276: an 8 GB RX 6650 XT's
+		// budget went from 7378 to ~5570 MiB in the world; the collector, still at 6455, let the use stay up to 1.2 GiB
+		// over it once frame generation took its share, and frames waited on the memory Windows had moved out).
 		static uint64_t logged  = 0;
-		const uint64_t  trigger = KytyGcLiveBudgetValue(m_graphics);
+		const uint64_t  live    = KytyGcLiveBudgetValue(m_graphics);
+		const uint64_t  trigger = m_graphics.small_video_memory ? std::min(live, m_start_trigger_gc_memory) : live;
 		if ((trigger > logged ? trigger - logged : logged - trigger) >= (uint64_t {256} << 20u)) {
 			logged = trigger;
 			std::printf("Texture collector: collects above %llu MiB (the video memory budget now, less its headroom)\n",
@@ -5147,20 +5277,23 @@ void TextureCache::RunGarbageCollector() {
 	// system has left went under 2 GiB or back (checked every 60 flips; issue #47: "the emulator uses all 32 GB of my
 	// RAM", with spiky frame times, and nothing in its log said how much it held).
 	LogPcMemory(tick);
-	// Over the budget: the images no draw or dispatch used for StaleTicks flips (~10 s), least recently used first, at
-	// most MaxDeletions a flip. What the game stops drawing it stops binding: 1-1 standing, 3.2 GiB of images were used
-	// in the last 2 flips, 3.0 GiB not for 160 and more, 0.05 GiB in between; turning the camera, images behind it
-	// come back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low 47 -> 27 fps).
-	const uint64_t   StaleTicks   = 600 * FlipsPer60Hz();
+	// Over the budget: the images no draw or dispatch used for StaleTime, least recently used first, at most
+	// MaxDeletions a flip. What the game stops drawing it stops binding: 1-1 standing, 3.2 GiB of images were used in
+	// the last 2 flips, 3.0 GiB not for 160 and more, 0.05 GiB in between; turning the camera, images behind it come
+	// back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low 47 -> 27 fps).
 	constexpr size_t MaxDeletions = 40;
-	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
-	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
-	const bool     failing     = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;
+	const uint64_t   stale_tick   = m_tick_clock.Before(tick, StaleTime);
+	// For StaleTime after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too:
+	// the superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
+	const bool     failing = m_failed_tick != 0 && m_failed_tick > stale_tick;
 	const bool under_pressure = m_video_pressure.active;
-	const uint64_t stale_ticks = m_video_pressure.Escalated(now_ms) ? 120ull : failing ? FailedRetryTicks : StaleTicks;
+	const uint64_t below = m_video_pressure.Escalated(now_ms)
+	                           ? tick - std::min(tick, 120ull)
+	                           : failing ? tick - std::min(tick, FailedRetryTicks)
+	                                     : std::min(stale_tick, tick - std::min(tick, MinIdleTicks));
 	// Less the room game buffers in use that got system memory need back (BufferCache::MoveSpilledBufferBack).
 	const uint64_t collect_above = m_trigger_gc_memory - std::min(m_trigger_gc_memory, m_buffer_cache.SpilledRoom());
-	if ((!under_pressure && m_total_used_memory < collect_above) || tick < stale_ticks) {
+	if ((!under_pressure && m_total_used_memory < collect_above) || below == 0) {
 		return;
 	}
 	if (under_pressure) {
@@ -5179,7 +5312,7 @@ void TextureCache::RunGarbageCollector() {
 	uint64_t planned_download_bytes = 0;
 	std::vector<ImageId> candidates;
 	candidates.reserve(MaxDeletions);
-	m_lru_cache.ForEachItemBelow(tick - stale_ticks, [&](ImageId id) {
+	m_lru_cache.ForEachItemBelow(below, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered || owner->depth_id) {
 			return false;

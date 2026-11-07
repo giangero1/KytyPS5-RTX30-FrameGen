@@ -576,7 +576,8 @@ static bool TexturePrefixEnabled(bool small_video_memory) {
 	return value != nullptr && value[0] != '\0' ? value[0] != '0' : small_video_memory || FrameGen::UsesFsr();
 }
 
-// KYTY_TEXTURE_REDUCE=0|1|2 (default: 1 with less than 12 GiB of video memory, else 0): a sampled 2D block-compressed
+// KYTY_TEXTURE_REDUCE=0|1|2 (default: 1 on a card of 12 GiB of video memory or less, else 0:
+// GraphicContext::reduce_texture_levels): a sampled 2D block-compressed
 // texture of at least 1024 texels on a side is held without its 1 or 2 largest levels, as a T# from that level would be
 // (TextureFromLevel): its kept levels are the first bytes of its memory, so the left-out ones take no video memory and
 // are not uploaded when the game writes them. One level left out is a quarter of the texture: at 1-1 its BC textures
@@ -586,12 +587,12 @@ static bool TexturePrefixEnabled(bool small_video_memory) {
 // with one level out. Shaders sample the smaller texture (half the texels across); size queries, explicit levels and
 // texel loads see it too (a little blur). Demon's Souls streams none of the levels left out into its memory either
 // (loader/demonsSoulsTextureMips.cpp).
-uint32_t TextureReduceLevels(bool small_video_memory) {
+uint32_t TextureReduceLevels(bool reduce_texture_levels) {
 	static const uint32_t levels = [&] {
 		const char*    value  = std::getenv("KYTY_TEXTURE_REDUCE");
 		const uint32_t chosen = value != nullptr && value[0] != '\0'
 		                            ? static_cast<uint32_t>(std::clamp(std::atoi(value), 0, 2))
-		                            : (small_video_memory ? 1u : 0u);
+		                            : (reduce_texture_levels ? 1u : 0u);
 		if (chosen != 0) {
 			std::printf("Textures: large block-compressed textures held without their %u largest level(s) "
 			            "(KYTY_TEXTURE_REDUCE=0 keeps them whole)\n",
@@ -603,13 +604,13 @@ uint32_t TextureReduceLevels(bool small_video_memory) {
 	return levels;
 }
 
-static void HoldFromBaseLevel(TextureCache& cache, TextureCache::ImageDesc& desc, bool small_video_memory) {
+static void HoldFromBaseLevel(TextureCache& cache, TextureCache::ImageDesc& desc, const GraphicContext& graphics) {
 	const auto  base = desc.view_info.base_level;
 	const auto  last = base + desc.view_info.level_count - 1u;
 	const auto& full = desc.info;
 	// The levels left out of a large BC texture (none where the view reads only those, nor of one the GPU wrote: the
 	// character creator compresses faces on the GPU through texel views of the same memory, which must stay whole).
-	const auto reduce = TextureReduceLevels(small_video_memory);
+	const auto reduce = TextureReduceLevels(graphics.reduce_texture_levels);
 	const auto drop   = reduce != 0 && full.IsBlock() && std::max(full.extent.width, full.extent.height) >= 1024u &&
 	                          full.resources.levels > reduce && last >= reduce &&
 	                          !cache.IsRegionGpuModified(full.data.address, full.data.size) &&
@@ -619,7 +620,7 @@ static void HoldFromBaseLevel(TextureCache& cache, TextureCache::ImageDesc& desc
 	// The first level held: the T#'s base, or past the levels left out.
 	const auto first_held = std::max(base, drop);
 	// (An array only for the levels left out: one held from its T#'s later base level is not tried.)
-	if (first_held == 0 || (drop == 0 && (!TexturePrefixEnabled(small_video_memory) || full.resources.layers > 1)) ||
+	if (first_held == 0 || (drop == 0 && (!TexturePrefixEnabled(graphics.small_video_memory) || full.resources.layers > 1)) ||
 	    full.resources.layers == 0 || full.samples != 1 || full.type != Prospero::ImageType::kColor2D ||
 	    full.IsVolume() || full.IsDepth() || full.HasMetadata() || full.HasStencil() ||
 	    full.tile_mode == Prospero::TileMode::kLinear || full.tile_mode == Prospero::TileMode::kDepth ||
@@ -1079,7 +1080,7 @@ TextureBinding RenderExecutor::ResolveTextureUncached(
 	}
 
 	if (!storage && (type == Prospero::ImageType::kColor2D || type == Prospero::ImageType::kColor2DArray)) {
-		HoldFromBaseLevel(texture_cache, desc, m_context.GetGraphics().small_video_memory);
+		HoldFromBaseLevel(texture_cache, desc, m_context.GetGraphics());
 	}
 	// KYTY_TEST_MAX_ARRAY_LAYERS=<n>: textures held as if the GPU's images held no more than n layers. 2048 = NVIDIA's: an
 	// AMD GPU (8192) then binds the texture-pool views past it null as NVIDIA does (issue #24: a picture broken on AMD
@@ -1129,10 +1130,19 @@ TextureBinding RenderExecutor::ResolveTextureUncached(
 	return {id, nullptr, std::move(desc)};
 }
 
+// Whether the program's samplers are the materials' (UpscaleBiasApplies: the color targets a pixel shader writes). Its
+// own function: a branch in PrepareBindingsInto would cost that hot path its PGO profile.
+[[gnu::noinline]] static bool MaterialSamplers(const ShaderRecompiler::IR::CompiledShaderInfo& program) {
+	uint32_t targets = 0;
+	for (const auto& output: program.info.outputs)
+		targets += output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ? 1u : 0u;
+	return UpscaleBiasApplies(program.stage == ShaderType::Pixel, targets);
+}
+
 static vk::Sampler NativeSampler(RenderContext&                       context,
                                  const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                  uint32_t index,
-                                 const ShaderRecompiler::IR::DescriptorValue& value) {
+                                 const ShaderRecompiler::IR::DescriptorValue& value, bool material) {
 	auto descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(value);
 	if (!program.info.samplers[index].depth_compare) {
 		descriptor.fields[0] &= ~(0x7u << 12u);
@@ -1140,7 +1150,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
 	if (program.info.samplers[index].force_point_filtering) {
 		descriptor.SetPointFiltering();
 	}
-	return context.GetSamplerCache().GetSampler(descriptor);
+	return context.GetSamplerCache().GetSampler(descriptor, material);
 }
 
 static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
@@ -1224,8 +1234,9 @@ void RenderExecutor::PrepareBindingsInto(const ShaderStageRuntime& runtime,
 		prepared.images.push_back(std::move(binding));
 	}
 	prepared.samplers.reserve(program.info.samplers.size());
+	const bool material = MaterialSamplers(program);
 	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
-		prepared.samplers.push_back(NativeSampler(m_context, program, i, snapshot.samplers[i]));
+		prepared.samplers.push_back(NativeSampler(m_context, program, i, snapshot.samplers[i], material));
 	}
 	prepared.shader_data.reserve(program.bindings.ShaderDataDwords());
 	for (const auto reg: program.bindings.user_data_registers) {

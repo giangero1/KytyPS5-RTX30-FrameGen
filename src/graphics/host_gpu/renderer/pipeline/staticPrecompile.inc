@@ -637,6 +637,7 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 	// pipeline cache data goes to the shard file (pipelineCacheBlobs.h), copied from the store's blobs or made.
 	const bool binaries = create_pipelines && m_graphics.pipeline_binaries_enabled;
 	const bool blobs    = create_pipelines && !binaries && StaticBlobsMode(m_graphics);
+	m_graphics.precompiling = create_pipelines;
 	std::unique_ptr<PipelineBinaryWriter>    writer;
 	std::unique_ptr<PipelineCacheBlobWriter> blob_writer;
 	if (binaries) {
@@ -1077,6 +1078,9 @@ bool PipelineCache::WarmSeeds(const PrecompileOptions& args, size_t& left_out) {
 		                 stuck_out);
 	left_out = (writer != nullptr ? writer->LeftOut() : 0) + (blob_writer != nullptr ? blob_writer->LeftOut() : 0) +
 	           capped.load();
+	if (const auto refused = PipelinesRefused(); refused != 0)
+		PipelineCacheLog("Shader seeds: {} pipelines left out: the driver refused them (the lines above name them)", refused);
+	m_graphics.precompiling           = false;
 	m_graphics.pipeline_binary_writer = nullptr;
 	m_graphics.pipeline_blob_writer   = nullptr;
 	if (!args.timings.empty()) {
@@ -1220,6 +1224,16 @@ bool PipelineCache::Precompile(GraphicContext& graphics, const PrecompileOptions
 	return cache.WarmSeeds(options, left_out);
 }
 
+// (This program translates with every feature of the GPU's: TranslatorFeatureSet() is what a precompile would use.)
+bool PipelineCache::StaticCacheRedoesAll() {
+	namespace Translate = ShaderRecompiler::Frontend;
+	std::error_code error;
+	const auto      exists = [&](const std::filesystem::path& path) { return std::filesystem::exists(path, error); };
+	if (!exists(StaticBinariesPath()) && !exists(StaticBlobsPath()) && !exists(StaticCachePath())) return false;
+	const auto broad = Translate::TranslatorFeatureSet() & Translate::TranslatorFeaturesBroad;
+	return (ReadStaticFeatures() & broad) != broad;
+}
+
 // Both files are saved whole (a temporary file renamed), so their first line tells the GPU and driver.
 bool PipelineCache::StaticCacheCurrent(GraphicContext& graphics, const std::filesystem::path& seeds) {
 	const bool blobs = StaticBlobsMode(graphics);
@@ -1299,6 +1313,17 @@ static void RemoveStaleShards(const std::vector<std::filesystem::path>& stale, c
 	if (!stale.empty()) PipelineCacheLog("Static pipeline {}: removed {} shard file(s) of another driver or GPU", what, stale.size());
 }
 
+// `from` renamed to `to`, replacing it, tried again for 5 s: a file just written is often held for a moment by a
+// scanner (an antivirus, the search indexer), and a precompile's merge of a ~5.5 GB store failed at its end (issue
+// #225). `error` keeps the last try's.
+static void RenameReplacing(const std::filesystem::path& from, const std::filesystem::path& to, std::error_code& error) {
+	for (int attempt = 0;; ++attempt) {
+		std::filesystem::rename(from, to, error);
+		if (!error || attempt == 10) return;
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	}
+}
+
 // The store and its shards' files (or only the shards': prune), into a new store; the shard files are
 // removed once merged. Their data is copied from the files when the new one is written.
 bool PipelineCache::MergeBinaryShards(GraphicContext& graphics, bool prune, bool keep_shards) {
@@ -1332,15 +1357,36 @@ bool PipelineCache::MergeBinaryShards(GraphicContext& graphics, bool prune, bool
 	}
 	auto temporary = path;
 	temporary += ".tmp";
-	const bool saved = writer.Save(temporary, signature);
+	PipelineBinaryWriter::SaveReport report;
+	const bool                       saved = writer.Save(temporary, signature, &report);
 	sources.clear(); // closes the files: the store may be replaced
-	if (saved) std::filesystem::rename(temporary, path, error);
+	if (saved) RenameReplacing(temporary, path, error);
 	const bool merged = saved && !error;
 	if (merged && !keep_shards) {
 		for (const auto& file: files) std::filesystem::remove(file, error);
 	}
 	PipelineCacheLog("Static pipeline binaries: merged {} shards{}, {} pipelines{}", files.size(),
-	                 prune ? " (pruned)" : "", writer.Pipelines(), merged ? "" : ": FAILED");
+	                 prune ? " (pruned)" : "", writer.Pipelines() - report.dropped_pipelines, merged ? "" : ": FAILED");
+	if (report.unreadable_binaries != 0)
+		PipelineCacheLog("Static pipeline binaries: {} binaries could not be read back from their shards' files (damaged on "
+		                 "the disk): their {} pipelines left out, made when first needed",
+		                 report.unreadable_binaries, report.dropped_pipelines);
+	if (!merged) {
+		// Why (issue #225: every shard done, then this): the new store not written (a drive without room for it, or a
+		// FAT32 one, which holds no file of 4 GiB: the store is ~5.5 GiB), or not put in place (the store open in a
+		// running game).
+		std::error_code space_error;
+		const auto      space  = std::filesystem::space(path.parent_path(), space_error);
+		const auto      system = LocalPlatform::FileSystemName(Common::PathToString(path.parent_path()));
+		const auto      what   = saved ? "the new store could not replace the old one: " + error.message()
+		                               : "the new store could not be written: " + report.failure;
+		const auto      fat    = system == "FAT32" || system == "FAT"
+		                             ? ", a " + system + " drive, which holds no file of 4 GiB or more: move the emulator's "
+		                                                 "folder to an NTFS or exFAT drive"
+		                             : std::string();
+		PipelineCacheLog("Static pipeline binaries: {}; {} GiB free on its drive{}", what,
+		                 space_error ? 0 : space.available >> 30u, fat);
+	}
 	return merged;
 }
 
@@ -1379,7 +1425,7 @@ static bool MergeBlobShards(GraphicContext& graphics, bool prune, bool keep_shar
 	temporary += ".tmp";
 	const bool saved = writer.Save(temporary, signature);
 	sources.clear(); // closes the files: the blobs may be replaced
-	if (saved) std::filesystem::rename(temporary, path, error);
+	if (saved) RenameReplacing(temporary, path, error);
 	const bool merged = saved && !error;
 	if (merged && !keep_shards) {
 		for (const auto& file: files) std::filesystem::remove(file, error);

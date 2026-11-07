@@ -91,6 +91,9 @@ public:
 	std::atomic<bool> is_deleted {false};
 	int    stream_score = 0;
 	size_t lru_id       = 0;
+	// The flip of its last use (BufferCache::TouchBuffer: bound, or read through pointers from its pages,
+	// EnsureBdaReadable), not the stale-buffer retirement's pass over it.
+	mutable uint64_t used_tick = 0;
 	// A shader read it through the BDA page table while no buffer held its pages (FaultManager): such reads touch no
 	// LRU entry, so the stale-buffer retirement passes it over (BufferCache::RunGarbageCollector).
 	bool bda_read = false;

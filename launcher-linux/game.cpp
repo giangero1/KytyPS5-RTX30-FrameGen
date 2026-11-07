@@ -114,7 +114,10 @@ StoreState CheckShaderStore(const fs::path& root, const fs::path& precompile_too
         {precompile_tool.string(), "--game", game.path, "--seeds", seeds.string(), "--status"},
         &output, 60000, root);
 	if (code != 0) return StoreState::Unknown;
-	if (output.find("static cache outdated") != std::string::npos) return StoreState::Outdated;
+	// (OutdatedAll: the store lacks a translation that changes nearly every shader, so the precompile redoes it all,
+	// issue #246.)
+	if (output.find("static cache outdated") != std::string::npos)
+		return output.find("next precompile all") != std::string::npos ? StoreState::OutdatedAll : StoreState::Outdated;
 	if (output.find("static cache current") == std::string::npos) return StoreState::None;
 	// (A precompile that stopped before its last merge leaves large shard checkpoints. One older
 	// than its store is an earlier run's - another graphics driver's, which no merge takes - not an

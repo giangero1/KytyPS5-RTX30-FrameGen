@@ -75,6 +75,9 @@ struct Binding {
 
 constexpr int              MOUSE_POLL_INTERVAL_MS = 33;
 constexpr std::string_view MOUSE_SENSITIVITY      = "MouseSensitivity=";
+// The wheel's notches as mouse "buttons" (Mouse:WheelUp, Mouse:WheelDown; past SDL's buttons).
+constexpr uint8_t MOUSE_WHEEL_UP   = 0xf0;
+constexpr uint8_t MOUSE_WHEEL_DOWN = 0xf1;
 
 struct MouseJoystickState {
 	bool     enabled   = false;
@@ -137,6 +140,8 @@ uint8_t MouseButtonFromName(std::string_view name) {
 	    std::pair {std::string_view("Mouse:Right"), uint8_t {SDL_BUTTON_RIGHT}},
 	    std::pair {std::string_view("Mouse:X1"), uint8_t {SDL_BUTTON_X1}},
 	    std::pair {std::string_view("Mouse:X2"), uint8_t {SDL_BUTTON_X2}},
+	    std::pair {std::string_view("Mouse:WheelUp"), MOUSE_WHEEL_UP},
+	    std::pair {std::string_view("Mouse:WheelDown"), MOUSE_WHEEL_DOWN},
 	};
 
 	const auto button = std::find_if(buttons.begin(), buttons.end(),
@@ -144,8 +149,9 @@ uint8_t MouseButtonFromName(std::string_view name) {
 	return button != buttons.end() ? button->second : 0;
 }
 
+// A control takes one key and one mouse input (Up=Up with Up=Mouse:WheelUp: both), each input one control.
 bool Conflicts(const Binding& first, const Binding& second) {
-	return first.control == second.control ||
+	return (first.control == second.control && (first.key != SDLK_UNKNOWN) == (second.key != SDLK_UNKNOWN)) ||
 	       (first.key != SDLK_UNKNOWN && first.key == second.key) ||
 	       (first.mouse_button != 0 && first.mouse_button == second.mouse_button);
 }
@@ -174,10 +180,9 @@ public:
 				}
 			}
 
-			// The emulator's own keys: F7 the mouse camera, F8 its overlay, F9 a debug snapshot, F11 full screen.
-			// (Space pauses unless a mapping takes it, the Pause key then; the system's dialogs see Esc first.)
-			const bool reserved = binding.key == SDLK_F7 || binding.key == SDLK_F8 || binding.key == SDLK_F9 ||
-			                      binding.key == SDLK_F11;
+			// The emulator's own keys: F7 the mouse camera, F8 its overlay, F11 full screen. (Space pauses unless a
+			// mapping takes it, the Pause key then; the system's dialogs see Esc first.)
+			const bool reserved = binding.key == SDLK_F7 || binding.key == SDLK_F8 || binding.key == SDLK_F11;
 			if (binding.control == INVALID_CONTROL || reserved ||
 			    (binding.key == SDLK_UNKNOWN && binding.mouse_button == 0)) {
 				// (Skipped, not the end of the start-up: the other mappings still work.)
@@ -221,7 +226,7 @@ private:
 		m_bindings[m_size++] = binding;
 	}
 
-	std::array<Binding, CONTROL_INFO.size()> m_bindings {};
+	std::array<Binding, CONTROL_INFO.size() * 2> m_bindings {};
 	std::size_t                              m_size              = 0;
 	float                                    m_mouse_sensitivity = 1.0f;
 };
@@ -284,10 +289,16 @@ void SetStickAxis(Controller::Axis axis, bool negative, bool positive) {
 	Controller::SetAxis(Controller::HOST_INPUT_CONTROLLER_ID, axis, value);
 }
 
-void SetControl(std::size_t control, bool down) {
+// Who holds a control: its key, its mouse input (a button or a wheel notch). It is up once neither does.
+constexpr uint8_t FROM_KEY = 1, FROM_MOUSE = 2;
+
+void SetControl(std::size_t control, bool down, uint8_t source) {
 	if (control == INVALID_CONTROL) {
 		return;
 	}
+	static std::array<uint8_t, CONTROL_INFO.size()> held {};
+	held[control] = static_cast<uint8_t>(down ? held[control] | source : held[control] & ~source);
+	down          = held[control] != 0;
 
 	const auto& info = CONTROL_INFO[control];
 	if (info.button == Controller::PAD_BUTTON_TOUCH_PAD) {
@@ -390,11 +401,26 @@ void HostInputInit() {
 	GetInputMap();
 }
 
+// The Steam Deck build leaves the keyboard's default pad keys out (KYTY_DECK_KEYBOARD=1 keeps them): started outside
+// Steam, Steam's desktop layout sends keys for the Deck's sticks and buttons on top of the controller itself (the arrow
+// keys pressed the D-pad: the equipment changed while walking). A keymap's keys still count.
+static bool DefaultKeysUsed() {
+#if defined(KYTY_STEAM_DECK)
+	static const bool used = [] {
+		const char* value = std::getenv("KYTY_DECK_KEYBOARD");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	return used;
+#else
+	return true;
+#endif
+}
+
 void HostInputKey(int key_code, bool down) {
 	const auto& map = GetInputMap();
 	if (map.Custom()) {
-		SetControl(map.FindKey(key_code), down);
-	} else {
+		SetControl(map.FindKey(key_code), down, FROM_KEY);
+	} else if (DefaultKeysUsed()) {
 		DefaultKeyboardInput(key_code, down);
 	}
 }
@@ -404,11 +430,62 @@ bool HostInputMapsKey(int key_code) {
 	return map.Custom() && map.FindKey(key_code) != INVALID_CONTROL;
 }
 
+bool HostInputDefaultKeysUsed() {
+	return DefaultKeysUsed();
+}
+
 void HostInputMouseButton(uint8_t mouse_button, bool down) {
 	const auto& map = GetInputMap();
 	if (map.Custom() && mouse_button != 0) {
-		SetControl(map.FindMouseButton(mouse_button), down);
+		SetControl(map.FindMouseButton(mouse_button), down, FROM_MOUSE);
 	}
+}
+
+// The control a wheel notch presses (Mouse:WheelUp / Mouse:WheelDown): the wheel has no release, so each notch is a
+// press of WHEEL_PRESS_MS, then WHEEL_GAP_MS up before the next (the game reads its pad once a frame: a shorter press
+// could fall between two reads, and back to back two notches would be one press).
+constexpr uint64_t WHEEL_PRESS_MS = 80, WHEEL_GAP_MS = 50;
+constexpr int      WHEEL_QUEUED   = 3; // notches kept at most
+
+struct WheelPulse {
+	std::size_t control = INVALID_CONTROL;
+	int         pending = 0;     // notches not pressed yet
+	bool        down    = false; // pressed now
+	uint64_t    until   = 0;     // the next change
+};
+static WheelPulse g_wheel;
+
+// The wheel's control pressed or released when due; the ms until its next change (-1: none).
+static int UpdateWheel(uint64_t now) {
+	for (;;) {
+		if (g_wheel.control == INVALID_CONTROL) return -1;
+		if (now < g_wheel.until) return static_cast<int>(g_wheel.until - now);
+		if (g_wheel.down) {
+			SetControl(g_wheel.control, false, FROM_MOUSE);
+			g_wheel.down  = false;
+			g_wheel.until = now + WHEEL_GAP_MS;
+		} else if (g_wheel.pending > 0) {
+			SetControl(g_wheel.control, true, FROM_MOUSE);
+			g_wheel.pending--;
+			g_wheel.down  = true;
+			g_wheel.until = now + WHEEL_PRESS_MS;
+		} else {
+			g_wheel = {};
+		}
+	}
+}
+
+void HostInputMouseWheel(int notches) {
+	const auto& map = GetInputMap();
+	if (!map.Custom() || notches == 0) return;
+	const auto control = map.FindMouseButton(notches > 0 ? MOUSE_WHEEL_UP : MOUSE_WHEEL_DOWN);
+	if (control == INVALID_CONTROL) return;
+	if (g_wheel.control != control) {
+		if (g_wheel.down) SetControl(g_wheel.control, false, FROM_MOUSE);
+		g_wheel = {control, 0, false, 0};
+	}
+	g_wheel.pending = std::min(WHEEL_QUEUED, g_wheel.pending + std::abs(notches));
+	(void)UpdateWheel(SDL_GetTicks64());
 }
 
 void HostInputToggleMouseToJoystick() {
@@ -459,6 +536,20 @@ static bool        g_cursor_hidden = false;
 static bool        g_cursor_known  = false;
 static int         g_cursor_x = 0, g_cursor_y = 0; // where the mouse last counted as moved
 
+// KYTY_HIDE_CURSOR=1: the cursor never shows over the window; 0: as above. The Steam Deck build's default is 1: Steam
+// Input's own mouse (the gyro, the trackpads) moved it into view while the right stick turned the camera.
+static bool CursorAlwaysHidden() {
+	static const bool hidden = [] {
+		const char* value = std::getenv("KYTY_HIDE_CURSOR");
+#if defined(KYTY_STEAM_DECK)
+		return value == nullptr || std::string_view(value) != "0";
+#else
+		return value != nullptr && std::string_view(value) == "1";
+#endif
+	}();
+	return hidden;
+}
+
 static void NoteCursorEvent(const SDL_Event& event) {
 	if (event.type != SDL_MOUSEMOTION) return;
 	// (Motion of a few pixels is not counted: a mouse resting on the desk, or its software, can report tiny moves on its
@@ -469,22 +560,27 @@ static void NoteCursorEvent(const SDL_Event& event) {
 	g_cursor_x     = event.motion.x;
 	g_cursor_y     = event.motion.y;
 	g_cursor_moved = SDL_GetTicks64();
-	if (g_cursor_hidden) {
+	if (g_cursor_hidden && !CursorAlwaysHidden()) {
 		SDL_ShowCursor(SDL_ENABLE);
 		g_cursor_hidden = false;
 	}
 }
 
 bool HostInputWaitEvent(SDL_Event* event) {
+	// (A wheel notch's press or release due within the wait: the wait ends then.)
+	const int  wheel_ms = UpdateWheel(SDL_GetTicks64());
+	const auto capped   = [wheel_ms](int timeout_ms) {
+		return wheel_ms >= 0 ? std::min(timeout_ms, wheel_ms) : timeout_ms;
+	};
 	if (!g_mouse.enabled || SDL_GetKeyboardFocus() == nullptr) {
 		CenterMouseStick();
 		const uint64_t now = SDL_GetTicks64();
 		if (g_cursor_moved == 0) g_cursor_moved = now;
-		if (!g_cursor_hidden && now >= g_cursor_moved + CURSOR_HIDE_MS) {
+		if (!g_cursor_hidden && (CursorAlwaysHidden() || now >= g_cursor_moved + CURSOR_HIDE_MS)) {
 			SDL_ShowCursor(SDL_DISABLE);
 			g_cursor_hidden = true;
 		}
-		if (g_cursor_hidden) {
+		if (g_cursor_hidden && wheel_ms < 0) {
 			if (SDL_WaitEvent(event) == 0) {
 				EXIT("%s\n", SDL_GetError());
 			}
@@ -492,7 +588,8 @@ bool HostInputWaitEvent(SDL_Event* event) {
 			return true;
 		}
 		SDL_ClearError();
-		if (SDL_WaitEventTimeout(event, static_cast<int>(g_cursor_moved + CURSOR_HIDE_MS - now)) != 0) {
+		const int cursor_ms = g_cursor_hidden ? wheel_ms : static_cast<int>(g_cursor_moved + CURSOR_HIDE_MS - now);
+		if (SDL_WaitEventTimeout(event, capped(cursor_ms)) != 0) {
 			NoteCursorEvent(*event);
 			return true;
 		}
@@ -502,7 +599,7 @@ bool HostInputWaitEvent(SDL_Event* event) {
 		return false;
 	}
 
-	const int timeout_ms = PollMouse(SDL_GetTicks64());
+	const int timeout_ms = capped(PollMouse(SDL_GetTicks64()));
 	SDL_ClearError();
 	if (SDL_WaitEventTimeout(event, timeout_ms) != 0) {
 		return true;

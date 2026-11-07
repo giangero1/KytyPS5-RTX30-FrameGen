@@ -70,6 +70,10 @@ void WriteWatchUnmapped(uint64_t address, uint64_t size) {
 	SysVirtualWriteWatchUnmapped(address, size);
 }
 
+void ZapNoAccess(bool on) {
+	SysVirtualZapNoAccess(on);
+}
+
 } // namespace VirtualMemory
 
 } // namespace Common

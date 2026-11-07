@@ -128,180 +128,141 @@ Full guide and screenshots: https://github.com/giangero1/KytyPS5-RTX30-FrameGen/
 
 ## New in this build
 
-Your precompiled shaders stay valid: for as long as you keep them, the shaders are translated as in v20261023. Your
-next precompile (a new install, or after a graphics driver update) brings lighter shaders (first item).
+Your precompiled shaders stay valid: the shader translation is the same as in v20261105.
 
-- **Lighter shaders** (with your next precompile): a PS5 shader's register writes are masked lane by lane, and the
-  emulator kept the old value of every lane outside the mask with an extra instruction: 20-32% of all instructions in
-  the heaviest shaders. Where nothing reads those lanes, that instruction is now left out. The game's translated
-  shaders are 8.5% smaller, the heaviest compute shaders run 4-14% fewer instructions on NVIDIA (one of them 128
-  registers instead of 168), and an RTX 5090 at 4K does 3% less GPU work a frame at Boletaria: up to 3% more fps where
-  the graphics card is the limit. Shaders precompiled by earlier versions stay in use and up to date, so no precompile
-  is offered for this alone. `run.cmd -Set KYTY_EXEC_SELECTS=0` turns it off (precompile again after that).
-- **VRR displays** (#221): on a G-SYNC or FreeSync display, put `-Set KYTY_VRR=1` in the launcher's Advanced page,
-  Command-line options (or `run.cmd -Set KYTY_VRR=1`). Each frame is then shown as soon as it is done, as a PS5 does on
-  a VRR display, instead of at the next tick of the emulator's 60 Hz clock. Below 60 fps the frames stayed on screen
-  for 16.7 or 33.3 ms by turns while the game moved by its real frame time: uneven motion even on a VRR display. At
-  1-1 with the graphics card as the limit, the difference between one frame's time on screen and the next went from
-  8.3 ms to 0.9 ms. Off by default; the log's `Flips:` line every 30 s shows how even the frames were.
-- **Freezes after menus at 120 fps** (#221): with the 120 fps option and the card's video memory full, a menu kept open
-  for 5 seconds let the textures of the world be dropped, and they were made again as it closed: frames of 1-5 s
-  (about 1.3 GB). The texture collector now counts its ages in seconds (10 and 20 s) at any frame rate.
-- **No anti-aliasing** (#220): the launcher's Upscaler list has "Off (no anti-aliasing)": Demon's Souls without its
-  TAA and the camera jitter TAA needs, a sharper picture with jagged edges (`run.cmd -Antialiasing off`).
-- **Video memory for frame generation and upscaling** (#215): DLSS frame generation, Linux's built-in FSR 3 frame
-  generation, and DLSS or FSR 3 upscaling now get room in the card's video memory budget (1.5 GB for frame
-  generation, 0.5 GB more for upscaling), as FSR frame generation on Windows already did. An RTX 5080 (16 GB) with DLSS
-  and DLSS frame generation at 3440x1440 had counted as a card with plenty of memory and ran out of it late in a
-  session. `KYTY_FSR_VRAM_RESERVE_MB` sets the frame generation share; the log says what was set aside.
-- **Less RAM with Texture reduce**: Texture reduce (on by default for cards under 12 GB) keeps the largest level of
-  big textures out of video memory; now the game no longer loads those levels either. At Boletaria the textures it
-  streams went from 2.7 to 1.8 GB, about 1 GB less RAM, with the same picture.
-- **Memory back to Windows sooner on 16 GB PCs** (#174): after a trip between worlds, the memory the game freed goes
-  back to Windows twice as fast (2.3 GB instead of 1.1 GB on our test route). On a PC that pages hard, giving it back
-  no longer holds the game up for up to a second at a time while Windows is slow.
-- **Read-back pages on 16 GB PCs** (#159, #174): below 2 GB of free RAM, v20261026 protected the pages read back from
-  the graphics card with guard pages (the blue screen fix). Guard pages let another thread read an old page now and
-  then (a texture flickering for a moment), and 16 GB PCs sit around 2 GB free most of a session. They now take over
-  only below 1.5 GB (every reported blue screen came with less than that) and give way again at 2 GB (was 3 GB).
-- **Fewer readbacks on PCs with more than 20 GB of RAM** (PR #219, @DevList1454): when the game reads memory the
-  graphics card wrote, neighbouring buffers now come back in the same copy. At Boletaria 1-3 the readbacks went from
-  about 51 to 19 a frame, and the frame rate from 50.2 to 52.2 fps in @DevList1454's measurements.
-- **Back to Big Picture** (#217): started from Steam's Big Picture, quitting the game hands the focus back to Big
-  Picture, which takes the controller again without a click.
-- **Steam Deck** (Linux package): the Deck's GPU now runs the game's 64-wide compute shaders natively (23% less GPU
-  time in them; 20.6 to 22.1 fps at 1-1 with the GPU held at 1600 MHz), and the emulator's own GPU work for its memory
-  tracking is lighter on every graphics card (7.2 to 0.9 ms a frame on the Deck). Not 30 fps yet.
-- **Thanks** to @DevList1454 for PR #219, and to @crni20zd, @Psychowarden, @javsp, @ft1704, @Myoko and @brokeneggg for
-  their reports and tests.
+- **The game's own stereo sound** (#294, credit @robbely): music and ambience no longer sound nearly mono, and speech is
+  clearer. The emulator used to fold the game's 3D sound down to its first order, which made left and right almost the
+  same. Now the game mixes for stereo itself. Left and right differ far more (correlation at the Nexus 0.74 -> 0.27, in
+  Latria 0.93 -> 0.42), and speech stands out about 7 dB more from the ambience. `-Set
+  KYTY_GAME_CONVARS=sound_enableAmbisonics=true` brings back the old sound.
+- **F11 with AMD FSR frame generation no longer loses the graphics device** (#174, credit @ft1704): when AMD's runtime
+  made or destroyed its swapchain, or turned frame generation on or off, it waited for the whole GPU while the emulator
+  kept submitting work, which Vulkan does not allow. The emulator now holds its queues during that wait. With AMD's
+  runtime doing both the upscaling and the frame generation, F11 lost the device about 1 time in 25 on our RTX 5090 (AMD's
+  FSR 3.1 there); now 135 presses went through without one, and 30 with DLSS and DLSS frame generation. `-Set
+  KYTY_FSR_RUNTIME=0` is no longer needed for this. FSR 4 on a Radeon is untested, so please tell us if it still happens.
+- **A draw that could run without its index buffer**: in rare cases a draw after a non-indexed draw in a new command
+  buffer skipped binding its indices, which is undefined on any GPU. It went unnoticed since v20261007; Vulkan's
+  validation layer found it on a tour of the worlds.
+- **Optimized again after the merged pull requests**: the profile-guided optimization was trained again. 1-1 on our RTX
+  5090: 6% more frames at the 120 Hz cap (render thread 14.7 -> 13.7 ms a frame); Latria about the same.
+- **AMD FSR frame generation set-up corrected**: Vulkan's validation layer found four more mistakes in how the emulator
+  prepared FSR's images and its HUD pass (image usage, a depth barrier, an access mask, a shader feature that was not
+  enabled). The picture is the same here; other drivers may be less forgiving.
+- **Linux: no more crash at boot with NVIDIA 620.70.06** (PR #308, credit @ponhei9502): the driver's pipeline key call
+  overwrote registers it should keep. `KYTY_PIPELINE_KEY_THUNK=0` turns the workaround off.
+- **When a driver refuses a shader** (#305, credit @FKF-GR): a precompile leaves that pipeline out, goes on and says how
+  many it left out, instead of splitting into hundreds of retries. The log names the driver's answer and the shaders,
+  and says when a GPU has no fragment shader barycentrics, which nearly all of the game's pixel shaders need. PR #281's
+  empty fragment shader is now NVIDIA only, the one place it was measured to help (`-Set KYTY_EMPTY_FS=1` for any GPU).
+- **Fixes from pull requests** (credit @CarpetHead, @ponhei9502): the GPU's fault buffer is read and cleared word by word
+  in one step (PR #297), guarded writes reach the scout thread as such (PR #298), the lane-local proof refuses a DPP row
+  mask that treats the wave's halves apart (PR #299), and the write guard works with the Linux userfaultfd write watch
+  (PR #309, `KYTY_WRITE_GUARD_UFFD=1`).
+- **For testers, off by default** (credit @CarpetHead, @ponhei9502): `KYTY_PM4_REGFILE` (PR #285), `KYTY_UPLOAD_LANES`
+  (PR #287), `KYTY_EAGER_FEEDBACK`, `KYTY_FEEDBACK_BATCH`, `KYTY_TABLE_SERIALS`, `KYTY_TABLE_MEMO` (PRs #300-#303) and
+  `KYTY_LANE_LOCAL_WIDE` (PR #304). They made no difference to the frame rate on our PCs, or moved it both ways.
+- **Linux package README**: AMD's FSR SDK DLLs are Windows files, so FSR 4 is not available on Linux (#307).
+- **Thanks** to @CarpetHead and @ponhei9502 for their pull requests, and to @robbely, @ft1704, @FKF-GR and
+  @blubberbozz-wq for their reports and tests.
 
-## New in v20261026
+## New in v20261105
 
-Your precompiled shaders stay valid: the shaders are the same as in v20261023. The precompile only adds the pipelines of
-the new shader hints (#212).
+Your precompiled shaders stay valid: the shader translation is the same as in v20261103.
 
-- **Crash on version 1.005** (#185, #204): on some PCs Demon's Souls 1.005 (European and US editions) crashed within
-  minutes of play, or already at start-up. The game's resource loader could take a load request that another thread
-  was withdrawing at that moment. The emulator now makes the loader wait until the withdrawal is finished; the log line
-  `Demon's Souls loader guard: ... waited out` shows each time it did.
-- **Blue screens on 16 GB PCs** (#91): since v20261024, the pages the game reads back from the graphics card were
-  protected in a way that could crash Windows (MEMORY_MANAGEMENT) once the PC ran low on RAM. Whenever less than 2 GB
-  of RAM is free they now get guard pages instead, which held up under heavy memory pressure in our tests.
-- **Shader preparation kept on disk** (#200): the background shader preparation and the start-up warmup now keep their
-  translations in `_PipelineCache\static\<title>_<version>.prefetch` (1-2 GB). The first start after this update
-  translates as before; later starts read them in about a second. On our desktop the start-up warmup went from 22 s to
-  1 s, and PCs with few cores no longer translate for minutes beside the game. `run.cmd -Set KYTY_PREFETCH_CACHE=0`
-  turns it off. After a patch by @Psychowarden.
-- **Lit ground and water flickering white** (#196): buffer copies made on a background thread could take data the game
-  had already replaced for its next frame. The copies now finish before the game can see that the graphics card is
-  done with them. Tracked down with @Psychowarden's tests.
-- **Frame generation at camera cuts** (#174): when a dialogue or a cutscene shot ended, the frame generated in between
-  blended the two camera views, both half-transparent. With an upscaler chosen (DLSS or FSR), frame generation now
-  starts over at the game's camera cuts.
-- **The 1440p output in the 4K layout** (#187, #202): at the 1440p output the interface is laid out as at 4K, at the
-  output's size, instead of the 1080p layout scaled up: sharp text, and the character in the character creator and the
-  equipment menu in place. `run.cmd -Set KYTY_OUTPUT_LAYOUT=hd` keeps the old way.
-- **Wide screens at 1440p** (#199, #198): a 21:9 or wider aspect with the 1440p output now makes the picture at that
-  height (3416x1440 at 21:9) instead of 16:9 (77 -> 90 fps on an RTX 5080 at 43:18), and movies are no longer squeezed
-  with a wide output. After @Psychowarden's patches.
-- **Audio output** (#207): the launcher's Game page has "Audio output": TV, headphones, AV amplifier or soundbar. The
-  game is told your choice and mixes its sound for it, as on a PS5 (`run.cmd -Set KYTY_AUDIO_OUTPUT=headphones`). Found
-  by @Psychowarden.
-- **Quitting with a controller** (#203): hold the PS button (an Xbox pad's Guide button) for two seconds to quit, as
-  Close Game does on a PS5. Where Steam or the Game Bar takes that button, `run.cmd -Set KYTY_PAD_QUIT=both` also quits
-  on Create and Options (an Xbox pad's View and Menu) held together. An Xbox pad's View button now presses the touchpad
-  (#197).
-- **More shader hints** (#212): a playthrough to both endings added 237 shaders and 268 pipelines the release's hints
-  lacked: fewer first-time stutters late in the game. Thanks to @Vorshim92.
-- **Precompile** (#213): a shard that stops working no longer holds up the whole precompile. After 20 minutes without
-  work it is started again, twice at most, and then left out; the game compiles its pipelines when it first needs them.
-- **Less memory on 16 GB PCs**: memory the game's engine has freed goes back to Windows four times faster: 0.8 GB less
-  in a long session.
-- **New images start cleared** (PR #193, @intellq): as on the PS5, a new image is zero before its first use. With FSR
-  at 1080p and the 43:18 squeeze, its first frame read undefined contents and kept a green or red picture for the whole
-  session, mostly on Linux with AMD cards.
-- **Linux**: AMD graphics cards (RADV) now get their transfer queue, so readbacks of finished GPU work no longer wait
-  behind the graphics queue: +19% to +27% while walking on an RX 9060 XT and RX 9070 XT. Found by @the2ndday, tested by
-  @dreamerk24m and @yazuc. `-Set KYTY_RADV_TRANSFER_QUEUE=0` turns it off; owners of older AMD cards, please report any
-  GPU hang. Also from @the2ndday: an experimental `KYTY_UFFD_WP=1` (the GPU trackers' write watch by userfaultfd,
-  Linux 6.4+; PR #206), and the bench helpers on Linux (PR #211).
-- **Thanks** to @Psychowarden, @the2ndday, @Vorshim92 and @intellq for their patches and pull requests, and to
-  @danielmazurek79, @Theoryedz, @ededaelita1-afk, @ft1704, @dreamerk24m, @Fantomas3228, @yazuc, @marcelofis,
-  @SanyaSan and @kvothe3323 for their reports and tests.
+- **Faster on most PCs: a scout thread** (PR #280, credit @DevList1454 and @opcod3; fixes in PR #288 by @ponhei9502):
+  a helper thread reads the game's graphics commands ahead of the render thread and prepares the tables its draws read,
+  which the render thread checks and uses. At 1-1 on our RTX 5090: about 5% more frames (render thread 14.1 -> 13.3 ms a
+  frame); the Boletarian Palace's Inner Ward on an RX 9070 XT +7-9% (@DevList1454); Linux with an RX 7900 XTX +11%
+  (@opcod3). It takes about one more processor core, and on PCs without idle cores it stands down by itself. Off in the
+  Steam Deck build until it is measured there. `-Set KYTY_SCOUT=0` turns it off.
+- **Optimized again for the code as it runs now** (#283, credit @DevList1454): the profile-guided optimization of the
+  build was trained again, with the scout. Latria on our RTX 5090: 5% more frames (render thread 12.6 -> 12.0 ms a
+  frame), 1-1 the same; @DevList1454 measured +5-6% at the Inner Ward on a Ryzen 7 9700X.
+- **NVIDIA: no GPU drain between the game's stencil passes** (PR #281, credit @CarpetHead): pipelines without a pixel
+  shader get an empty one, so the GPU no longer drains between such draws; 0.57 ms less GPU time a frame at the stone
+  arch. `-Set KYTY_EMPTY_FS=0` turns it off.
+- **Fewer stutters on 8 GB graphics cards whose memory budget drops in play** (#276): below 12 GB, the texture
+  collector now follows the budget when the driver lowers it during play (an 8 GB Radeon RX 6650 XT went from 7378 to
+  about 5570 MiB in the world) instead of keeping the start-up figure.
+- **The launcher no longer says "Shaders not precompiled yet" after a precompile** (#290): with graphics drivers
+  without pipeline binaries the precompile keeps the shaders in a `.blobs` file, which the Windows launcher did not
+  count. The game used them all along.
+- **Keyboard and mouse prompts** (PR #277, credit @miroslavdanutalexandru-alt): the launcher's Game page can show the
+  game's button prompts as keyboard keys and mouse buttons (English), matching the default keyboard controls, and
+  "Keyboard controls" changes the keys and the mouse sensitivity. Off by default; it needs the extracted 1.07 game
+  folder (not a `.zar`) and keeps a backup of the game files it changes.
+- **For testers, off by default**: `-Set KYTY_WRITE_GUARD=1` (PR #282, credit @CarpetHead) lets the render thread's
+  writes to game memory go ahead of older uploads (+1-2% where the game reads back a lot). It changes page protections
+  often, the kind of churn behind the MEMORY_MANAGEMENT blue screens on PCs short of RAM, so use it only with plenty of
+  RAM (on Linux it stays off with `KYTY_UFFD_WP`, #289). `-Set KYTY_TEXTURE_HOST_MODE=pd` (PR #284, credit
+  @ponhei9502): on cards under 12 GB, textures past half the budget prefer video memory (it helps on Linux; NVIDIA's
+  Windows driver keeps them there already).
+- **FSR 4 needs a current AMD driver** (#271): with Adrenalin 26.9.2 an RX 9070 showed a black 3D picture with FSR 4
+  upscaling and black generated frames with FSR 4 frame generation; a driver update fixed both.
+- **For reports**: the log names the graphics driver and its version next to the GPU in use.
+- **Thanks** to @DevList1454, @opcod3, @CarpetHead, @ponhei9502 and @miroslavdanutalexandru-alt for their pull requests,
+  reviews and measurements, and to @STALKERSK, @yura1234 and @robbely for their reports and tests.
 
 ## 本版本的变化
 
-已有的预编译着色器继续有效：只要保留它们，着色器就按 v20261023 的方式翻译。下次预编译（新安装，或更新显卡驱动之后）会得到
-更轻量的着色器（第一项）。
+已有的预编译着色器继续有效：着色器的翻译与 v20261105 相同。
 
-- **更轻量的着色器**（下次预编译后生效）：PS5 着色器写寄存器时按通道屏蔽，模拟器以前用一条额外指令为屏蔽之外的每个通道保留
-  旧值，占最重着色器全部指令的 20-32%。现在只要没有地方读取这些通道，就省掉这条指令。游戏翻译后的着色器小了 8.5%，最重的
-  计算着色器在 NVIDIA 上少执行 4-14% 的指令（其中一个寄存器从 168 降到 128），RTX 5090 在 4K、波雷塔利亚每帧的 GPU 工作少
-  3%：在显卡是瓶颈的场合，帧率最多高约 3%。旧版本预编译的着色器继续使用、仍算最新，不会因为这一项提示重新预编译。
-  `run.cmd -Set KYTY_EXEC_SELECTS=0` 可以关闭（关闭后请重新预编译）。
-- **VRR 显示器**（#221）：在 G-SYNC 或 FreeSync 显示器上，把 `-Set KYTY_VRR=1` 填进启动器「高级」页的「命令行参数」（或
-  `run.cmd -Set KYTY_VRR=1`）。每一帧画完就立即显示，和 PS5 在 VRR 显示器上一样，而不是等模拟器 60 Hz 时钟的下一拍。低于
-  60 fps 时，以前每帧轮流停留 16.7 或 33.3 ms，而游戏按实际帧时间推进画面：即使在 VRR 显示器上，动作也不均匀。在 1-1、显卡
-  为瓶颈时，相邻两帧显示时长之差从 8.3 ms 降到 0.9 ms。默认关闭；日志每 30 秒的 `Flips:` 行会显示帧是否均匀。
-- **120 fps 下关闭菜单后的卡顿**（#221）：开启 120 fps 选项且显存已满时，菜单打开 5 秒就会让场景的纹理被回收，关闭菜单时
-  再重新生成：出现 1-5 秒的帧（约 1.3 GB）。纹理回收现在在任何帧率下都按秒计算（10 秒和 20 秒）。
-- **关闭抗锯齿**（#220）：启动器「超分辨率」列表新增「关闭（无抗锯齿）」：去掉《恶魔之魂》自带的 TAA 及其所需的镜头抖动，
-  画面更锐利，但边缘有锯齿（`run.cmd -Antialiasing off`）。
-- **为插帧和超分留出显存**（#215）：DLSS 插帧、Linux 内置的 FSR 3 插帧，以及 DLSS 或 FSR 3 超分，现在都在显卡的显存预算里
-  留有空间（插帧 1.5 GB，超分再加 0.5 GB），与 Windows 上的 FSR 插帧原有的做法相同。一张 RTX 5080（16 GB）在 3440x1440 下
-  开 DLSS 和 DLSS 插帧时，以前被当作显存充裕的显卡，游玩后期显存耗尽。`KYTY_FSR_VRAM_RESERVE_MB` 可以设定插帧所留的大小；
-  日志会写出预留了多少。
-- **纹理缩减时内存更少**：纹理缩减（显存小于 12 GB 的显卡默认开启）不把大纹理的最大一级放进显存；现在游戏本身也不再加载
-  这些级别。在波雷塔利亚，游戏加载的纹理从 2.7 GB 降到 1.8 GB，内存少用约 1 GB，画面不变。
-- **16 GB 电脑更快归还内存**（#174）：在世界之间往返后，游戏释放的内存归还给 Windows 的速度快了一倍（我们的测试路线上
-  2.3 GB，原来 1.1 GB）。在频繁换页的电脑上，归还内存也不再在 Windows 变慢时让游戏每次停住最多一秒。
-- **16 GB 电脑上的读回页**（#159、#174）：v20261026 在可用内存少于 2 GB 时，用保护页保护从显卡读回的内存页（蓝屏修复）。
-  保护页偶尔会让另一个线程读到旧的页（某个纹理闪一下），而 16 GB 电脑大部分时间可用内存都在 2 GB 左右。现在低于 1.5 GB
-  才改用保护页（所有报告的蓝屏都发生在这个值以下），回到 2 GB 后恢复（原为 3 GB）。
-- **内存超过 20 GB 的电脑读回更少**（PR #219，@DevList1454）：游戏读取显卡写入的内存时，相邻的缓冲区现在在同一次复制中
-  一起读回。在波雷塔利亚 1-3，每帧读回从约 51 次降到 19 次；在 @DevList1454 的测量中，帧率从 50.2 提高到 52.2 fps。
-- **回到 Big Picture**（#217）：从 Steam 的 Big Picture 启动时，退出游戏后焦点会交还给 Big Picture，无需点击即可继续用
-  手柄操作。
-- **Steam Deck**（Linux 版）：Deck 的 GPU 现在原生运行游戏的 64 宽计算着色器（这些着色器的 GPU 时间少 23%；GPU 固定
-  1600 MHz 时，1-1 从 20.6 提升到 22.1 fps）；模拟器用于内存跟踪的 GPU 工作在所有显卡上都更轻（Deck 上每帧 7.2 降到
-  0.9 ms）。离 30 fps 还有距离。
-- **感谢** @DevList1454 的 PR #219，以及 @crni20zd、@Psychowarden、@javsp、@ft1704、@Myoko 和 @brokeneggg 的反馈与测试。
+- **改用游戏自己的立体声**（#294，感谢 @robbely）：音乐和环境音不再接近单声道，人声也更清楚。模拟器之前把游戏的 3D 声音只解到
+  一阶，左右声道几乎一样；现在由游戏自己混成立体声。左右声道的差别大了很多（相关度：Nexus 0.74 -> 0.27，Latria 0.93 -> 0.42），
+  人声比环境音突出约 7 dB。`-Set KYTY_GAME_CONVARS=sound_enableAmbisonics=true` 可恢复原来的声音。
+- **AMD FSR 插帧时按 F11 不再丢失显卡设备**（#174，感谢 @ft1704）：AMD 运行库创建或销毁交换链、开关插帧时，会等待整个 GPU，
+  而模拟器还在继续提交工作，这是 Vulkan 不允许的。现在等待期间模拟器会让出所有队列。超分和插帧都由 AMD 运行库完成时，
+  我们的 RTX 5090 上（那里是 AMD 的 FSR 3.1）大约每 25 次 F11 丢失一次设备；现在按了 135 次都没有发生，DLSS 加 DLSS 插帧也按了
+  30 次没有问题。不再需要为此加 `-Set KYTY_FSR_RUNTIME=0`。Radeon 上的 FSR 4 尚未测试，如果还会发生请告诉我们。
+- **绘制可能缺少索引缓冲**：少数情况下，新命令缓冲里紧跟在非索引绘制之后的绘制会跳过索引绑定，这在任何 GPU 上都是未定义行为。
+  这个问题从 v20261007 起就存在，这次由 Vulkan 的校验层在各世界巡游时发现。
+- **合并 PR 后重新做了编译优化**：程序的 profile 引导优化（PGO）重新训练。我们的 RTX 5090 在 1-1、120 Hz 上限下多 6% 帧数
+  （渲染线程每帧 14.7 -> 13.7 ms），Latria 基本持平。
+- **修正 AMD FSR 插帧的设置**：Vulkan 校验层还发现模拟器准备 FSR 图像和 HUD 处理时的四处错误（图像用途、一处深度屏障、一处访问掩码、
+  一项没有启用的着色器功能）。我们这里画面没有变化，其他驱动可能没这么宽容。
+- **Linux：NVIDIA 620.70.06 不再启动时崩溃**（PR #308，感谢 @ponhei9502）：驱动的管线密钥调用会改写本应保留的寄存器。
+  `KYTY_PIPELINE_KEY_THUNK=0` 可关闭这项规避。
+- **驱动拒绝某个着色器时**（#305，感谢 @FKF-GR）：预编译会跳过这条管线继续进行，并报告跳过了多少条，不再拆分成几百次重试。
+  日志会写出驱动的返回结果和对应的着色器；如果显卡不支持 fragment shader barycentrics（游戏几乎所有像素着色器都需要），日志也会写明。
+  PR #281 的空像素着色器现在只用于 NVIDIA，这是唯一测到收益的地方（`-Set KYTY_EMPTY_FS=1` 可用于任何显卡）。
+- **来自 PR 的修复**（感谢 @CarpetHead、@ponhei9502）：GPU 故障缓冲的每个字一步完成读取和清除（PR #297）；受保护的写入如实告知
+  scout 线程（PR #298）；lane-local 证明拒绝把 wave 两半分开处理的 DPP 行掩码（PR #299）；写保护可与 Linux 的 userfaultfd 写监视
+  一起使用（PR #309，`KYTY_WRITE_GUARD_UFFD=1`）。
+- **供测试用，默认关闭**（感谢 @CarpetHead、@ponhei9502）：`KYTY_PM4_REGFILE`（PR #285）、`KYTY_UPLOAD_LANES`（PR #287）、
+  `KYTY_EAGER_FEEDBACK`、`KYTY_FEEDBACK_BATCH`、`KYTY_TABLE_SERIALS`、`KYTY_TABLE_MEMO`（PR #300-#303）和
+  `KYTY_LANE_LOCAL_WIDE`（PR #304）。它们在我们的电脑上对帧率没有影响，或者有升有降。
+- **Linux 包的 README**：AMD FSR SDK 的 DLL 是 Windows 文件，Linux 上没有 FSR 4（#307）。
+- **感谢** @CarpetHead 和 @ponhei9502 的 PR，以及 @robbely、@ft1704、@FKF-GR 和 @blubberbozz-wq 的反馈与测试。
 
-## v20261026 的变化
+## v20261105 的变化
 
-已有的预编译着色器继续有效：着色器与 v20261023 相同。预编译只会补上新增着色器提示的管线（#212）。
+已有的预编译着色器继续有效：着色器的翻译与 v20261103 相同。
 
-- **1.005 版本的崩溃**（#185、#204）：在部分电脑上，《恶魔之魂》1.005（欧版和美版）游玩几分钟后、甚至启动时就会崩溃。
-  游戏的资源加载器可能取到另一个线程正在撤回的加载请求。模拟器现在让加载器等撤回完成再继续；每次起作用时，日志里会出现
-  `Demon's Souls loader guard: ... waited out`。
-- **16 GB 电脑蓝屏**（#91）：从 v20261024 起，游戏从显卡读回的内存页所用的保护方式，在内存不足时可能让 Windows 蓝屏
-  （MEMORY_MANAGEMENT）。现在只要可用内存少于 2 GB，这些页就改用保护页（guard page），它在我们的高内存压力测试中没有出现问题。
-- **着色器准备保存到磁盘**（#200）：后台着色器准备和启动预热现在把翻译结果保存在 `_PipelineCache\static\<游戏>_<版本>.prefetch`
-  （1-2 GB）。更新后第一次启动照常翻译；之后的启动约一秒就能读完。我们台式机上的启动预热从 22 秒变为 1 秒，核心少的
-  电脑也不用在游戏旁边翻译好几分钟了。`run.cmd -Set KYTY_PREFETCH_CACHE=0` 可以关闭。基于 @Psychowarden 的补丁。
-- **受光照的地面和水面闪白**（#196）：后台线程复制缓冲区时，可能取到游戏已经为下一帧改写的数据。现在复制会在游戏得知显卡
-  用完这些数据之前完成。靠 @Psychowarden 的测试找到原因。
-- **镜头切换时的插帧**（#174）：对话或过场镜头结束时，中间插出的那一帧会把两个镜头的画面混在一起（都半透明）。选择了超分
-  （DLSS 或 FSR）时，插帧现在会在游戏的镜头切换处重新开始。
-- **1440p 输出使用 4K 界面布局**（#187、#202）：1440p 输出时，界面按 4K 布局、以输出尺寸排版，而不是把 1080p 布局放大：
-  文字清晰，角色创建和装备菜单里的角色也在正确位置。`run.cmd -Set KYTY_OUTPUT_LAYOUT=hd` 保留旧方式。
-- **1440p 下的宽屏**（#199、#198）：21:9 或更宽的比例配合 1440p 输出时，画面现在按这个高度生成（21:9 时为 3416x1440），
-  而不是 16:9（RTX 5080 在 43:18 下从 77 fps 提升到 90 fps）；宽屏输出时过场影片也不再被压扁。基于 @Psychowarden 的补丁。
-- **音频输出**（#207）：启动器「游戏」页新增「音频输出」：电视、耳机、AV 功放或条形音箱。游戏会得知你的选择并据此混音，与
-  PS5 相同（`run.cmd -Set KYTY_AUDIO_OUTPUT=headphones`）。由 @Psychowarden 发现。
-- **用手柄退出游戏**（#203）：按住 PS 键（Xbox 手柄的 Guide 键）两秒即可退出，与 PS5 的「关闭游戏」相同。如果 Steam 或
-  Game Bar 占用了这个键，`run.cmd -Set KYTY_PAD_QUIT=both` 让同时按住 Create 和 Options（Xbox 手柄的 View 和 Menu）也能
-  退出。Xbox 手柄的 View 键现在等同于按下触摸板（#197）。
-- **更多着色器提示**（#212）：一份打到两个结局的完整游玩记录补上了发布包提示中没有的 237 个着色器和 268 条管线：游戏后期
-  第一次出现的卡顿更少。感谢 @Vorshim92。
-- **预编译**（#213）：某个分片停止工作时不再拖住整个预编译。它 20 分钟没有进展就会重新启动（最多两次），之后跳过；游戏在
-  第一次需要时再编译这些管线。
-- **16 GB 电脑内存占用更少**：游戏引擎释放的内存归还给 Windows 的速度快了四倍：长时间游玩少占 0.8 GB。
-- **新建图像先清零**（PR #193，@intellq）：与 PS5 一样，新图像在第一次使用前为零。以前在 1080p 的 FSR 加 43:18 压缩下，
-  第一帧会读到未定义的内容，整局都保持绿色或红色的画面，主要出现在 Linux 的 AMD 显卡上。
-- **Linux**：AMD 显卡（RADV）现在会启用传输队列，读回显卡已完成的数据时不再排在整个图形队列后面：RX 9060 XT 和
-  RX 9070 XT 行走时帧率提升 19% 到 27%。由 @the2ndday 发现，@dreamerk24m 和 @yazuc 测试。`-Set KYTY_RADV_TRANSFER_QUEUE=0`
-  可以关闭；较旧 AMD 显卡的用户如果遇到显卡挂起请反馈。同样来自 @the2ndday：实验性的 `KYTY_UFFD_WP=1`（用 userfaultfd 监视
-  GPU 跟踪的写入，需要 Linux 6.4+；PR #206），以及 Linux 上的测试辅助命令（PR #211）。
-- **感谢** @Psychowarden、@the2ndday、@Vorshim92 和 @intellq 的补丁与 PR，以及 @danielmazurek79、@Theoryedz、
-  @ededaelita1-afk、@ft1704、@dreamerk24m、@Fantomas3228、@yazuc、@marcelofis、@SanyaSan 和 @kvothe3323 的反馈与测试。
+- **大多数电脑上更快：scout 线程**（PR #280，感谢 @DevList1454 和 @opcod3；PR #288 的修复来自 @ponhei9502）：一个辅助线程
+  先于渲染线程读取游戏的图形命令，提前准备好绘制要读取的表，渲染线程检查后直接使用。我们的 RTX 5090 在 1-1 约多 5% 帧数
+  （渲染线程每帧 14.1 -> 13.3 ms）；RX 9070 XT 在波雷塔利亚王城内城快 7-9%（@DevList1454）；Linux 加 RX 7900 XTX 快 11%
+  （@opcod3）。它大约多占一个处理器核心，没有空闲核心的电脑上会自动停下。Steam Deck 版在测量之前默认关闭。
+  `-Set KYTY_SCOUT=0` 关闭。
+- **按现在的代码重新做了编译优化**（#283，感谢 @DevList1454）：程序的 profile 引导优化（PGO）带着 scout 重新训练。我们的
+  RTX 5090 在 Latria 快 5%（渲染线程每帧 12.6 -> 12.0 ms），1-1 持平；@DevList1454 在 Ryzen 7 9700X 上测得王城内城
+  快 5-6%。
+- **NVIDIA：游戏的模板阴影绘制之间不再让 GPU 排空**（PR #281，感谢 @CarpetHead）：没有像素着色器的管线加上一个空的像素
+  着色器，GPU 不再在这类绘制之间排空；石拱处每帧少 0.57 ms 的 GPU 时间。`-Set KYTY_EMPTY_FS=0` 关闭。
+- **游戏中显存预算下降的 8 GB 显卡卡顿更少**（#276）：显存低于 12 GB 时，驱动在游戏中调低预算后，贴图回收会跟着调整
+  （一张 8 GB 的 Radeon RX 6650 XT 进入世界后从 7378 降到约 5570 MiB），而不是一直按启动时的数值。
+- **预编译完成后，启动器不再提示「着色器尚未预编译」**（#290）：驱动不支持 pipeline binary 时，预编译把着色器存成
+  `.blobs` 文件，Windows 启动器之前没有把它算进去。游戏本身一直在使用它们。
+- **「键盘和鼠标按键提示」**（PR #277，感谢 @miroslavdanutalexandru-alt）：启动器的「游戏」页可以把游戏里的手柄按键提示
+  换成键盘按键和鼠标按钮的图标（英文），与默认键位一致；「键盘控制」可以修改键位和鼠标灵敏度。默认关闭；需要解压后的
+  1.07 游戏文件夹（不支持 `.zar`），并会备份它修改的游戏文件。
+- **供测试用，默认关闭**：`-Set KYTY_WRITE_GUARD=1`（PR #282，感谢 @CarpetHead）让渲染线程写入游戏内存时不必等待之前的
+  上传（游戏大量读回数据的地方快 1-2%）。它会频繁更改页面保护，正是内存不足的电脑上 MEMORY_MANAGEMENT 蓝屏背后的那类操作，
+  所以只在内存充足时使用（Linux 上与 `KYTY_UFFD_WP` 同时开启时会自动关闭，#289）。`-Set KYTY_TEXTURE_HOST_MODE=pd`
+  （PR #284，感谢 @ponhei9502）：显存低于 12 GB 时，超过一半预算后的贴图优先放在显存（对 Linux 有帮助；NVIDIA 的 Windows
+  驱动本来就把它们放在显存）。
+- **FSR 4 需要较新的 AMD 驱动**（#271）：使用 Adrenalin 26.9.2 时，RX 9070 开 FSR 4 超分画面是黑的，开 FSR 4 插帧时生成的帧
+  是黑的；更新驱动后两者都正常了。
+- **便于反馈问题**：日志会在所用显卡旁写出显卡驱动及其版本。
+- **感谢** @DevList1454、@opcod3、@CarpetHead、@ponhei9502 和 @miroslavdanutalexandru-alt 的 PR、审阅与测量，以及
+  @STALKERSK、@yura1234 和 @robbely 的反馈与测试。

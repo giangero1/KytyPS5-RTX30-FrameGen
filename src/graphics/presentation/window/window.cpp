@@ -36,7 +36,6 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
-#include "debug-snapshot.h"
 #include "local-platform.h"
 #include "perf-overlay.h"
 #include "graphics/presentation/systemOverlay.h"
@@ -50,6 +49,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <memory>
@@ -125,6 +125,57 @@ static int ControllerAxisValueFromSdl(int axis_id, int axis_value) {
 	                                             axis_value);
 }
 
+// The sticks of a pad other than a PlayStation one, whose sticks rest a few percent off centre (more as they wear): a
+// round dead zone of KYTY_PAD_DEADZONE percent of the range (12 by default, 0 none), the rest stretched to the full
+// range, which the stick reaches at KYTY_PAD_DEADZONE_OUTER percent of it (90 by default). On an Xbox pad the character
+// kept walking slowly after a run let go (issue #236); with the dead zone stretched to the edge alone, a stick pushed all
+// the way (a little under its full range at some angles) lost the run more easily. PlayStation pads are passed as they
+// are, to the game's own dead zone as on a PS5; so is the Steam Deck build's pad (Steam Input has one).
+static int PadDeadZonePercent() {
+	static const int percent = [] {
+#if defined(KYTY_STEAM_DECK)
+		const int fallback = 0;
+#else
+		const int fallback = 12;
+#endif
+		const char* value = std::getenv("KYTY_PAD_DEADZONE");
+		return value != nullptr && *value != '\0' ? std::clamp(std::atoi(value), 0, 50) : fallback;
+	}();
+	return percent;
+}
+
+static int PadOuterPercent() {
+	static const int percent = [] {
+		const char* value = std::getenv("KYTY_PAD_DEADZONE_OUTER");
+		return value != nullptr && *value != '\0' ? std::clamp(std::atoi(value), 60, 100) : 90;
+	}();
+	return percent;
+}
+
+// The stick of `axis_id` with the dead zone, both its axes set (PadDeadZonePercent, PadOuterPercent); false: as it is.
+static bool SetStickWithDeadZone(int id, int axis_id) {
+	const int percent = PadDeadZonePercent();
+	if (percent == 0 || ControllerAxisIsTrigger(axis_id)) return false;
+	auto* pad = SDL_GameControllerFromInstanceID(id);
+	if (pad == nullptr) return false;
+	const auto type = SDL_GameControllerGetType(pad);
+	if (type == SDL_CONTROLLER_TYPE_PS3 || type == SDL_CONTROLLER_TYPE_PS4 || type == SDL_CONTROLLER_TYPE_PS5) return false;
+	const bool left   = axis_id == SDL_CONTROLLER_AXIS_LEFTX || axis_id == SDL_CONTROLLER_AXIS_LEFTY;
+	const auto axis_x = left ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_RIGHTX;
+	const auto axis_y = left ? SDL_CONTROLLER_AXIS_LEFTY : SDL_CONTROLLER_AXIS_RIGHTY;
+	const double x = SDL_GameControllerGetAxis(pad, axis_x), y = SDL_GameControllerGetAxis(pad, axis_y);
+	const double radius = std::sqrt(x * x + y * y) / SDL_JOYSTICK_AXIS_MAX;
+	const double dead   = percent / 100.0;
+	const double outer  = std::max(dead + 0.05, PadOuterPercent() / 100.0);
+	const double scale  = radius <= dead ? 0.0 : std::min(1.0, (radius - dead) / (outer - dead)) / radius;
+	const auto   value  = [&](double v) {
+        return static_cast<int>(std::clamp(std::lround(v * scale), long {SDL_JOYSTICK_AXIS_MIN}, long {SDL_JOYSTICK_AXIS_MAX}));
+	};
+	Controller::SetAxis(id, ControllerAxisFromSdl(axis_x), ControllerAxisValueFromSdl(axis_x, value(x)));
+	Controller::SetAxis(id, ControllerAxisFromSdl(axis_y), ControllerAxisValueFromSdl(axis_y, value(y)));
+	return true;
+}
+
 struct EventMouse {
 	bool   down;
 	bool   up;
@@ -174,6 +225,8 @@ struct EventController {
 	bool   pressed;
 	bool   released;
 	double timestamp_seconds;
+	// A press: how long its event waited in SDL's queue for this thread, ms (Controller::SetButton's input timing).
+	uint32_t queued_ms;
 };
 
 enum class DisplayOrientation {
@@ -258,25 +311,14 @@ static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (key.down) {
 		switch (key.key_code) {
-			// Space pauses and resumes, unless the keymap gives it to the game; the Pause key always does.
+			// Space pauses and resumes, unless the keymap gives it to the game or the default keys do not count (the Steam
+			// Deck build: Steam's desktop layout sends Space for one of the Deck's buttons, and a press of it left the game
+			// paused, its picture frozen, 10-28); the Pause key always does.
 			case SDLK_SPACE:
-				if (!HostInputMapsKey(SDLK_SPACE)) SetPause(game, !game.paused.load(std::memory_order_acquire));
+				if (!HostInputMapsKey(SDLK_SPACE) && HostInputDefaultKeysUsed())
+					SetPause(game, !game.paused.load(std::memory_order_acquire));
 				break;
 			case SDLK_PAUSE: SetPause(game, !game.paused.load(std::memory_order_acquire)); break;
-			// F9: a debug snapshot of the picture shown (src/local/debug-snapshot.h), the game paused; F9 again resumes.
-			case SDLK_F9:
-				if (!key.repeat) {
-					if (!game.paused.load(std::memory_order_acquire)) {
-						const auto folder = DebugSnapshot::Take(g_window != nullptr ? g_window->window : nullptr);
-						SetPause(game, true);
-						Loader::DemonsSoulsWarp::ShowNotice(folder.empty() ? "Snapshot failed; paused (F9 resumes)"
-						                                                   : "Paused: snapshot " + folder + " (F9 resumes)",
-						                                    5);
-					} else {
-						SetPause(game, false);
-					}
-				}
-				break;
 			// F8: the emulator's overlay off, the frame rate, detailed, off... (it starts as the launcher's Overlay).
 			case SDLK_F8:
 				if (!key.repeat) {
@@ -461,13 +503,13 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 			if (type != SDL_CONTROLLER_TYPE_PS4 && type != SDL_CONTROLLER_TYPE_PS5) button = Controller::PAD_BUTTON_TOUCH_PAD;
 		}
 		if (button != 0) {
-			Controller::SetButton(f.id, button, f.down);
+			Controller::SetButton(f.id, button, f.down, f.queued_ms);
 		}
 	}
 
 	if (f.axis) {
 		const auto axis = ControllerAxisFromSdl(f.axis_id);
-		if (axis != Controller::Axis::AxisMax) {
+		if (axis != Controller::Axis::AxisMax && !SetStickWithDeadZone(f.id, f.axis_id)) {
 			Controller::SetAxis(f.id, axis,
 			                    ControllerAxisValueFromSdl(f.axis_id, f.axis_value));
 		}
@@ -705,6 +747,9 @@ void WindowContext::ProcessEvent(double time_s) {
 			mb.timestamp_seconds = time_s;
 
 			GameEventMouse(mb);
+			// (Notches away from the user count as up whatever the system's scroll direction.)
+			if (event->wheel.which != SDL_TOUCH_MOUSEID)
+				HostInputMouseWheel(event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event->wheel.y : event->wheel.y);
 
 			break;
 		}
@@ -797,6 +842,7 @@ void WindowContext::ProcessEvent(double time_s) {
 			c.pressed           = (event->cbutton.state == SDL_PRESSED);
 			c.released          = (event->cbutton.state == SDL_RELEASED);
 			c.timestamp_seconds = time_s;
+			c.queued_ms         = c.down ? SDL_GetTicks() - event->cbutton.timestamp : 0;
 
 			GameEventController(c);
 
@@ -930,6 +976,11 @@ static void WindowCreate(WindowContext& context) {
 
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+	// Nintendo-layout pads (Switch Pro, Joy-Cons, 8BitDo in Switch mode, GameCube) by position: the bottom button Cross and
+	// the right one Circle, where the game's PlayStation glyphs put them. SDL 2 reported them by label (A, on the right,
+	// was Cross; issue #262). SDL_GAMECONTROLLER_USE_BUTTON_LABELS=1 in the environment keeps the labels (the environment
+	// wins over a hint).
+	SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "0");
 	// Pixel-exact windows and swapchains on scaled displays: without per-monitor awareness a

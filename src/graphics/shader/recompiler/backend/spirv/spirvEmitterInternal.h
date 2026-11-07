@@ -53,6 +53,7 @@ enum : uint32_t {
 	CapabilityGroupNonUniformArithmetic      = 63,
 	CapabilityGroupNonUniformBallot          = 64,
 	CapabilityGroupNonUniformShuffle         = 65,
+	CapabilityGroupNonUniformQuad            = 68,
 	CapabilityShaderLayer                    = 69,
 	CapabilityShaderViewportIndex            = 70,
 	CapabilityDrawParameters                 = 4427,
@@ -287,6 +288,7 @@ enum : uint32_t {
 	OpGroupNonUniformBallotFindLSB = 343,
 	OpGroupNonUniformShuffle       = 345,
 	OpGroupNonUniformBitwiseOr     = 359,
+	OpGroupNonUniformQuadBroadcast = 365,
 };
 
 enum : uint32_t {
@@ -536,6 +538,16 @@ struct ValueEmitContext {
 	const std::unordered_map<const IR::Inst*, uint32_t>*               dispatcher_spills = nullptr;
 	std::unordered_map<const IR::Inst*, std::pair<uint32_t, uint32_t>> dispatcher_block_loads;
 	uint32_t                                                           scratch_u32_variable = 0;
+	// Page walks of address loads in the block being emitted, which later loads from the same base reuse (LoadBda).
+	struct BdaWalk {
+		const IR::Block* block = nullptr;
+		uint32_t         kind = 0, low = 0, high = 0, handle_low = 0, handle_high = 0, active = 0;
+		int64_t          immediate   = 0;
+		uint32_t         pointer     = 0; // the address's host pointer, 0 for an inactive lane or an unmapped page
+		uint32_t         page_offset = 0; // its offset in its page (U32)
+		uint32_t         aligned     = 0; // a dword-aligned address (Bool)
+	};
+	std::vector<BdaWalk>                                               bda_walks;
 	ValueEmitContext*                                                  other_half = nullptr;
 	uint32_t                                                           half       = 0;
 };

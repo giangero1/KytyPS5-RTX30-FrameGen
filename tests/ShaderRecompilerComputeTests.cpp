@@ -10470,8 +10470,14 @@ public:
       sampled.view = view;
       sampled.layout = image.backing.state.layout;
       Dispatch(test, compiled, output, nullptr, &sampled, nullptr, nullptr, sampler);
-      Require(name, "native comparisons",
-              ReadBuffer(name, output, test.expected.size()) == test.expected,
+      const auto samples = ReadBuffer(name, output, test.expected.size());
+      if (samples != test.expected) {
+        std::string lines;
+        for (size_t i = 0; i < samples.size(); i++)
+          lines += fmt::format("{}{}:{:x}/{:x}", i ? " " : "", i, samples[i], test.expected[i]);
+        std::fprintf(stderr, "%s %s: got/expected %s\n", name, cube ? "cube" : "1D", lines.c_str());
+      }
+      Require(name, "native comparisons", samples == test.expected,
               "comparison samples lost a depth value or guest layer stride");
 
       image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,

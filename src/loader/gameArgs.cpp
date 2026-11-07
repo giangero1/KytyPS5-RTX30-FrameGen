@@ -22,8 +22,21 @@ namespace {
 // between entries), whose names replace the defaults'. The default: no XPR index-buffer culling, a GPU pass that culls
 // every object's triangles (~2800 compute dispatches a frame at Boletaria 1-1) before drawing them; the PC GPU draws
 // them all instead, the image unchanged (Boletaria 1-1 standing 34.30 -> 36.48 fps; doIndexBufferCulling=true: back).
+// sound_enableAmbisonics=false: the game's own mix for speakers. Left alone it gives a console's system a fifth-order ambisonics
+// scene to render, of which the emulator plays the first order (libAudio2.cpp): music and ambience close to mono (left and right
+// correlate 0.74 in the Nexus and 0.93 at Latria, here 0.27 and 0.42; issue #294) and speech 7 dB lower against the ambience.
+// The third-order voice files play here too, and the frames cost the same (=true: back).
 // Above a 60 Hz vblank also gameMinDeltaTime=0.004 (as run_ds.sh gives it): the game steps by at least a frame of its
 // target rate each frame, so every frame past 60 fps played it that much faster (whatever started the emulator).
+// KYTY_SKIP_LOGOS=1: the game's own cp11_debug_skipSplashScreens=true, no start-up logos (Sony Interactive Entertainment
+// presents, PlayStation Studios, Bluepoint: ~16 s that no button skips; issue #263). The opening cinematic still plays.
+// A test switch only: the launchers no longer offer it, as a player with it on crashed twice after ~50 minutes and
+// played over two hours without it (issue #266; in the game's code it only keeps the logo movie from starting).
+bool SkipLogos() {
+	const char* value = std::getenv("KYTY_SKIP_LOGOS");
+	return value != nullptr && value[0] == '1';
+}
+
 const std::string& ExtraLines() {
 	static const std::string lines = [] {
 		std::vector<std::pair<std::string, std::string>> entries; // (name, "name=value")
@@ -46,7 +59,9 @@ const std::string& ExtraLines() {
 		if (value != nullptr && std::string_view(value) == "0") return std::string();
 		if (Libs::Graphics::DemonsSouls::IsSupportedGame()) {
 			add("doIndexBufferCulling=false");
+			add("sound_enableAmbisonics=false");
 			if (Config::GetVblankFrequency() > 60) add("gameMinDeltaTime=0.004");
+			if (SkipLogos()) add("cp11_debug_skipSplashScreens=true");
 		}
 		if (value != nullptr) add(value);
 		std::string out;

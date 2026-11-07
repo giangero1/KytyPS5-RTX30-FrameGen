@@ -128,6 +128,9 @@ void SetStaticRect(float x0, float y0, float x1, float y1);
 [[nodiscard]] bool UsesFsr();
 // FSR generates frames, by the Windows backend or built in (Linux): the interface canvas is looked for (NoteUiCanvas).
 [[nodiscard]] bool FsrMarksHud();
+// FSR's frame generation as the KYTY_FPS_HUD panel names it: "FSR 4" once AMD's runtime generates with FSR 4 (FSR SDK 2
+// on a Radeon RX 9000), else "FSR 3".
+[[nodiscard]] const char* FsrName();
 // The video memory frame generation and super resolution take beside the game's (FSR's or NGX's allocations, outside
 // the emulator's allocator, and the HUD images): what the emulator leaves them when it sizes its use of the budget
 // (small_video_memory). After the device: frame generation the device cannot run is not counted.
@@ -176,6 +179,15 @@ void NoteCut();
 [[nodiscard]] bool SceneNoted();
 // The guest flips taken so far (TakeScene).
 [[nodiscard]] uint64_t GuestFlips();
+// Renderer thread (Kyty.Gpu), hud-anchor.h (MenuBars: the wide output with KYTY_PRESENT_ASPECT=fit): the guest frame drew
+// one of the game's menus (NoteMenu), and its interface went to the middle of the wide output at 16:9 (NoteCentred).
+// The guest flip takes them (Presenter::PrepareFrame): whether that frame's interface is in the middle, the part the
+// presenter shows between black bars.
+void NoteMenu();
+void NoteCentred();
+[[nodiscard]] bool TakeMenu();
+// The current guest frame drew a menu so far, or one of the last 20 flipped did (its fade out, TakeMenu).
+[[nodiscard]] bool MenuNoted();
 // The current guest frame has no camera yet: its next G-buffer draw goes the normal way (the table way's draws have
 // no constants on the CPU), whose hook reads it.
 [[nodiscard]] bool WantsCamera();
@@ -217,16 +229,29 @@ struct UpscaleImage {
 struct UpscaleInputs {
 	void* token = nullptr; // Acquired on the producer thread before deferred command recording.
 	UpscaleImage color, depth, motion, output; // color, depth and motion at the render size
+	// The game's reactive mask at the render size (no image: none): 1 where a pixel takes the frame's color, not its
+	// history (effects drawn with a pattern that changes every frame). DLSS's bias towards the current color (Windows),
+	// FSR 3's reactive mask.
+	UpscaleImage reactive;
 	float        jitter_x = 0.0f, jitter_y = 0.0f;       // the projection's offset, in render pixels
 	float        motion_scale_x = 0.0f, motion_scale_y = 0.0f; // motion vector * scale = render pixels to the previous
 	bool         reset = false;                           // no history (a cut, a level load)
 	std::array<float, 16> view_to_clip {};                // row vectors (p' = p * M)
 	float        near_plane = 0.1f, far_plane = 3000.0f;
 };
+// Windows, AMD's FSR SDK 2 runtime next to the emulator (amd_fidelityfx_loader_vk.dll and its effect DLLs, frame-gen.cpp
+// FsrLoadRuntime): records AMD's upscaling of `inputs` into `command`, as fsr-native.h's Upscale takes them: FSR 4 on
+// the Radeon cards AMD lists for it (RX 7000 and 9000; from FSR 4.1.2 RX 6000 too), FSR 3.1 on the others. False without
+// that runtime, or once it failed (FSR 3 built in then). KYTY_FSR_RUNTIME=0: never.
+[[nodiscard]] bool UpscaleWithAmdRuntime(GraphicContext& graphics, vk::CommandBuffer command, const UpscaleInputs& inputs);
 // Streamline offers DLSS super resolution on this device.
 [[nodiscard]] bool UpscalerReady();
 // Producer thread: reserve the token before PrepareInputs can package this guest frame.
 void PrepareUpscale(UpscaleInputs& inputs);
+// Streamline's DLSS super resolution without frame generation (Windows): every frame the game rendered goes to the
+// present, where Streamline does its bookkeeping once per rendered frame. Frames the presenter replaced never got there,
+// and on an RTX 2080 Ti its present call grew to 140 ms over minutes (issue #129). KYTY_PRESENT_EVERY_FRAME=0/1 overrides.
+[[nodiscard]] bool PresentEveryFrame();
 // Records DLSS into `command` (outside a render pass; the images in their `layout`s, left so): false when it could not.
 // `dispatch` records the commands DLSS needs around it (the recording worker's when it replays).
 [[nodiscard]] bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs,

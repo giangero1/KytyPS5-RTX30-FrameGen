@@ -4,6 +4,7 @@
 #include "local-platform.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -50,6 +51,58 @@ PipelineBinaries::Key KeyOf(const VkPipelineBinaryKeyKHR& key) {
 	return out;
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+// KYTY_PIPELINE_KEY_THUNK (default 1, 0: a direct call): vkGetPipelineKeyKHR through a thunk that keeps the callee-saved
+// registers in its own frame. NVIDIA 620.70.06 builds the global key (no create info) from 27 words in a stack buffer with
+// room for 26: the 27th, a 0/1 flag, lands on its own saved rbx, so the caller's rbx came back with its low 32 bits replaced
+// (Signature kept its result there: a SIGSEGV ~1 s into every boot, this = 0x7ffd00000000; PR #308). The thunk restores
+// rbx, rbp and r12-r15 from its own slots, out of the driver's reach, whichever of them a driver build's overflow lands on;
+// a driver without the fault sees the same call. (Entry rsp is 8 mod 16: six pushes and 8 bytes make the call's alignment.
+// Direct calls only; endbr64 for an indirect one under CET.)
+[[gnu::naked]] VkResult CallPipelineKeySaving(PFN_vkGetPipelineKeyKHR /*fn*/, VkDevice /*device*/,
+                                              const VkPipelineCreateInfoKHR* /*info*/, VkPipelineBinaryKeyKHR* /*key*/) {
+	asm("endbr64\n\t"
+	    "push %rbx\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %rbx, 0\n\t"
+	    "push %rbp\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %rbp, 0\n\t"
+	    "push %r12\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %r12, 0\n\t"
+	    "push %r13\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %r13, 0\n\t"
+	    "push %r14\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %r14, 0\n\t"
+	    "push %r15\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset %r15, 0\n\t"
+	    "sub $8, %rsp\n\t.cfi_adjust_cfa_offset 8\n\t"
+	    "mov %rdi, %rax\n\t"
+	    "mov %rsi, %rdi\n\t"
+	    "mov %rdx, %rsi\n\t"
+	    "mov %rcx, %rdx\n\t"
+	    "call *%rax\n\t"
+	    "add $8, %rsp\n\t.cfi_adjust_cfa_offset -8\n\t"
+	    "pop %r15\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %r15\n\t"
+	    "pop %r14\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %r14\n\t"
+	    "pop %r13\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %r13\n\t"
+	    "pop %r12\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %r12\n\t"
+	    "pop %rbp\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %rbp\n\t"
+	    "pop %rbx\n\t.cfi_adjust_cfa_offset -8\n\t.cfi_restore %rbx\n\t"
+	    "ret");
+}
+
+bool UseKeyThunk() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PIPELINE_KEY_THUNK");
+		return value == nullptr || value[0] != '0';
+	}();
+	return on;
+}
+#endif
+
+// vkGetPipelineKeyKHR (`info` null: the global key); not loaded: VK_ERROR_FEATURE_NOT_PRESENT.
+VkResult GetPipelineKey(vk::Device device, const VkPipelineCreateInfoKHR* info, VkPipelineBinaryKeyKHR* key) {
+	const auto get_key = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR;
+	if (get_key == nullptr) return VK_ERROR_FEATURE_NOT_PRESENT;
+#if defined(__linux__) && defined(__x86_64__)
+	if (UseKeyThunk()) return CallPipelineKeySaving(get_key, static_cast<VkDevice>(device), info, key);
+#endif
+	return get_key(device, info, key);
+}
+
 } // namespace
 
 size_t PipelineBinaries::KeyHash::operator()(const Key& key) const {
@@ -64,8 +117,7 @@ PipelineBinaries::Handles::~Handles() {
 
 std::string PipelineBinaries::Signature(vk::Device device, const std::string& device_signature) {
 	VkPipelineBinaryKeyKHR key {VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
-	if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR == nullptr ||
-	    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR(device, nullptr, &key) != VK_SUCCESS || key.keySize == 0) {
+	if (GetPipelineKey(device, nullptr, &key) != VK_SUCCESS || key.keySize == 0) {
 		return {};
 	}
 	std::string out = "KytyPipelineBinaries1" + device_signature + ":";
@@ -79,7 +131,7 @@ bool PipelineBinaries::PipelineKey(vk::Device device, const void* create_info, K
 	VkPipelineCreateInfoKHR info {VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR};
 	info.pNext = const_cast<void*>(create_info);
 	VkPipelineBinaryKeyKHR out {VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
-	if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPipelineKeyKHR(device, &info, &out) != VK_SUCCESS || out.keySize == 0) {
+	if (GetPipelineKey(device, &info, &out) != VK_SUCCESS || out.keySize == 0) {
 		return false;
 	}
 	key = KeyOf(out);
@@ -368,58 +420,94 @@ size_t PipelineBinaryWriter::Pipelines() const {
 	return m_pipelines.size();
 }
 
-bool PipelineBinaryWriter::Save(const std::filesystem::path& file_path, const std::string& signature) const {
+bool PipelineBinaryWriter::Save(const std::filesystem::path& file_path, const std::string& signature,
+                                SaveReport* report) const {
 	std::lock_guard lock(m_mutex);
+	SaveReport      own;
+	auto&           out = report != nullptr ? *report : own;
+	out             = {};
 	std::error_code error;
 	std::filesystem::create_directories(file_path.parent_path(), error);
-	std::ofstream   file(file_path, std::ios::binary | std::ios::trunc);
-	const auto      signature_size = static_cast<uint32_t>(signature.size());
+	std::ofstream file(file_path, std::ios::binary | std::ios::trunc);
+	if (!file) {
+		out.failure = "the file could not be created";
+		return false;
+	}
+	const auto signature_size = static_cast<uint32_t>(signature.size());
 	file.write(Magic, sizeof(Magic));
 	file.write(reinterpret_cast<const char*>(&signature_size), sizeof(signature_size));
 	file.write(signature.data(), static_cast<std::streamsize>(signature.size()));
-	uint64_t    offset = sizeof(Magic) + sizeof(signature_size) + signature.size();
-	std::string tables;
+	uint64_t offset = sizeof(Magic) + sizeof(signature_size) + signature.size();
 	// Only binaries a pipeline uses: one captured or copied again leaves its earlier ones unused.
-	std::vector<uint32_t> renumbered(m_binaries.size(), UINT32_MAX);
+	std::vector<uint8_t>  listed(m_binaries.size(), 0);
 	std::vector<uint32_t> used;
 	for (const auto& [key, list]: m_pipelines) {
 		for (const auto ref: list) {
-			if (renumbered[ref] != UINT32_MAX) continue;
-			renumbered[ref] = static_cast<uint32_t>(used.size());
+			if (listed[ref] != 0) continue;
+			listed[ref] = 1;
 			used.push_back(ref);
 		}
 	}
-	Put(tables, static_cast<uint32_t>(used.size()));
-	std::vector<uint8_t> copied;
+	// A binary the store holding it cannot give back (its file damaged on the disk: cut short, or other bytes than its
+	// hash) is left out, with every pipeline that uses it, which then compiles when first needed: before, one damaged
+	// shard of a precompile failed its merge every time (issue #225).
+	std::vector<uint32_t> renumbered(m_binaries.size(), UINT32_MAX);
+	std::string           binary_table;
+	uint32_t              written = 0;
+	std::vector<uint8_t>  copied;
 	for (const auto ref: used) {
 		const auto& binary = m_binaries[ref];
 		const auto* data   = &binary.data;
 		if (binary.from != nullptr) {
-			if (!binary.from->ReadData(binary.from->m_binaries[binary.index], copied)) return false;
+			if (!binary.from->ReadData(binary.from->m_binaries[binary.index], copied)) {
+				out.unreadable_binaries++;
+				continue;
+			}
 			data = &copied;
 		}
 		file.write(reinterpret_cast<const char*>(data->data()), static_cast<std::streamsize>(data->size()));
-		PutKey(tables, binary.key);
-		Put(tables, offset);
-		Put(tables, static_cast<uint64_t>(data->size()));
-		Put(tables, static_cast<uint64_t>(XXH3_64bits(data->data(), data->size())));
+		PutKey(binary_table, binary.key);
+		Put(binary_table, offset);
+		Put(binary_table, static_cast<uint64_t>(data->size()));
+		Put(binary_table, static_cast<uint64_t>(XXH3_64bits(data->data(), data->size())));
 		offset += data->size();
+		renumbered[ref] = written++;
 	}
-	Put(tables, static_cast<uint32_t>(m_pipelines.size()));
+	if (!file) {
+		out.failure = "writing it failed after " + std::to_string(offset >> 20u) + " MiB";
+		return false;
+	}
+	std::string tables;
+	Put(tables, written);
+	tables += binary_table;
+	std::string           pipeline_table;
+	uint32_t              kept = 0;
 	std::vector<uint32_t> refs;
 	for (const auto& [key, list]: m_pipelines) {
-		PutKey(tables, key);
-		Put(tables, static_cast<uint32_t>(refs.size()));
-		Put(tables, static_cast<uint32_t>(list.size()));
+		if (std::any_of(list.begin(), list.end(), [&](uint32_t ref) { return renumbered[ref] == UINT32_MAX; })) {
+			out.dropped_pipelines++;
+			continue;
+		}
+		PutKey(pipeline_table, key);
+		Put(pipeline_table, static_cast<uint32_t>(refs.size()));
+		Put(pipeline_table, static_cast<uint32_t>(list.size()));
 		for (const auto ref: list) refs.push_back(renumbered[ref]);
+		kept++;
 	}
+	Put(tables, kept);
+	tables += pipeline_table;
 	Put(tables, static_cast<uint32_t>(refs.size()));
 	for (const auto ref: refs) Put(tables, ref);
 	file.write(tables.data(), static_cast<std::streamsize>(tables.size()));
 	const uint64_t footer[2] {offset, XXH3_64bits(tables.data(), tables.size())};
 	file.write(reinterpret_cast<const char*>(footer), sizeof(footer));
 	file.write(Magic, sizeof(Magic));
-	return static_cast<bool>(file);
+	file.close();
+	if (!file) {
+		out.failure = "writing its tables failed";
+		return false;
+	}
+	return true;
 }
 
 // <n>: <name>.played.<n>.binaries beside <base>, <name>.played.binaries.

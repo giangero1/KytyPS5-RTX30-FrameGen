@@ -75,10 +75,10 @@ void Shutdown() {
 	g_renderer = nullptr;
 }
 
-uint32_t TextureReduceLevels(bool small_video_memory); // descriptors.cpp
+uint32_t TextureReduceLevels(bool reduce_texture_levels); // descriptors.cpp
 
 uint32_t GameTextureReduceLevels() {
-	return g_renderer != nullptr ? TextureReduceLevels(g_renderer->GetGraphics().small_video_memory) : 0;
+	return g_renderer != nullptr ? TextureReduceLevels(g_renderer->GetGraphics().reduce_texture_levels) : 0;
 }
 
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, const uint32_t* cmd_buffer) {

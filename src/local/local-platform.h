@@ -73,15 +73,35 @@ bool FlushProcessWriteBuffers();
 // below-normal priority too: background work that must not hold up the game's threads.
 void AvoidCpuList(const char* avoid_cpus);
 void MakeBackgroundThread(const char* avoid_cpus);
+// Linux, the render thread (KYTY_RENDER_CORE=<cpu>; 0 or off: not; default on the Steam Deck build: 2): the calling
+// thread on that CPU and the core it is on (its SMT siblings) kept for it alone: every other thread of the process, the
+// game's included, is moved off that core now and every 250 ms (a thread of its own; new threads inherit their
+// creator's CPUs). On a 4-core CPU the game's ten job workers shared the render thread's core: its work per frame
+// 31.5 ms with them, 28.4 ms alone. Returns the CPU (-1: not done). Windows: -1.
+int KeepRenderCoreAlone();
 // The calling thread above the normal priority of the game's threads (Windows: THREAD_PRIORITY_HIGHEST; Linux:
 // nice -10 where the nice limit allows, unless KYTY_LINUX_FAST_LOCKS=0): the render thread, which every frame waits for, is not time-sliced against them on its CPUs.
 void MakeCriticalThread();
+// While it lives, the calling thread at the normal priority if it was above it (MakeCriticalThread), then back: the render
+// thread doing the upload worker's jobs (AsyncUpload's Help) as the worker does them, not ahead of the game's threads.
+class NormalPriority {
+public:
+	NormalPriority();
+	~NormalPriority();
+	NormalPriority(const NormalPriority&)            = delete;
+	NormalPriority& operator=(const NormalPriority&) = delete;
+
+private:
+	int  m_saved   = 0;
+	bool m_changed = false;
+};
 
 // The refresh rate in Hz of the display a window is on (its HWND on Windows; 0 when unknown or elsewhere).
 int DisplayRefreshHz(void* window);
 // KYTY_RETURN_FOCUS=<window handle> (the launcher's --play: the window that had the focus as it started, Steam's Big
 // Picture when Steam starts the game): the focus handed to that window and `window` (the game's, its HWND) hidden, as
-// the game quits (issue #217). Windows only.
+// the game quits (issue #217). That window gone or hidden: the largest of KYTY_RETURN_FOCUS_PID=<process> (the
+// launcher's parent) or of a process it started. Windows only.
 void ReturnFocus(void* window);
 // Vertical blanks of that display, counted by a thread of their own that waits for each (Windows:
 // D3DKMTWaitForVerticalBlankEvent on the window's display, again when the window moves to another one); a window
@@ -110,6 +130,9 @@ bool     ResizeScratchFile(uint64_t file, uint64_t size);
 bool     FlushScratchFile(uint64_t file);
 // This executable's path, UTF-8 (empty when unknown).
 std::string ExecutablePath();
+// The file system of the drive holding `path` (UTF-8): "NTFS", "exFAT", "FAT32"... ("FAT32" for a Linux vfat mount; empty
+// when unknown).
+std::string FileSystemName(const std::string& path);
 
 // The process's committed private memory and resident working set, and the machine's physical memory, in
 // bytes (0 where the host cannot tell; KYTY_SIMULATE_RAM_MB=<n> reports n MiB of physical memory, for tests).
@@ -121,6 +144,18 @@ MemoryUse ProcessMemory();
 uint64_t  PhysicalMemory();
 // The physical memory the system can still give without paging (free and standby; Linux: MemAvailable). 0: unknown.
 uint64_t AvailablePhysicalMemory();
+// The RAM the emulator has: the PC's (PhysicalMemory, so KYTY_SIMULATE_RAM_MB counts) less what other programs held when
+// it started, i.e. what the system could give without paging then plus the emulator's own working set (taken at the
+// first call, made before main; logged once). The memory savings of PCs short of RAM go by it, not by the PC's RAM
+// (issue #228: a 24 GB PC whose other programs held 10 GB ran out of memory at a world load, its savings off). 0: unknown.
+uint64_t EmulatorMemory();
+// The memory the process can still commit and the commit limit (RAM and page file: Task Manager's "Committed"; Linux:
+// CommitLimit less Committed_AS, and CommitLimit, which overcommit lets programs pass), in bytes. 0: unknown.
+struct CommitState {
+	uint64_t available = 0;
+	uint64_t limit     = 0;
+};
+CommitState SystemCommit();
 // KYTY_HEAP_TRIM=1 (off by default): the heap's free pages go back to the system on a thread of its
 // own, checked every 30 s, after 64 MiB of growth since the last trim; the first 10 are told.
 // Linux (glibc): malloc_trim (in Demon's Souls 130-150 MiB of its 1 GB of arenas were free chunks

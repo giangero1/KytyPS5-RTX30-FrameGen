@@ -30,7 +30,7 @@ $resolutionsByRatio = @{
 $renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900', '720'
 # What reconstructs the scene (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
 # place of Sony's PS5 Pro upscaler on the game's PS5 Pro path (NVIDIA's Streamline runtime, as frame generation).
-$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)', 'FSR 3 (PS5 Pro path)', 'Off (no anti-aliasing)'
+$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)', 'AMD FSR (PS5 Pro path)', 'Off (no anti-aliasing)'
 # The aspect ratio of Demon's Souls' 3D (run-windows.ps1 -Aspect): wider sees more to the sides.
 $ratios = '16:9 (PS5)', '21:9', '32:9'
 # Demon's Souls' own settings for what a frame draws (run-windows.ps1 -Quality): shorter shadows, simpler distant detail;
@@ -55,8 +55,8 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true; cheats = $false;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
 	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; fsr = $false; output = 'auto'
-	lowlatency = $false; present_direct = $false; antilag = $false; keep_resident = $false; fps30 = $false; pad_speaker = $true
-	extra_args = ''; dlss_preset = ''; gpu = ''; output_auto = $true; audio_output = '' }
+	lowlatency = $false; present_direct = $false; vrr_flips = $false; antilag = $false; keep_resident = $false; fps30 = $false; pad_speaker = $true
+	extra_args = ''; dlss_preset = ''; dlss_sharpness = ''; fsr_sharpness = ''; gpu = ''; output_auto = $true; audio_output = '' }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
@@ -182,10 +182,15 @@ $rtxGpu = try {
 	[bool](Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' -and $_.Name -match '\bRTX\b' })
 } catch { $false }
 $frameGenAvailable = [bool]$streamline -and $rtxGpu
-# FSR 3.1 frame generation (run-windows -Fsr), any GPU: AMD's signed amd_fidelityfx_vk.dll next to the emulator.
-$fsrDll = Join-Path (Split-Path $exe) 'amd_fidelityfx_vk.dll'
-$fsrAvailable = (Test-Path -LiteralPath $fsrDll) -and
-	((Get-AuthenticodeSignature -LiteralPath $fsrDll).SignerCertificate.Subject -match 'O=Advanced Micro Devices')
+# FSR frame generation (run-windows -Fsr), any GPU: AMD's signed runtime next to the emulator, FSR SDK 2's loader with
+# its frame generation DLL, or FidelityFX SDK 1.1.4's amd_fidelityfx_vk.dll.
+function Test-AmdSigned([string]$name) {
+	$path = Join-Path (Split-Path $exe) $name
+	(Test-Path -LiteralPath $path) -and
+		((Get-AuthenticodeSignature -LiteralPath $path).SignerCertificate.Subject -match 'O=Advanced Micro Devices')
+}
+$fsrAvailable = ((Test-AmdSigned 'amd_fidelityfx_loader_vk.dll') -and (Test-AmdSigned 'amd_fidelityfx_framegeneration_vk.dll')) -or
+	(Test-AmdSigned 'amd_fidelityfx_vk.dll')
 
 # Cheats (_Patches\<title id>.json)
 # A GoldHEN-style mods file: every mod has a name, an enabled flag and the memory writes it makes.
@@ -356,11 +361,13 @@ function Get-PlayCommand {
 	$size = $settings.resolution -split 'x'
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\run-windows.ps1`"", '-Prompt', '-Follow',
 		'-Exe', "`"$EmulatorExe`"", '-Width', $size[0], '-Height', $size[1], '-Language', $settings.language)
-	# (-AspectFit with 21:9 or 32:9 would keep movies and menus at 16:9: the launcher's wider ratios fill the screen.)
+	# (-AspectFit: the 16:9 picture between black bars on a screen of another shape; with 21:9 or 32:9 the movies, the title
+	# and the loading screens, KytyLauncher.exe's "wide_bars".)
 	if ($settings.fullscreen) {
 		$arguments += '-Fullscreen'
 		if ($settings.aspect -and $settings.ratio -notin '21:9', '32:9') { $arguments += '-AspectFit' }
 	}
+	if ($settings.wide_bars -and $settings.ratio -in '21:9', '32:9') { $arguments += '-AspectFit' }
 	if (!$settings.redzone) { $arguments += '-NoRedZone' }
 	# (KytyLauncher.exe's 30 fps lock, Experimental: KYTY_FLIP_RATE=1 below, at 60 Hz.)
 	if ($settings.fps120 -and !$settings.fps30) { $arguments += '-Fps120' }
@@ -407,6 +414,7 @@ function Get-PlayCommand {
 	if ($settings.safegpu) { $sets += 'KYTY_COMPUTE_CHAIN=0' }
 	# KytyLauncher.exe's experiments: direct presentation (issue #37), AMD Anti-Lag and memory kept resident (issue #50).
 	if ($settings.present_direct) { $sets += 'KYTY_PRESENT_DIRECT=1' }
+	if ($settings.vrr_flips) { $sets += 'KYTY_VRR=1' }
 	if ($settings.antilag) { $sets += 'KYTY_ANTI_LAG=1' }
 	if ($settings.fps30) { $sets += 'KYTY_FLIP_RATE=1' }
 	if ($settings.keep_resident) { $sets += @('KYTY_RESIDENT_MB=6144', 'KYTY_WORKING_SET_TRIM=0') }
@@ -414,6 +422,8 @@ function Get-PlayCommand {
 	if (-not $settings.pad_speaker) { $sets += 'KYTY_DUALSENSE_SPEAKER_VOLUME=0' }
 	# KytyLauncher.exe's DLSS model (a preset letter; none: the DLSS version's own choice).
 	if ($dlss -and "$($settings.dlss_preset)" -cmatch '^[A-O]$') { $sets += "KYTY_DLSS_PRESET=$($settings.dlss_preset)" }
+	if ($dlss -and "$($settings.dlss_sharpness)" -in @('0.3', '0.6', '0.9')) { $sets += "KYTY_DLSS_SHARPNESS=$($settings.dlss_sharpness)" }
+	if ($fsrUpscaler -and "$($settings.fsr_sharpness)" -in @('0', '0.3', '0.9')) { $sets += "KYTY_FSR_SHARPNESS=$($settings.fsr_sharpness)" }
 	# KytyLauncher.exe's audio output the game is told (issue #207; none: a TV).
 	if ("$($settings.audio_output)" -cmatch '^(headphones|amplifier|soundbar)$') { $sets += "KYTY_AUDIO_OUTPUT=$($settings.audio_output)" }
 	# KytyLauncher.exe's extra options (Advanced page): their -Set pairs join (or replace) the launcher's own.
@@ -669,7 +679,7 @@ Add-Row 'Upscaler' @($upscaler, $upscalerNote)
 # The game's output (run-windows.ps1 -HdOutput, src/loader/demonsSoulsHdOutput.h): 4K, or the game's own 1080p mode, its
 # post-processing and HUD at 1920x1080 and its 3D at most 1080 high (with DLSS: DLSS upscales the 3D to that 1080p).
 $output = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
-$output.Items.AddRange(@('Automatic', '4K (PS5)', '1080p', '1440p (DLSS / FSR 3)'))
+$output.Items.AddRange(@('Automatic', '4K (PS5)', '1080p', '1440p (DLSS / FSR)'))
 $output.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@('auto', '4k', '1080p', '1440p'), [string]$settings.output))
 $outputNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
 	Text = 'Automatic: 1080p for a 16:9 window (full screen: the screen) up to 1080 lines, else 4K. 1080p: the game''s HD layout, effects and HUD at 1920x1080; less GPU work; with DLSS, DLSS makes the 1080p picture' }
@@ -768,10 +778,10 @@ $frameGenFolder.Add_Click({
 	Update-UpscalerNote
 })
 Add-Row 'Frame generation' @($frameGen, $frameGenFolder, $frameGenNote)
-$fsr = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'AMD FSR 3 frame generation (2x, any GPU; instead of DLSS)'; AutoSize = $true
+$fsr = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'AMD FSR frame generation (2x, any GPU; instead of DLSS)'; AutoSize = $true
 	Checked = ($fsrAvailable -and [bool]$settings.fsr); Enabled = $fsrAvailable }
-(New-Object System.Windows.Forms.ToolTip).SetToolTip($fsr, "AMD FidelityFX FSR 3.1: one generated frame between two of the game's, from its depth and motion.`n" +
-	"With VSync on, the shown frames are capped at the display's refresh (a 60 Hz display runs the game at 30 fps).`nNeeds amd_fidelityfx_vk.dll next to the emulator.")
+(New-Object System.Windows.Forms.ToolTip).SetToolTip($fsr, "AMD FSR: one generated frame between two of the game's, from its depth and motion (FSR 4 on Radeon RX 9000 with the FSR SDK 2.4 runtime, FSR 3.1 otherwise).`n" +
+	"With VSync on, the shown frames are capped at the display's refresh (a 60 Hz display runs the game at 30 fps).`nNeeds AMD's FSR runtime next to the emulator: the FSR SDK 2.4 DLLs or amd_fidelityfx_vk.dll (README).")
 Add-Row '' @($fsr)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)

@@ -38,11 +38,13 @@ const std::vector<std::string>& GameVariables() {
 	                                             "KYTY_FPS_HUD",
 	                                             "KYTY_COMPUTE_CHAIN",
 	                                             "KYTY_PRESENT_DIRECT",
+	                                             "KYTY_VRR",
 	                                             "KYTY_ANTI_LAG",
 	                                             "KYTY_FLIP_RATE",
 	                                             "KYTY_DLSS_PRESET",
-	                                             "KYTY_AUDIO_OUTPUT",
-	                                             "KYTY_RUN_LOG"};
+	                                             "KYTY_DLSS_SHARPNESS",
+	                                             "KYTY_FSR_SHARPNESS",
+	                                             "KYTY_AUDIO_OUTPUT"};
 	return names;
 }
 
@@ -209,12 +211,14 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	    {"--console-language", std::to_string(S().Int("language"))}};
 	const auto ratio = S().Str("ratio");
 	const bool wide  = ratio == "21:9" || ratio == "32:9";
+	// (KYTY_PRESENT_ASPECT=fit: the 16:9 picture between black bars on a screen of another shape;
+	// with 21:9 or 32:9 the frames without the 3D view, the movies, the title and the loading
+	// screens, which fill the screen stretched otherwise: "wide_bars", in a window too.)
 	if (S().Bool("fullscreen")) {
 		options.push_back({"--fullscreen"});
-		// (Keeping 16:9 with 21:9 or 32:9 would keep movies and menus at 16:9: the wider ratios
-		// fill the screen.)
 		if (S().Bool("aspect") && !wide) Put(set, "KYTY_PRESENT_ASPECT", "fit");
 	}
+	if (wide && S().Bool("wide_bars")) Put(set, "KYTY_PRESENT_ASPECT", "fit");
 	if (S().Bool("hdr")) options.push_back({"--hdr"});
 	// The game's frames up to 120 fps: a 120 Hz vblank (run_ds.sh gives the game its least step
 	// above 60). The 30 fps lock (KYTY_FLIP_RATE=1 below) keeps 60.
@@ -247,7 +251,8 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 			convars = quality == "low"
 			              ? "r_forceViewportHeightForPixelSizeCalc=720;sunShadowMaxDistance=125"
 			              : "r_forceViewportHeightForPixelSizeCalc=480;sunShadowMaxDistance=60;"
-			                "r_enableAmbientShadowing=false;r_enableSpotShadows=false";
+			                "r_enableAmbientShadowing=false;r_enableSpotShadows=false;"
+			                "r_projectedDecalEnable=false";
 		}
 	}
 	// Upscaler "Off" (run-windows.ps1 -Antialiasing off, issue #220): Demon's Souls' TAA off and
@@ -285,6 +290,8 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	// Safe GPU mode: Demon's Souls' compute work one dispatch after another.
 	if (S().Bool("safegpu")) Put(set, "KYTY_COMPUTE_CHAIN", "0");
 	if (S().Bool("present_direct")) Put(set, "KYTY_PRESENT_DIRECT", "1");
+	// Frames flip as soon as they are done, not on the 60 Hz vblanks (VRR displays, issue #221).
+	if (S().Bool("vrr_flips")) Put(set, "KYTY_VRR", "1");
 	if (S().Bool("antilag")) Put(set, "KYTY_ANTI_LAG", "1");
 	// The game's 3D view at most every 2nd vblank: a steady 30 fps at the same game speed.
 	if (S().Bool("fps30")) Put(set, "KYTY_FLIP_RATE", "1");
@@ -292,14 +299,20 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	if (const auto preset = S().Str("dlss_preset");
 	    dlss && preset.size() == 1 && preset[0] >= 'A' && preset[0] <= 'O')
 		Put(set, "KYTY_DLSS_PRESET", preset);
+	// The sharpening chosen on the Graphics page: DLSS's (KYTY_DLSS_SHARPNESS, 0-1; none: not sharpened), FSR 3's
+	// (KYTY_FSR_SHARPNESS; none: its 0.6).
+	if (const auto sharpness = S().Str("dlss_sharpness");
+	    dlss && (sharpness == "0.3" || sharpness == "0.6" || sharpness == "0.9"))
+		Put(set, "KYTY_DLSS_SHARPNESS", sharpness);
+	if (const auto sharpness = S().Str("fsr_sharpness");
+	    FsrUpscaler() && (sharpness == "0" || sharpness == "0.3" || sharpness == "0.9"))
+		Put(set, "KYTY_FSR_SHARPNESS", sharpness);
 	// The audio output the game is told (it mixes for it; a TV when none is set, issue #207).
 	if (const auto output = S().Str("audio_output"); output == "headphones" || output == "amplifier" || output == "soundbar")
 		Put(set, "KYTY_AUDIO_OUTPUT", output);
 	Put(set, "MANGO", S().Bool("mangohud") && context_.HasMangoHud() ? "1" : "0");
 	Put(set, "KYTY_GAME", S().Str("game"));
 	if (!context_.emulator.empty()) Put(set, "KYTY_BIN", context_.emulator.string());
-	// (Named to the emulator too: F9's debug snapshot notes the run's log.)
-	Put(set, "KYTY_RUN_LOG", launch.log.string());
 
 	// The extra options: their pairs replace the launcher's (KEY= removes one the launcher set,
 	// else turns the emulator's own default off, 0), their --options the launcher's of the same
@@ -311,12 +324,12 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 		else if (!Remove(set, key))
 			Put(set, key, "0");
 	}
-	for (const auto& option: extra.options) {
+	// (Each of them stays: a repeated one, --keymap, is one more, not in place of the one before.)
+	for (const auto& option: extra.options)
 		options.erase(std::remove_if(options.begin(), options.end(),
 		                             [&](const auto& o) { return o[0] == option[0]; }),
 		              options.end());
-		options.push_back(option);
-	}
+	options.insert(options.end(), extra.options.begin(), extra.options.end());
 
 	launch.argv = {context_.run_script.string()};
 	for (const auto& option: options)

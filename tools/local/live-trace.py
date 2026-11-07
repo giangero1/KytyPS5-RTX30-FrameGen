@@ -330,9 +330,9 @@ def cmd_marks(t, args):
           ', '.join(f'{q} {v / frames:.2f}' for q, v in by_queue.most_common()))
     busy = sum(e - s for s, e, tick in t.gpu) / frames
     print(f'  GPU busy (command buffer spans): {busy:.2f} ms/frame; by kind:')
-    for kind in sorted(set(k for k, _ in total)):
-        print(f'    {kind:8s} {sum(v for (k, _), v in total.items() if k == kind) / frames:6.2f} | '
-              f'{sum(v for (k, _), v in after_flip.items() if k == kind) / frames:6.2f}')
+    for kind in sorted(set(key[0] for key in total)):
+        print(f'    {kind:8s} {sum(v for key, v in total.items() if key[0] == kind) / frames:6.2f} | '
+              f'{sum(v for key, v in after_flip.items() if key[0] == kind) / frames:6.2f}')
 
 
 def cmd_sites(t, args):

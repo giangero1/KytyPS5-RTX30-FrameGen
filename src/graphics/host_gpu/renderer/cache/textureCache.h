@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
+#include "graphics/host_gpu/renderer/cache/tickClock.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
@@ -151,6 +152,9 @@ public:
 		return ImageStateEpoch() + m_resolution_epoch.load(std::memory_order_acquire) +
 		       m_meta_epoch.load(std::memory_order_acquire) + Image::CpuDirtyEpoch();
 	}
+	// A use of the metadata at `address` by the image in serial slot `slot` (a table set's texture, a draw state's
+	// target, whose view names it): a change there moves the slot's image serial too (MoveMeta; ImageSerials).
+	void               NoteMetaUse(uint64_t address, uint32_t slot);
 	[[nodiscard]] bool IsMetaCleared(uint64_t address, uint32_t slice,
 	                                 uint32_t* fill_value = nullptr, bool* fill_known = nullptr);
 	[[nodiscard]] bool ClearMeta(uint64_t address);
@@ -246,6 +250,15 @@ private:
 	[[nodiscard]] ImageId     GetNullImage(const ImageDesc& desc);
 	void                      RegisterImage(ImageId id);
 	void                      UnregisterImage(ImageId id);
+	// The image serials (ImageSerials) of a registration change: the image's and those of the images over its pages.
+	void                      MoveRegistrationSerials(const Image& image);
+	// The metadata epoch, and the serials of the registered images whose metadata starts in [begin, end).
+	void                      MoveMeta(uint64_t begin, uint64_t end);
+	void                      MoveMeta(uint64_t address) { MoveMeta(address, address + 1); }
+	// A registered image's metadata address in m_meta_slots (`add` false: out of it).
+	void                      NoteMetaSlot(const Image& image, bool add);
+	// Every m_meta_slots entry of `slot` out (its image gone: NoteMetaUse's entries too).
+	void                      ForgetMetaSlot(uint32_t slot);
 	void                      DeleteImage(ImageId id);
 	// DeleteImage's halves: out of every index (false: it was not registered), then destroyed once no recorded work
 	// can read it.
@@ -296,6 +309,8 @@ private:
 	// A whole upload of a large image a piece of guest memory at a time; false: not such an image (ObtainBufferForImage's).
 	// `only`: the subresources over those [begin, end) ranges alone, of an image of any size.
 	[[nodiscard]] bool UploadImageChunked(Image& image, const std::vector<std::pair<uint64_t, uint64_t>>* only = nullptr);
+	// The size from which images upload in pieces (UploadImageChunked): 256 MiB, or half the staging ring where less.
+	[[nodiscard]] uint64_t ChunkedUploadMin() const;
 	[[nodiscard]] bool UploadImageSubresources(Image& image, const std::vector<std::pair<uint64_t, uint64_t>>& ranges);
 	// The dirty layers in [first_layer, last_layer) only.
 	[[nodiscard]] bool UploadDepthPartial(Image& image, uint32_t first_layer = 0,
@@ -401,6 +416,11 @@ private:
 	};
 	std::unordered_map<uint64_t, PartialPlan> m_partial_plans;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
+	// KYTY_TABLE_SERIALS: the registered images by their metadata address, as their serial slots (MoveMeta).
+	std::multimap<uint64_t, uint32_t> m_meta_slots;
+	// (Each slot's addresses in m_meta_slots: ForgetMetaSlot erases them alone, not a pass over every entry.)
+	std::unordered_map<uint32_t, std::vector<uint64_t>> m_meta_by_slot;
+	std::mutex                        m_meta_slots_lock;
 	std::atomic<uint64_t>                             m_meta_epoch {1};
 	// The m_surface_metas keys as bits of a 1024-bit filter: a clear bit proves an address holds
 	// no metadata without m_lock (IsMeta and ClearMeta run for the buffers of every dispatch).
@@ -420,12 +440,14 @@ private:
 	}
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t                                          m_trigger_gc_memory  = 0;
+	uint64_t                                          m_start_trigger_gc_memory = 0; // (the trigger at start-up)
 	uint64_t                                          m_logged_video_memory = 0; // RunGarbageCollector's log line
 	uint64_t                                          m_logged_shared_memory = 0;
 	uint64_t                                          m_logged_working_set   = 0; // (and its line on the PC's memory)
 	uint64_t                                          m_logged_private       = 0;
 	bool                                              m_logged_short_of_ram  = false;
 	uint64_t         m_gc_tick                = 0;
+	TickClock        m_tick_clock;                 // the collectors count ages in time
 	VideoMemoryPressure m_video_pressure {};
 	uint64_t m_pressure_report_ms = 0;
 	uint64_t m_retirement_bytes = 0, m_completed_retirement_bytes = 0;

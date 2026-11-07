@@ -115,6 +115,10 @@ Thanks to **[chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5
 > `_SaveData\PPSA01341\SAVEDATA0OptionsProfile0` away so the game asks again. Steps:
 > [Game language](docs/PORTABLE-README.md#game-language-chinese-japanese-korean-and-others).
 >
+> **Steam Deck:** about 26-30 fps in the worlds and 40 in the Nexus with the Deck's settings, from the release's Steam
+> Deck package (`KytyPS5-steamdeck-<version>.zip`). How to copy the emulator and the game over and start it from Steam:
+> [docs/STEAM-DECK.md](docs/STEAM-DECK.md).
+>
 > 中文：本分支专为《恶魔之魂》(PS5 版 PPSA01341) 优化，支持游戏版本 1.07 (01.007.000) 和 1.05 (01.005.000)，两者性能补丁相同
 > （着色器缓存按版本分别预编译）；其他版本和游戏未测试。
 > 下载[最新 release](https://github.com/chenxiao07/KytyPS5/releases/latest)，解压后双击 `launcher.cmd`
@@ -126,6 +130,8 @@ Thanks to **[chenxiao07/KytyPS5 v20261023](https://github.com/chenxiao07/KytyPS5
 > 英文、韩文、泰文；`3` 为日版）。已有存档时，先备份 `_SaveData`，再把 `_SaveData\PPSA01341\SAVEDATA0OptionsProfile0`
 > 移出存档目录（角色存档不受影响，只有游戏设置恢复默认），下次启动会出现语言选择。详见
 > [Game language](docs/PORTABLE-README.md#game-language-chinese-japanese-korean-and-others)。
+> **Steam Deck：** 用发布页的 Steam Deck 版的包（`KytyPS5-steamdeck-<版本>.zip`），按 Deck 的设置，各世界约 26–30 帧，
+> 连结之地约 40 帧。怎样把模拟器和游戏传到 Deck、从 Steam 启动：[docs/STEAM-DECK.zh-CN.md](docs/STEAM-DECK.zh-CN.md)。
 
 ## Fixes worth cherry-picking
 
@@ -342,10 +348,14 @@ package is built that way by [`.github/workflows/build.yml`](.github/workflows/b
 release (pushes build nothing). [`.github/workflows/build-linux.yml`](.github/workflows/build-linux.yml)
 builds the Linux package the same way (a `v*` tag adds it to that tag's release).
 
-AMD FSR 3.1 frame generation (2x, any GPU without DLSS frame generation; `run-windows.ps1 -Fsr`, a launcher
-checkbox) is built in when AMD FidelityFX SDK 1.1.4's API headers (`ffx-api/include`, MIT) are unpacked into
-`_Build\deps\fidelityfx\include` before configuring. At run time it needs AMD's signed `amd_fidelityfx_vk.dll` next
-to the emulator. The release build fetches the headers itself (as Streamline's); the DLL is not in the package.
+AMD's FSR runtime (frame generation, 2x, any GPU without DLSS frame generation: `run-windows.ps1 -Fsr`, a launcher
+checkbox; and with `-Upscaler fsr` FSR 4 upscaling on the Radeon cards AMD lists for it) is built in when AMD FSR SDK
+2.4's API headers (MIT) are unpacked into `_Build\deps\fsr-sdk` before configuring, keeping their layout:
+`Kits\FidelityFX\api\include`, `Kits\FidelityFX\framegeneration\include` and `Kits\FidelityFX\upscalers\include`. At
+run time it needs AMD's signed DLLs next to the emulator: SDK 2.4's `amd_fidelityfx_loader_vk.dll` with
+`amd_fidelityfx_framegeneration_vk.dll` and `amd_fidelityfx_upscaler_vk.dll`, or FidelityFX SDK 1.1.4's
+`amd_fidelityfx_vk.dll` (FSR 3.1 frame generation only). The release build fetches the headers itself (as
+Streamline's); the DLLs are not in the package.
 
 ### Build requirements (Windows)
 

@@ -55,7 +55,16 @@ bool Requested() {
 	static const bool requested = [] {
 		const char* low_latency = std::getenv("KYTY_LOW_LATENCY");
 		const char* anti_lag    = std::getenv("KYTY_ANTI_LAG");
-		return low_latency != nullptr && std::atoi(low_latency) != 0 && anti_lag != nullptr && std::atoi(anti_lag) != 0;
+		const char* framegen    = std::getenv("KYTY_FRAMEGEN");
+		const bool  wanted      = low_latency != nullptr && std::atoi(low_latency) != 0 && anti_lag != nullptr && std::atoi(anti_lag) != 0;
+		// Not with frame generation (FSR 3's, on an AMD GPU): its swapchain paces the presents itself, and with Anti-Lag's
+		// waits on top an RX 6650 XT's menus held the game ~100 ms a frame, 1% lows of 5-6 fps (issue #252).
+		if (wanted && framegen != nullptr && std::atoi(framegen) != 0) {
+			std::printf("Low latency: AMD Anti-Lag off with frame generation (FSR 3 paces the frames itself; issue #252)\n");
+			std::fflush(stdout);
+			return false;
+		}
+		return wanted;
 	}();
 	return requested;
 }

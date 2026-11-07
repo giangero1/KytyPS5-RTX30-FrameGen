@@ -295,6 +295,8 @@ struct Upscaler {
 		dispatch.depth         = ToResource(inputs.depth, L"KytyFsrDepth", false);
 		dispatch.motionVectors = ToResource(inputs.motion, L"KytyFsrMotion", false);
 		dispatch.output        = ToResource(inputs.output, L"KytyFsrOutput", true);
+		// (The game's reactive mask: the pixels taken from this frame rather than the history, issue #232.)
+		if (inputs.reactive.image) dispatch.reactive = ToResource(inputs.reactive, L"KytyFsrReactive", false);
 		// (Render pixels, as DLSS takes them; the game's vectors times their scale: render pixels to the previous position.)
 		dispatch.jitterOffset      = {jitter_x * inputs.jitter_x, jitter_y * inputs.jitter_y};
 		// Live switch fsr_mv_mode (a diagnostic): 1 the vectors negated, 2 none (zero), 3 half the scale.
@@ -493,7 +495,9 @@ Interpolator& TheInterpolator() {
 } // namespace
 
 bool Upscale(GraphicContext& graphics, vk::CommandBuffer command, const FrameGen::UpscaleInputs& inputs) {
-	return UpscalerRequested() && TheUpscaler().Record(graphics, command, inputs);
+	// AMD's runtime where there is one (Windows, FSR SDK 2: FSR 4 on the Radeon cards AMD lists for it), else built in.
+	return UpscalerRequested() && (FrameGen::UpscaleWithAmdRuntime(graphics, command, inputs) ||
+	                               TheUpscaler().Record(graphics, command, inputs));
 }
 
 bool Interpolate(GraphicContext& graphics, vk::CommandBuffer command, const InterpolationInputs& inputs,

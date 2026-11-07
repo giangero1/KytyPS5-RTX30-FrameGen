@@ -101,7 +101,7 @@ sealed class GameInfo {
 	}
 }
 
-enum StoreState { Unknown, Checking, None, Current, Outdated }
+enum StoreState { Unknown, Checking, None, Current, Outdated, OutdatedAll }
 
 // The precompiled shaders of a game version (_PipelineCache\static\<title>_<version>.*): what run-windows.ps1 asks the
 // precompile program (--status) before it offers the precompile.
@@ -113,7 +113,8 @@ static class ShaderStore {
 	static StoreState Check(LauncherContext context, GameInfo game) {
 		if (!game.Found) return StoreState.Unknown;
 		var store = Path.Combine(context.Root, "_PipelineCache", "static");
-		var made = new[] { ".binaries", ".bin" }.Any(ext => File.Exists(Path.Combine(store, game.GameId + ext)));
+		// (.blobs: the store of a driver without pipeline binaries, each pipeline's own cache data; issue #290.)
+		var made = new[] { ".binaries", ".bin", ".blobs" }.Any(ext => File.Exists(Path.Combine(store, game.GameId + ext)));
 		if (!made) return StoreState.None;
 		var seedName = "seeds-" + game.GameId + ".seeds";
 		var seeds = new[] { Path.Combine(context.Root, seedName), Path.Combine(context.Root, "_Build", "static-precompile", seedName) }
@@ -124,7 +125,9 @@ static class ShaderStore {
 			var code = GameInfo.RunHidden(context.PrecompileTool, "--game \"" + game.Path + "\" --seeds \"" + seeds + "\" --status", context.Root, 60000, output);
 			if (code != 0) return StoreState.Unknown;
 			var text = output.ToString();
-			if (text.Contains("static cache outdated")) return StoreState.Outdated;
+			// (OutdatedAll: the store lacks a translation that changes nearly every shader, so the precompile redoes it all,
+			// issue #246.)
+			if (text.Contains("static cache outdated")) return text.Contains("next precompile all") ? StoreState.OutdatedAll : StoreState.Outdated;
 			if (text.Contains("static cache current")) {
 				// (A precompile that stopped before its last merge leaves large shard checkpoints. One older than its store is
 				// an earlier run's - another graphics driver's, which no merge takes, issue #126 - not an unfinished one.)

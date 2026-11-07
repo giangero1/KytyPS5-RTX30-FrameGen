@@ -391,6 +391,21 @@ add_custom_command(
 	VERBATIM
 )
 list(APPEND kyty_emulator_src "${sr_exposure_header}")
+# ... and with DLSS's sharpening (KYTY_DLSS_SHARPNESS, sr-sharpen.comp).
+set(sr_sharpen_source "${KYTY_SOURCE_DIR}/local/sr-sharpen.comp")
+set(sr_sharpen_spv "${gpu_tiler_generated_dir}/sr_sharpen.spv")
+set(sr_sharpen_header "${gpu_tiler_generated_dir}/sr_sharpen_spv.h")
+add_custom_command(
+	OUTPUT "${sr_sharpen_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+	        -o "${sr_sharpen_spv}" "${sr_sharpen_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${sr_sharpen_spv} -DOUTPUT=${sr_sharpen_header}
+	        -DSYMBOL=SR_SHARPEN_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${sr_sharpen_source}" "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${sr_sharpen_header}")
 
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
@@ -398,6 +413,7 @@ set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_color_to_ms_depth.frag"
 	"${gpu_tiler_shader_dir}/gpu_imgui_hdr.frag"
 	"${gpu_tiler_shader_dir}/fsr_hud_mask.frag"
+	"${gpu_tiler_shader_dir}/present_dither.frag"
 )
 foreach(shader_source IN LISTS gpu_blit_shader_sources)
 	get_filename_component(shader_name "${shader_source}" NAME_WE)
@@ -433,8 +449,6 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/anti-lag.cpp"
 	"${KYTY_SOURCE_DIR}/local/fsr-native.h"
 	"${KYTY_SOURCE_DIR}/local/fsr-native.cpp"
-	"${KYTY_SOURCE_DIR}/local/debug-snapshot.h"
-	"${KYTY_SOURCE_DIR}/local/debug-snapshot.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.cpp"
 	"${KYTY_SOURCE_DIR}/local/resource-plan-serial.h"
@@ -948,13 +962,15 @@ if (WIN32)
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_STREAMLINE=1)
 	endif()
-	# KYTY_FRAMEGEN_BACKEND=fsr: AMD FidelityFX SDK 1.1.4's API headers (ffx-api/include, MIT) when unpacked under
-	# _Build/deps/fidelityfx; its runtime (amd_fidelityfx_vk.dll, signed by AMD) goes next to the emulator.
-	set(KYTY_FIDELITYFX_SDK "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/fidelityfx" CACHE PATH
-	    "AMD FidelityFX SDK (ffx-api) for KYTY_FRAMEGEN_BACKEND=fsr")
-	if (EXISTS "${KYTY_FIDELITYFX_SDK}/include/ffx_api/ffx_api.h")
+	# AMD's FSR runtime (KYTY_FRAMEGEN_BACKEND=fsr, and KYTY_UPSCALER=fsr with FSR SDK 2's): AMD FSR SDK 2.4's API
+	# headers (Kits/FidelityFX/api, framegeneration and upscalers include folders, MIT) when unpacked under
+	# _Build/deps/fsr-sdk; the runtime (amd_fidelityfx_loader_vk.dll with its effect DLLs, or FidelityFX SDK 1.1.4's
+	# amd_fidelityfx_vk.dll, signed by AMD) is the user's, next to the emulator.
+	set(KYTY_FSR_SDK "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/fsr-sdk" CACHE PATH
+	    "AMD FSR SDK 2 (its Kits/FidelityFX headers) for AMD's FSR runtime")
+	if (EXISTS "${KYTY_FSR_SDK}/Kits/FidelityFX/api/include/ffx_api.h")
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
-		             INCLUDE_DIRECTORIES "${KYTY_FIDELITYFX_SDK}/include")
+		             INCLUDE_DIRECTORIES "${KYTY_FSR_SDK}/Kits/FidelityFX")
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_FSR=1)
 	endif()

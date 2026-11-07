@@ -177,6 +177,11 @@ bool                   TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t si
 // (address, size), in order): what can be read of a range that reaches into unmapped memory.
 [[nodiscard]] bool     IsFullyMapped(uint64_t vaddr, uint64_t size);
 void                   MappedParts(uint64_t vaddr, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>* parts);
+// The 2 MiB granules (guest address >> CommittedGranuleBits, below 1 TiB) that hold a committed page, ascending, into
+// `out` (replaced) when their version differs from `*version` (0 at first; made current); false, `out` as it was, when
+// it is the same.
+inline constexpr uint32_t CommittedGranuleBits = 21;
+bool                   CommittedGranules(uint64_t* version, std::vector<uint32_t>* out);
 // `source` names the path in crash reports (PrintWriteBacksOverlapping).
 void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t size,
                                     const char* source = "image") noexcept;
@@ -199,6 +204,8 @@ bool TryPrepareHostOverwrite(uint64_t vaddr, uint64_t size);
 // The images over the range only (a GPU-written image's bytes here are stale: they are rewritten as InvalidateMemory
 // would make them).
 bool TryPrepareHostImageWrite(uint64_t vaddr, uint64_t size);
+// Whether a page of the range is one the GPU caches' trackers protect (PageManager::WatchedSpan: no system call).
+[[nodiscard]] bool GuestRangeWatched(uint64_t vaddr, uint64_t size);
 void                   InstallGpuResources(Graphics::GpuResourceManager* resources) noexcept;
 // Whether a guest mapping holds vaddr once a mapping change under way is done (it waits for one).
 [[nodiscard]] bool     IsGuestMappedAfterChanges(uint64_t vaddr);

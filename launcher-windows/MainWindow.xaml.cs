@@ -36,14 +36,16 @@ partial class MainWindow : Window {
 		{ "21:9", new[] { "2560x1080", "3440x1440", "3840x1600", "5120x2160" } },
 		{ "32:9", new[] { "3840x1080", "5120x1440", "7680x2160" } },
 	};
-	// The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
-	static readonly int[] RenderHeights = { 2160, 1800, 1620, 1512, 1440, 1296, 1152, 1080, 900, 720 };
+	// The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160. The
+	// upscalers' usual shares among them (issue #129): Ultra Quality 77% (1664 of 4K, 832 of 1080p), Quality 66.7%
+	// (1440), Balanced 58% (1256), Performance 50% (1080), Ultra Performance 33% (720).
+	static readonly int[] RenderHeights = { 2160, 1800, 1664, 1620, 1512, 1440, 1296, 1256, 1152, 1080, 900, 832, 720 };
 	// Below 720 with the 1080p output only (issue #129): DLSS's Balanced, Performance and Ultra Performance there; the
 	// game's TAA down to 540 (from 360 its picture is too soft).
 	static readonly int[] LowRenderHeights = { 630, 540, 360 };
-	// The 1440p output's (DLSS or FSR 3, PR #165): DLAA, Quality, Balanced 840, Performance 720, Ultra Performance 480 (its
-	// third; the emulator raises a height between the third and the half to the half).
-	static readonly int[] Output1440Heights = { 1440, 1152, 1080, 960, 840, 720, 480 };
+	// The 1440p output's (DLSS or FSR 3, PR #165): DLAA, Ultra Quality 1104, Quality 960, Balanced 840, Performance 720,
+	// Ultra Performance 480 (its third; the emulator raises a height between the third and the half to the half).
+	static readonly int[] Output1440Heights = { 1440, 1152, 1104, 1080, 960, 840, 720, 480 };
 
 	// (--screenshot pictures: no game art, another path shown.)
 	public static bool ScreenshotNoArt;
@@ -64,9 +66,11 @@ partial class MainWindow : Window {
 	int pageIndex;
 
 	TextBox gamePath, extraArgs;
-	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, audioOutput, hud, uiLanguage, gpu;
-	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, antiLag,
-		keepResident, fps30, padSpeaker, reopenLauncher;
+	ComboBox resolution, ratio, render, upscaler, dlssModel, sharpness, output, quality, frameGen, language, audioOutput, hud, uiLanguage, gpu;
+	// The Sharpening row's value for each upscaler ("0" to "0.9"), and the upscaler whose value it shows.
+	string dlssSharpness = "0", fsrSharpness = "0.6", sharpnessShown = "";
+	CheckBox fullscreen, aspect, wideBars, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, vrrFlips,
+		antiLag, keepResident, fps30, padSpeaker, reopenLauncher, keyboardPrompts;
 	TextBlock renderNote, outputNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
 	Image banner;
 	Border bannerFallback;
@@ -420,6 +424,7 @@ partial class MainWindow : Window {
 			case StoreState.Checking: return T("shaders.checking");
 			case StoreState.Current: mark = Mark.Good; return T("shaders.current");
 			case StoreState.Outdated: mark = Mark.Warn; return T("shaders.outdated");
+			case StoreState.OutdatedAll: mark = Mark.Warn; return T("shaders.outdatedAll");
 			case StoreState.None: mark = Mark.Warn; return T("shaders.none");
 			default: return game.Found ? T("shaders.unknown") : null;
 		}
@@ -437,8 +442,11 @@ partial class MainWindow : Window {
 			WindowChanged();
 		};
 		UpdateResolutions(S.Str("resolution"));
+		// (With 21:9 or 32:9 only: the movies and menus at 16:9 between black bars, Commands.)
+		wideBars = Switch(S.Bool("wide_bars"), Ratio() != "16:9");
 		ratio.SelectionChanged += (s, e) => {
 			if (building) return;
+			wideBars.IsEnabled = Ratio() != "16:9";
 			UpdateResolutions(Value(resolution) as string ?? S.Str("resolution"));
 			SelectRenderHeight();
 			UpdateRenderNote();
@@ -462,6 +470,7 @@ partial class MainWindow : Window {
 			Section("display.window"),
 			Row("resolution", resolution, Desc(T("resolution.desc"))),
 			Row("ratio", ratio, Desc(T("ratio.desc"))),
+			Row("widebars", wideBars, Desc(T("widebars.desc"))),
 			Row("fullscreen", fullscreen),
 			Row("aspect", aspect, Desc(T("aspect.desc"))),
 			Row("hdr", hdr, Desc(T("hdr.desc"))),
@@ -539,9 +548,27 @@ partial class MainWindow : Window {
 			UpdateOutputNote();
 		};
 		// The DLSS model (KYTY_DLSS_PRESET): the DLSS version's own choice, its transformer or its CNN model.
-		var models = new[] { new Choice(T("dlssmodel.auto"), ""), new Choice(T("dlssmodel.k"), "K"), new Choice(T("dlssmodel.e"), "E") };
+		var models = new[] { new Choice(T("dlssmodel.auto"), ""), new Choice(T("dlssmodel.k"), "K"), new Choice(T("dlssmodel.m"), "M"),
+		                     new Choice(T("dlssmodel.l"), "L"), new Choice(T("dlssmodel.e"), "E") };
 		dlssModel = Combo(models, Math.Max(0, Array.FindIndex(models, c => (string)c.Value == S.Str("dlss_preset"))));
 		dlssModel.IsEnabled = Value(upscaler) as string == "dlss";
+		// The upscaler's sharpening (KYTY_DLSS_SHARPNESS, KYTY_FSR_SHARPNESS): one row for the chosen upscaler, each with a
+		// value of its own: DLSS none by default (the game's own TAA sharpens, DLSS does not: issue #224), FSR 3 its 0.6
+		// (issue #227).
+		var sharpnesses = new[] { new Choice(T("sharpen.off"), "0"), new Choice(T("sharpen.low"), "0.3"),
+			new Choice(T("sharpen.medium"), "0.6"), new Choice(T("sharpen.high"), "0.9") };
+		Func<string, string, string> sharpnessOr = (value, fallback) => Array.Exists(sharpnesses, c => (string)c.Value == value) ? value : fallback;
+		dlssSharpness = sharpnessOr(S.Str("dlss_sharpness"), "0");
+		fsrSharpness  = sharpnessOr(S.Str("fsr_sharpness"), "0.6");
+		sharpness     = Combo(sharpnesses, 0);
+		Action showSharpness = () => {
+			KeepSharpness();
+			sharpnessShown = Value(upscaler) as string ?? "";
+			var shown = sharpnessShown == "fsr" ? fsrSharpness : dlssSharpness;
+			sharpness.SelectedIndex = Math.Max(0, Array.FindIndex(sharpnesses, c => (string)c.Value == shown));
+			sharpness.IsEnabled = sharpnessShown == "dlss" || sharpnessShown == "fsr";
+		};
+		showSharpness();
 		upscaler.SelectionChanged += (s, e) => {
 			if (building) return;
 			// The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
@@ -549,6 +576,7 @@ partial class MainWindow : Window {
 			renderForDlss = Value(upscaler) as string == "dlss" || Value(upscaler) as string == "fsr";
 			renderWanted = renderForDlss ? S.Int("render_dlss") : S.Int("render");
 			dlssModel.IsEnabled = Value(upscaler) as string == "dlss";
+			showSharpness();
 			UpdateUpscalerNote();
 			SelectRenderHeight();
 			UpdateRenderNote();
@@ -584,6 +612,7 @@ partial class MainWindow : Window {
 			Row("render", render, renderNote),
 			Row("output", output, outputNote),
 			Row("dlssmodel", dlssModel, Desc(T("dlssmodel.desc"))),
+			Row("sharpen", sharpness, Desc(T("sharpen.desc"))),
 			Section("graphics.detail"),
 			Row("quality", quality, Desc(T("quality.desc"))),
 			Section("graphics.fg"),
@@ -639,12 +668,13 @@ partial class MainWindow : Window {
 	}
 
 	// The DLSS mode a render height runs in: the emulator picks it from the height's share of the game's output
-	// (frame-gen.cpp: 95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance).
+	// (frame-gen.cpp: 95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance). From 72% it is named
+	// Ultra Quality (77% the usual share), DLSS's Quality mode with more lines.
 	string SuperResolutionMode(int height) {
 		var share = (double)height / OutputLines;
 		// (FSR 3 names the same modes; at the output's own size it is FSR's native anti-aliasing.)
 		var native = upscaler != null && Value(upscaler) as string == "fsr" ? "fsr.native" : "dlss.dlaa";
-		return T(share >= 0.95 ? native : share >= 0.62 ? "dlss.quality" : share >= 0.55 ? "dlss.balanced" : share >= 0.45 ? "dlss.performance" : "dlss.ultra");
+		return T(share >= 0.95 ? native : share >= 0.72 ? "dlss.ultraquality" : share >= 0.62 ? "dlss.quality" : share >= 0.55 ? "dlss.balanced" : share >= 0.45 ? "dlss.performance" : "dlss.ultra");
 	}
 
 	// The highest render height whose 3D at the ratio fits the game's render target memory, made for 3840x2160: no more of
@@ -720,7 +750,7 @@ partial class MainWindow : Window {
 
 	void UpdateUpscalerNote() {
 		var chosen = upscaler == null ? S.Str("upscaler") : Value(upscaler) as string;
-		// (DLSS with FSR 3 frame generation: that runs without Streamline, so the emulator upscales with FSR 3 instead.)
+		// (DLSS with FSR 3 frame generation: DLSS upscales through Streamline, AMD's runtime generates past it.)
 		var fsrFrameGen = fsr != null ? fsr.IsChecked == true : context.FsrAvailable && S.Bool("fsr");
 		upscalerNote.Text = chosen == "fsr" ? T("upscaler.fsrNote")
 		                    : chosen == "off" ? T("upscaler.offNote")
@@ -758,11 +788,17 @@ partial class MainWindow : Window {
 		choose.Margin = new Thickness(16, 0, 0, 0);
 		cheatState = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 0, 0) };
 		padSpeaker = Switch(S.Bool("pad_speaker"));
+		keyboardPrompts = Switch(S.Bool("keyboard_prompts"));
 		return Page("game.title",
 			Section("game.console"),
 			Row("language", language, Desc(T("language.desc"))),
 			Row("audiooutput", audioOutput, Desc(T("audiooutput.desc"))),
 			Section("game.controller"),
+			Row("keyboardprompts", keyboardPrompts, Desc(T("keyboardprompts.desc"))),
+			Row("keyboardcontrols", FlatButton("keyboardcontrols.edit", (s, e) => {
+				try { new KeyboardControlsWindow(S) { Owner = this }.ShowDialog(); }
+				catch (Exception error) { MessageBox.Show(this, error.Message, T("keyboardcontrols")); }
+			}), Desc(T("keyboardcontrols.desc"))),
 			Row("padspeaker", padSpeaker, Desc(T("padspeaker.desc"))),
 			Row("padvolume", SliderRow(0, 100, 5, S.Int("pad_speaker_volume"),
 				v => ((int)v).ToString(CultureInfo.InvariantCulture), v => S.Set("pad_speaker_volume", (int)v)), Desc(T("padvolume.desc"))),
@@ -873,6 +909,7 @@ partial class MainWindow : Window {
 	// Options still being tried out (not defaults yet): a player turns one on, and its issue collects how it went.
 	FrameworkElement BuildExperimentalPage() {
 		presentDirect = Switch(S.Bool("present_direct"));
+		vrrFlips = Switch(S.Bool("vrr_flips"));
 		antiLag = Switch(S.Bool("antilag") && context.AmdGpu, context.AmdGpu);
 		keepResident = Switch(S.Bool("keep_resident"));
 		fps30 = Switch(S.Bool("fps30"));
@@ -884,6 +921,8 @@ partial class MainWindow : Window {
 			Section("experimental.display"),
 			Row("presentdirect", presentDirect, Desc(T("presentdirect.desc"))),
 			Row(null, Feedback(37)),
+			Row("vrrflips", vrrFlips, Desc(T("vrrflips.desc"))),
+			Row(null, Feedback(221)),
 			Section("experimental.memory"),
 			Row("keepresident", keepResident, Desc(T("keepresident.desc"))),
 			Row(null, Feedback(50)),
@@ -913,6 +952,14 @@ partial class MainWindow : Window {
 		UpdateSummary();
 	}
 
+	// The Sharpening row's value back to the upscaler it shows (the other's stays as it was).
+	void KeepSharpness() {
+		if (sharpness == null) return;
+		var value = Value(sharpness) as string ?? "";
+		if (sharpnessShown == "dlss") dlssSharpness = value;
+		else if (sharpnessShown == "fsr") fsrSharpness = value;
+	}
+
 	// The controls into the settings, saved (launcher.ps1's Read-Form).
 	void ReadForm() {
 		if (gamePath == null || render == null) return;
@@ -922,6 +969,7 @@ partial class MainWindow : Window {
 		if (res != null) S.Set("resolution", res);
 		S.Set("fullscreen", fullscreen.IsChecked == true);
 		S.Set("aspect", aspect.IsChecked == true);
+		S.Set("wide_bars", wideBars.IsChecked == true);
 		S.Set("language", Math.Max(0, language.SelectedIndex));
 		S.Set("redzone", redzone.IsChecked == true);
 		S.Set("fps120", fps120.IsChecked == true);
@@ -930,6 +978,7 @@ partial class MainWindow : Window {
 		S.Set("hdr", hdr.IsChecked == true);
 		S.Set("cheats", cheats.IsChecked == true);
 		S.Set("pad_speaker", padSpeaker.IsChecked == true);
+		S.Set("keyboard_prompts", keyboardPrompts.IsChecked == true);
 		if (reopenLauncher != null) S.Set("reopen_launcher", reopenLauncher.IsChecked == true);
 		S.Set("safegpu", safeGpu.IsChecked == true);
 		S.Set("hud", Math.Max(0, hud.SelectedIndex));
@@ -943,11 +992,15 @@ partial class MainWindow : Window {
 		var chosenUpscaler = Value(upscaler) as string ?? "";
 		if (!(S.Str("upscaler") == "dlss" && !context.FrameGenAvailable && chosenUpscaler.Length == 0)) S.Set("upscaler", chosenUpscaler);
 		S.Set("dlss_preset", Value(dlssModel) as string ?? "");
+		KeepSharpness();
+		S.Set("dlss_sharpness", dlssSharpness == "0" ? "" : dlssSharpness);
+		S.Set("fsr_sharpness", fsrSharpness == "0.6" ? "" : fsrSharpness);
 		S.Set("audio_output", Value(audioOutput) as string ?? "");
 		S.Set("gpu", Value(gpu) as string ?? "");
 		if (context.FsrAvailable) S.Set("fsr", fsr.IsChecked == true);
 		S.Set("ecores", ecores.IsChecked == true);
 		S.Set("present_direct", presentDirect.IsChecked == true);
+		S.Set("vrr_flips", vrrFlips.IsChecked == true);
 		S.Set("antilag", antiLag.IsChecked == true && context.AmdGpu);
 		S.Set("keep_resident", keepResident.IsChecked == true);
 		S.Set("fps30", fps30.IsChecked == true);
@@ -979,9 +1032,11 @@ partial class MainWindow : Window {
 		else if (S.Bool("fps120")) options.Add(T("summary.fps120"));
 		if (S.Bool("lowlatency")) options.Add(T("lowlatency"));
 		if (S.Bool("hdr")) options.Add(T("summary.hdr"));
+		if (S.Bool("wide_bars") && S.Str("ratio") != "16:9") options.Add(T("summary.wideBars"));
 		if (hdOutput) options.Add(T("summary.hd"));
 		if (output1440) options.Add(T("summary.1440"));
 		if (S.Bool("present_direct")) options.Add(T("summary.presentDirect"));
+		if (S.Bool("vrr_flips")) options.Add(T("summary.vrrFlips"));
 		if (S.Bool("antilag")) options.Add(T("summary.antilag"));
 		if (S.Bool("keep_resident")) options.Add(T("summary.keepResident"));
 		if (!S.Bool("pad_speaker")) options.Add(T("summary.padSpeakerOff"));
@@ -1020,7 +1075,7 @@ partial class MainWindow : Window {
 		ReadForm();
 		Process process;
 		try {
-			process = commands.Start(commands.PlayArguments(game.Found ? game : null));
+			process = commands.StartPlay();
 		} catch (Exception e) {
 			MessageBox.Show(this, F("error.start", e.Message), T("error.title"), MessageBoxButton.OK, MessageBoxImage.Error);
 			return;

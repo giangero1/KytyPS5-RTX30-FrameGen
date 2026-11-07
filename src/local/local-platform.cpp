@@ -1,6 +1,7 @@
 #include "local-platform.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -39,6 +40,7 @@
 #include <string>
 #include <thread>
 #else
+#include <cerrno>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -56,6 +58,7 @@
 #if defined(__linux__)
 #include <linux/membarrier.h>
 #include <malloc.h>
+#include <sys/vfs.h>
 #endif
 #endif
 
@@ -657,6 +660,11 @@ uint32_t g_follow_window = 1024, g_follow_threads = 16;
 // an order of its own, and windows of files it read a moment before opened again those just closed (25-60 thousand
 // opens a minute through a tour of four worlds, 45-90 thousand files open at once).
 constexpr uint64_t FollowAgainMs = 5 * 60 * 1000;
+// The files kept open at most before the openers stop opening ahead (the game's own opens are never held back). A
+// player's loads stuck in the fog for good after a world change with 64,481 files open, about 2^16 (the game's folder
+// on a drive whose file system or driver takes no more, it seems), and went through with the read-ahead off (issue
+// #249); this desktop peaked at 42 thousand. Lowered when an open of the game's fails (CloseFilesOpenedAhead).
+std::atomic<size_t> g_kept_open_max {48 * 1024};
 
 void FollowOpenThread() {
 	SetThreadName("Kyty.FileOpen");
@@ -671,7 +679,7 @@ void FollowOpenThread() {
 		}
 		{
 			const std::lock_guard lock(g_kept_files_mutex);
-			if (g_kept_files.contains(path)) continue;
+			if (g_kept_files.contains(path) || g_kept_files.size() >= g_kept_open_max.load(std::memory_order_relaxed)) continue;
 		}
 		const auto wide = WidePath(path);
 		if (wide.empty()) continue;
@@ -783,6 +791,40 @@ void FollowFrom(const std::string& path) {
 	if (any) g_follow.ready.notify_all();
 }
 
+// An open of the game's failed for want of something other than the file (issue #249: the loads of a player whose
+// drive seems to take about 2^16 open files stopped): the files opened ahead and not read yet close, the openers keep
+// at most three quarters of what was open from then on, and the first few such failures go in the log. The number
+// closed (0: none to give back).
+size_t CloseFilesOpenedAhead(const std::string& path, DWORD error) {
+	std::vector<HANDLE> handles;
+	size_t              open = 0;
+	{
+		const std::lock_guard lock(g_kept_files_mutex);
+		open = g_kept_files.size();
+		for (auto it = g_kept_files.begin(); it != g_kept_files.end();) {
+			if (it->second.ahead && it->second.readers == 0) {
+				handles.push_back(it->second.handle);
+				it = g_kept_files.erase(it);
+			} else {
+				++it;
+			}
+		}
+		g_kept_open_max.store(std::min(g_kept_open_max.load(std::memory_order_relaxed), std::max<size_t>(open * 3 / 4, 1024)),
+		                      std::memory_order_relaxed);
+	}
+	for (const auto handle: handles)
+		CloseHandle(handle);
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 5) {
+		std::printf("Files: opening %s failed (error %lu) with %zu files open: %zu opened ahead closed, the read-ahead keeps at "
+		            "most %zu open from now on (issue #249)\n",
+		            path.c_str(), static_cast<unsigned long>(error), open, handles.size(),
+		            g_kept_open_max.load(std::memory_order_relaxed));
+		std::fflush(stdout);
+	}
+	return handles.size();
+}
+
 uint64_t OpenKeptReadFile(const std::string& path, uint64_t* size) {
 	{
 		std::unique_lock lock(g_kept_files_mutex);
@@ -801,9 +843,18 @@ uint64_t OpenKeptReadFile(const std::string& path, uint64_t* size) {
 	// read of a file kept open already (an audio stream's next piece) waited for them behind it (open=150-250 ms).
 	const auto wide = WidePath(path);
 	if (wide.empty()) return 0;
-	HANDLE handle = CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-	                            FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (handle == INVALID_HANDLE_VALUE) return 0;
+	const auto open = [&] {
+		return CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+		                   FILE_ATTRIBUTE_NORMAL, nullptr);
+	};
+	HANDLE handle = open();
+	if (handle == INVALID_HANDLE_VALUE) {
+		// (Not for a file that is not there: the game asks for some.)
+		if (const DWORD error = GetLastError();
+		    error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && CloseFilesOpenedAhead(path, error) != 0)
+			handle = open();
+		if (handle == INVALID_HANDLE_VALUE) return 0;
+	}
 	LARGE_INTEGER length {};
 	if (GetFileSizeEx(handle, &length) == 0) {
 		CloseHandle(handle);
@@ -843,6 +894,9 @@ void FollowKeptFiles(const std::string& recording, const std::string& root) {
 			g_follow_window = std::clamp(static_cast<uint32_t>(std::strtoul(value, nullptr, 10)), 1u, 65536u);
 		if (const char* value = std::getenv("KYTY_FILE_FOLLOW_THREADS"); value != nullptr && *value != '\0')
 			g_follow_threads = std::clamp(static_cast<uint32_t>(std::strtoul(value, nullptr, 10)), 1u, 64u);
+		// KYTY_FILE_OPEN_MAX=<n>: the files kept open before the openers stop (g_kept_open_max).
+		if (const char* value = std::getenv("KYTY_FILE_OPEN_MAX"); value != nullptr && *value != '\0')
+			g_kept_open_max.store(std::max<size_t>(std::strtoull(value, nullptr, 10), 256), std::memory_order_relaxed);
 		std::lock_guard lock(g_follow.mutex);
 		g_follow.root = root;
 		if (!g_follow.root.empty() && g_follow.root.back() != '/' && g_follow.root.back() != '\\') g_follow.root += '/';
@@ -970,6 +1024,20 @@ void MakeCriticalThread() {
 	(void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 }
 
+NormalPriority::NormalPriority() {
+	m_saved   = GetThreadPriority(GetCurrentThread());
+	m_changed = m_saved != THREAD_PRIORITY_ERROR_RETURN && m_saved > THREAD_PRIORITY_NORMAL &&
+	          SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) != 0;
+}
+
+NormalPriority::~NormalPriority() {
+	if (m_changed) (void)SetThreadPriority(GetCurrentThread(), m_saved);
+}
+
+int KeepRenderCoreAlone() {
+	return -1;
+}
+
 namespace {
 // d3dkmthk.h (WDK) structures for the display's vertical blank, taken from gdi32 at run time.
 using KmtHandle = UINT;
@@ -1070,16 +1138,105 @@ int DisplayRefreshHz(void* window) {
 	return mode.dmDisplayFrequency > 1 ? static_cast<int>(mode.dmDisplayFrequency) : 0;
 }
 
+// The largest visible top-level window of process `pid` or of a process it started: Steam's windows, Big Picture's full
+// screen one among them, belong to the steamwebhelper.exe it starts.
+static HWND LargestWindowOf(DWORD pid) {
+	struct Search {
+		std::vector<DWORD> pids;
+		HWND               best = nullptr;
+		LONG               area = 0;
+	} search {{pid}};
+	if (HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0); snapshot != INVALID_HANDLE_VALUE) {
+		PROCESSENTRY32W entry {};
+		entry.dwSize = sizeof(entry);
+		for (BOOL more = Process32FirstW(snapshot, &entry); more != FALSE; more = Process32NextW(snapshot, &entry)) {
+			if (entry.th32ParentProcessID == pid) search.pids.push_back(entry.th32ProcessID);
+		}
+		CloseHandle(snapshot);
+	}
+	EnumWindows(
+	    [](HWND window, LPARAM parameter) -> BOOL {
+		    auto& s     = *reinterpret_cast<Search*>(parameter);
+		    DWORD owner = 0;
+		    RECT  rect {};
+		    if (GetWindowThreadProcessId(window, &owner) != 0 &&
+		        std::find(s.pids.begin(), s.pids.end(), owner) != s.pids.end() && IsWindowVisible(window) != FALSE &&
+		        GetWindow(window, GW_OWNER) == nullptr && GetWindowRect(window, &rect) != FALSE) {
+			    const LONG area = (rect.right - rect.left) * (rect.bottom - rect.top);
+			    if (area > s.area) {
+				    s.area = area;
+				    s.best = window;
+			    }
+		    }
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&search));
+	return search.best;
+}
+
+// A window for the log: its class and its program ("'SDL_app' of steamwebhelper.exe").
+static std::string DescribeWindow(HWND window) {
+	char  name[64] = {};
+	DWORD pid      = 0;
+	GetClassNameA(window, name, sizeof(name));
+	GetWindowThreadProcessId(window, &pid);
+	char program[MAX_PATH] = "?";
+	if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid); process != nullptr) {
+		DWORD size = sizeof(program);
+		if (QueryFullProcessImageNameA(process, 0, program, &size) == FALSE) std::strcpy(program, "?");
+		CloseHandle(process);
+	}
+	const char* file = std::strrchr(program, '\\');
+	return std::string("'") + name + "' of " + (file != nullptr ? file + 1 : program);
+}
+
 void ReturnFocus(void* window) {
 	const char* value = std::getenv("KYTY_RETURN_FOCUS");
 	if (value == nullptr || *value == '\0') return;
-	const auto target = reinterpret_cast<HWND>(static_cast<uintptr_t>(std::strtoull(value, nullptr, 10)));
-	if (target == nullptr || target == static_cast<HWND>(window) || IsWindow(target) == FALSE) return;
+	const auto own     = static_cast<HWND>(window);
+	const auto started = reinterpret_cast<HWND>(static_cast<uintptr_t>(std::strtoull(value, nullptr, 10)));
+	auto       target  = started;
+	// The window that had the focus as the launcher started can be gone or hidden by now (issue #217: Big Picture still
+	// lost it): the largest visible window of the process that started the launcher (Steam) or of one Steam started.
+	if (target == nullptr || target == own || IsWindow(target) == FALSE || IsWindowVisible(target) == FALSE) {
+		std::printf("Focus: the window in front as the game started (%s) is gone or hidden\n", value);
+		const char* pid = std::getenv("KYTY_RETURN_FOCUS_PID");
+		target          = pid != nullptr ? LargestWindowOf(static_cast<DWORD>(std::strtoul(pid, nullptr, 10))) : nullptr;
+	}
+	if (target == nullptr || target == own) {
+		std::printf("Focus: no window to give it back to\n");
+		std::fflush(stdout);
+		return;
+	}
 	// Handed over while the game's window has the focus (Windows lets the process that has it give it away), then the
-	// game's window hidden: hidden first, Windows would give the focus to a window of its own choosing.
+	// game's window hidden: hidden first, Windows would give the focus to a window of its own choosing. Refused (the
+	// focus already elsewhere, say Steam's menu over the game), with the input of the foreground window's thread
+	// attached to this one's.
 	if (IsIconic(target) != FALSE) ShowWindow(target, SW_RESTORE);
-	SetForegroundWindow(target);
-	if (window != nullptr) ShowWindow(static_cast<HWND>(window), SW_HIDE);
+	bool given = SetForegroundWindow(target) != FALSE && GetForegroundWindow() == target;
+	if (!given) {
+		const DWORD foreground = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+		const DWORD self       = GetCurrentThreadId();
+		if (foreground != 0 && foreground != self && AttachThreadInput(self, foreground, TRUE) != FALSE) {
+			BringWindowToTop(target);
+			given = SetForegroundWindow(target) != FALSE && GetForegroundWindow() == target;
+			AttachThreadInput(self, foreground, FALSE);
+		}
+	}
+	// Also as Alt+Tab switches to it: Big Picture, in front again and "given back", still showed no focus and took no pad
+	// input until an Alt+Tab (issue #217).
+	if (given) SwitchToThisWindow(target, TRUE);
+	std::printf("Focus: %s window %p, %s (%s)\n", given ? "given back to" : "not taken by", static_cast<void*>(target),
+	            DescribeWindow(target).c_str(),
+	            target == started ? "the one in front as the game started" : "the largest of the launcher's parent's");
+	std::fflush(stdout);
+	if (own != nullptr) ShowWindow(own, SW_HIDE);
+	// (Which window is in front a moment later, the game's hidden: one that took the focus after the hand-off shows here.)
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	const HWND later = GetForegroundWindow();
+	std::printf("Focus: 0.3 s later in front: %s\n",
+	            later == target ? "that window" : later == nullptr ? "no window" : DescribeWindow(later).c_str());
+	std::fflush(stdout);
 }
 
 bool StartDisplayVblanks(void* window) {
@@ -1204,6 +1361,24 @@ std::string ExecutablePath() {
 		if (path.size() >= 32768) return {};
 		path.resize(path.size() * 2);
 	}
+}
+
+std::string FileSystemName(const std::string& path) {
+	const int            length = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+	std::vector<wchar_t> wide(length > 0 ? static_cast<size_t>(length) : 1, L'\0');
+	if (length <= 0 || MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), length) != length) return {};
+	std::array<wchar_t, MAX_PATH + 1> volume {};
+	std::array<wchar_t, MAX_PATH + 1> name {};
+	if (GetVolumePathNameW(wide.data(), volume.data(), static_cast<DWORD>(volume.size())) == FALSE ||
+	    GetVolumeInformationW(volume.data(), nullptr, 0, nullptr, nullptr, nullptr, name.data(),
+	                          static_cast<DWORD>(name.size())) == FALSE)
+		return {};
+	std::string result;
+	for (const wchar_t c: name) {
+		if (c == L'\0') break;
+		result += static_cast<char>(c < 0x80 ? c : '?');
+	}
+	return result;
 }
 
 bool WriteHeapHistogram(const char* path) {
@@ -1748,6 +1923,13 @@ uint64_t AvailablePhysicalMemory() {
 	return GlobalMemoryStatusEx(&status) != 0 ? status.ullAvailPhys : 0;
 }
 
+CommitState SystemCommit() {
+	MEMORYSTATUSEX status {};
+	status.dwLength = sizeof(status);
+	if (GlobalMemoryStatusEx(&status) == 0) return {};
+	return {status.ullAvailPageFile, status.ullTotalPageFile};
+}
+
 static IDXGIAdapter3* g_video_memory_adapter = nullptr;
 
 bool OpenVideoMemoryAdapter(const uint8_t* luid) {
@@ -2029,13 +2211,93 @@ bool CurrentThreadStack(uint64_t* low, uint64_t* high) {
 	return found;
 }
 
+// KeepRenderCoreAlone: the render thread's core (bit n: CPU n), 0 when it shares its core.
+static std::atomic<uint64_t> g_render_core {0};
+
 void AvoidCpuList(const char* avoid_cpus) {
-	cpu_set_t set;
-	if (const auto avoid = CpuListMask(avoid_cpus); avoid != 0 && sched_getaffinity(0, sizeof(set), &set) == 0) {
+	cpu_set_t  set;
+	const auto core = g_render_core.load(std::memory_order_relaxed);
+	// With the render thread's core kept for it, that core is what other threads avoid, not the list (KYTY_RENDER_CPUS,
+	// e.g. "1-7": what the render thread may run on, which left a helper born on its CPU only CPU 0).
+	if (const auto avoid = core != 0 ? core : CpuListMask(avoid_cpus);
+	    avoid != 0 && sched_getaffinity(0, sizeof(set), &set) == 0) {
 		for (int cpu = 0; cpu < 64; ++cpu)
 			if ((avoid >> cpu) & 1u) CPU_CLR(cpu, &set);
+		// (A thread the render thread made inherits its one CPU: the process's other CPUs instead.)
+		if (CPU_COUNT(&set) == 0 && core != 0 && sched_getaffinity(getpid(), sizeof(set), &set) == 0)
+			for (int cpu = 0; cpu < 64; ++cpu)
+				if ((avoid >> cpu) & 1u) CPU_CLR(cpu, &set);
 		if (CPU_COUNT(&set) != 0) (void)sched_setaffinity(0, sizeof(set), &set);
 	}
+}
+
+int KeepRenderCoreAlone() {
+#if defined(__linux__)
+	const char* value = std::getenv("KYTY_RENDER_CORE");
+#if defined(KYTY_STEAM_DECK)
+	if (value == nullptr || *value == '\0') value = "2";
+#endif
+	if (value == nullptr || *value == '\0' || std::strcmp(value, "off") == 0) return -1;
+	char*      end = nullptr;
+	const auto cpu = static_cast<int>(std::strtol(value, &end, 10));
+	if (*end != '\0' || cpu <= 0 || cpu >= 64) return -1;
+	// The core: the CPU's SMT siblings ("2-3", "2,3"); the CPU alone where the file is missing.
+	uint64_t core = uint64_t {1} << cpu;
+	char     path[96];
+	std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+	if (FILE* file = std::fopen(path, "r"); file != nullptr) {
+		char list[64] = {};
+		if (std::fgets(list, sizeof(list), file) != nullptr) {
+			list[std::strcspn(list, "\n")] = '\0';
+			char* save = nullptr;
+			for (char* range = strtok_r(list, ",", &save); range != nullptr; range = strtok_r(nullptr, ",", &save)) {
+				int first = 0, last = 0;
+				const int n = std::sscanf(range, "%d-%d", &first, &last);
+				for (int c = first; n >= 1 && c <= (n == 2 ? last : first) && c < 64; ++c) core |= uint64_t {1} << c;
+			}
+		}
+		std::fclose(file);
+	}
+	// The process may run on more CPUs than the core (else nothing is kept off it).
+	cpu_set_t process;
+	if (sched_getaffinity(getpid(), sizeof(process), &process) != 0 || !CPU_ISSET(cpu, &process)) return -1;
+	uint64_t allowed = 0;
+	for (int c = 0; c < 64; ++c)
+		if (CPU_ISSET(c, &process)) allowed |= uint64_t {1} << c;
+	if ((allowed & ~core) == 0) return -1;
+	cpu_set_t own;
+	MaskToSet(uint64_t {1} << cpu, &own);
+	if (sched_setaffinity(0, sizeof(own), &own) != 0) return -1;
+	g_render_core.store(core, std::memory_order_relaxed);
+	const auto render = static_cast<pid_t>(ThreadId());
+	std::thread([render, core, allowed] {
+		SetThreadName("Kyty.CoreKeeper");
+		(void)setpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()), 10);
+		cpu_set_t others;
+		MaskToSet(allowed & ~core, &others);
+		(void)sched_setaffinity(0, sizeof(others), &others);
+		for (;;) {
+			if (DIR* tasks = opendir("/proc/self/task"); tasks != nullptr) {
+				while (const dirent* entry = readdir(tasks)) {
+					const auto tid = static_cast<pid_t>(std::strtol(entry->d_name, nullptr, 10));
+					cpu_set_t  set;
+					if (tid <= 0 || tid == render || sched_getaffinity(tid, sizeof(set), &set) != 0) continue;
+					uint64_t mask = 0;
+					for (int c = 0; c < 64; ++c)
+						if (CPU_ISSET(c, &set)) mask |= uint64_t {1} << c;
+					if ((mask & core) == 0) continue;
+					MaskToSet((mask & ~core) != 0 ? mask & ~core : allowed & ~core, &set);
+					(void)sched_setaffinity(tid, sizeof(set), &set);
+				}
+				closedir(tasks);
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+		}
+	}).detach();
+	return cpu;
+#else
+	return -1;
+#endif
 }
 
 void MakeBackgroundThread(const char* avoid_cpus) {
@@ -2052,6 +2314,18 @@ void MakeCriticalThread() {
 	}();
 	if (enabled) (void)setpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()), -10);
 #endif
+}
+
+// (Linux: back to a nice value below 0 is allowed again, RLIMIT_NICE having allowed it the first time.)
+NormalPriority::NormalPriority() {
+	errno           = 0;
+	const int value = getpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()));
+	m_saved         = value;
+	m_changed = errno == 0 && value < 0 && setpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()), 0) == 0;
+}
+
+NormalPriority::~NormalPriority() {
+	if (m_changed) (void)setpriority(PRIO_PROCESS, static_cast<id_t>(ThreadId()), m_saved);
 }
 
 int DisplayRefreshHz(void* /*window*/) {
@@ -2139,6 +2413,17 @@ std::string ExecutablePath() {
 	return error ? std::string() : path.string();
 }
 
+std::string FileSystemName(const std::string& path) {
+#if defined(__linux__)
+	struct statfs info {};
+	if (statfs(path.c_str(), &info) != 0) return {};
+	return info.f_type == 0x4d44 ? "FAT32" : ""; // (MSDOS_SUPER_MAGIC: a vfat mount)
+#else
+	(void)path;
+	return {};
+#endif
+}
+
 bool WriteHeapHistogram(const char* path) {
 #if defined(__GLIBC__)
 	// glibc's account of its heap: the totals of all arenas (mallinfo2), then malloc_info's XML
@@ -2207,6 +2492,20 @@ uint64_t AvailablePhysicalMemory() {
 	return available;
 }
 
+CommitState SystemCommit() {
+	uint64_t limit = 0, committed = 0;
+	if (FILE* file = std::fopen("/proc/meminfo", "r")) {
+		char line[256];
+		while (std::fgets(line, sizeof(line), file) != nullptr) {
+			unsigned long long kib = 0;
+			if (std::sscanf(line, "CommitLimit: %llu kB", &kib) == 1) limit = static_cast<uint64_t>(kib) << 10u;
+			if (std::sscanf(line, "Committed_AS: %llu kB", &kib) == 1) committed = static_cast<uint64_t>(kib) << 10u;
+		}
+		std::fclose(file);
+	}
+	return {limit - std::min(limit, committed), limit};
+}
+
 // (StartHeapTrimmer: glibc's free pages inside its arenas given back, not only the tops'. 0, else
 // 1: no malloc_trim.)
 static uint32_t TrimHeap() {
@@ -2239,6 +2538,23 @@ bool IsAmdSigned(const std::wstring& /*path*/) {
 }
 
 #endif
+
+uint64_t EmulatorMemory() {
+	static const uint64_t memory = [] {
+		const uint64_t total     = PhysicalMemory();
+		const uint64_t available = AvailablePhysicalMemory();
+		const uint64_t own       = ProcessMemory().working_set;
+		const uint64_t usable    = total != 0 && available != 0 ? std::min(total, available + own) : total;
+		std::printf("PC memory: %llu MiB of the PC's %llu MiB for the emulator at start (other programs held %llu MiB); the "
+		            "memory savings of PCs short of RAM %s\n",
+		            static_cast<unsigned long long>(usable >> 20u), static_cast<unsigned long long>(total >> 20u),
+		            static_cast<unsigned long long>((total - usable) >> 20u),
+		            usable != 0 && usable <= (uint64_t {16} << 30u) ? "on (16 GiB or less)" : "off (more than 16 GiB)");
+		std::fflush(stdout);
+		return usable;
+	}();
+	return memory;
+}
 
 void StartHeapTrimmer() {
 	const char* value = std::getenv("KYTY_HEAP_TRIM");

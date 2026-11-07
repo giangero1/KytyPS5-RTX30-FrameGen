@@ -13,11 +13,16 @@
 //
 // This is the Windows implementation (WASAPI, through the endpoint the pad's USB ID names, or, where no
 // endpoint's path holds it, the one whose whole name names the pad: "扬声器 (DualSense Wireless
-// Controller)"; the short name is "Speakers"/"扬声器" for the machine's speakers too). Linux keeps
-// using SDL's device list.
+// Controller)"; the short name is "Speakers"/"扬声器" for the machine's speakers too). Linux opens the
+// same USB audio device through SDL2's audio list (PipeWire/PulseAudio/ALSA name it "DualSense Wireless
+// Controller ..." or "Wireless Controller"), the vibration route only, and OFF by default there:
+// KYTY_DUALSENSE_HAPTICS=1 turns it on; KYTY_DUALSENSE_HAPTICS_DEVICE=<text> names the device when the
+// list's names differ. The pad speaker port keeps the main output on Linux.
 //
 // The environment, all optional (the launcher passes these as -Set options):
-//   KYTY_DUALSENSE_HAPTICS=0|1     off when 0 (default: on)
+//   KYTY_DUALSENSE_HAPTICS=0|1     off when 0 (default: on; Linux: off until set to anything but 0)
+//   KYTY_DUALSENSE_HAPTICS_DEVICE=<text>  Linux: the SDL output device whose name holds this text is the pad
+//                                  (default: audio.cpp's finder: a DualSense-named device, none when two)
 //   KYTY_DUALSENSE_HAPTICS_CHANNELS=23|01|all   which of the endpoint's channels take the vibration
 //                                  (default: 23, the actuator pair)
 //   KYTY_DUALSENSE_HAPTICS_GAIN=<float>         applied to the vibration samples (default: 4.0 - the

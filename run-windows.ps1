@@ -19,12 +19,13 @@
 #   .\run-windows.ps1 -Upscaler dlss         DLSS super resolution: Demon's Souls' own PS5 Pro path (its 3D at
 #                                            2688x1512 or -RenderHeight, 1080 and up or 720), DLSS in place of Sony's
 #                                            upscaler at the selected output size; the UI retains its 4K canvas; NVIDIA's Streamline runtime
-#   .\run-windows.ps1 -Upscaler fsr          the same with AMD's FSR 3 built in (any graphics card, nothing to download)
+#   .un-windows.ps1 -Upscaler fsr          the same with AMD's FSR 3 built in (any graphics card, nothing to download);
+#                                            with AMD's FSR SDK 2.4 DLLs next to the emulator, FSR 4 on Radeon RX 7000/9000
 #   .\run-windows.ps1 -StreamlineDir <dir>   where NVIDIA's Streamline runtime is (the Streamline SDK
 #                                            or its bin\x64; default: a "streamline" folder next to
 #                                            the emulator)
-#   .\run-windows.ps1 -Fsr                   AMD FSR 3.1 frame generation instead (2x, any GPU): AMD's
-#                                            amd_fidelityfx_vk.dll next to the emulator
+#   .\run-windows.ps1 -Fsr                   AMD FSR frame generation instead (2x, any GPU): AMD's FSR SDK 2.4 DLLs
+#                                            (FSR 4 on Radeon RX 9000) or amd_fidelityfx_vk.dll next to the emulator
 #   .\run-windows.ps1 -Fps120                the game's frame rate up to 120 fps instead of 60 (a 120 Hz
 #                                            virtual vblank; movies, menus and loading screens keep 60)
 #   .\run-windows.ps1 -Vblank 240            another virtual vblank rate (default 60, the console's)
@@ -80,6 +81,8 @@ param(
 	[int]$Vblank = 0,
 	[switch]$Fps120,
 	[switch]$LowLatency,
+	[switch]$KeyboardMouseControls,
+	[string]$KeyboardMouseBindings = '',
 	[int]$RenderHeight = 0,
 	[switch]$HdOutput,
 	[int]$OutputHeight = 0,
@@ -223,6 +226,42 @@ function Set-Option([string]$name, [string]$value) {
 	$at = $options.IndexOf($name)
 	if ($at -ge 0) { $options[$at + 1] = $value } else { $options.Add($name); $options.Add($value) }
 }
+# The launcher's keyboard prompt artwork matches the requested layout. Append its bindings only
+# for this launch: the emulator resolves conflicts in favour of the last mapping.
+# Existing sensitivity and non-conflicting mouse-wheel bindings remain intact.
+# launch.json is never rewritten; switching off restores the user's normal bindings.
+if ($KeyboardMouseControls) {
+	$bindings = @(
+		'Cross=E', 'Circle=Space', 'Square=R', 'Triangle=F',
+		'L1=Left Shift', 'L2=Left Ctrl', 'L3=X',
+		'R1=Mouse:Left', 'R2=Mouse:Right', 'R3=Mouse:Middle', 'Options=Escape',
+		'Up=Up', 'Down=Down', 'Left=Left', 'Right=Right',
+		'TouchPad=Tab', 'TouchPadRight=Backspace',
+		'LeftStickUp=W', 'LeftStickDown=S', 'LeftStickLeft=A', 'LeftStickRight=D'
+	)
+	if ($KeyboardMouseBindings) {
+		$custom = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($KeyboardMouseBindings)))
+		if ($custom -isnot [array]) { throw 'Invalid keyboard layout' }
+		$controls = @($bindings | ForEach-Object { ($_ -split '=',2)[0] })
+		$seen = @{}; $inputs = @{}
+		foreach ($binding in $custom) {
+			if ($binding -isnot [string] -or $binding -notmatch '^([A-Za-z][A-Za-z0-9]*)=([A-Za-z0-9: .+*/=\\;,\[\]''`-]+)$') { throw 'Invalid keyboard binding' }
+			$control,$inputName = $binding -split '=',2
+			if ($seen.ContainsKey($control)) { throw "Duplicate keyboard control: $control" }
+			$seen[$control] = $true
+			if ($control -eq 'MouseSensitivity') {
+				$number = 0.0
+				if (![double]::TryParse($inputName,[Globalization.NumberStyles]::AllowDecimalPoint,[Globalization.CultureInfo]::InvariantCulture,[ref]$number) -or $number -lt 0.1 -or $number -gt 5) { throw 'Invalid mouse sensitivity' }
+			} else {
+				if ($control -cnotin $controls -or $inputs.ContainsKey($inputName) -or $inputName -in @('F7','F8','F11','Pause')) { throw 'Invalid or conflicting keyboard binding' }
+				$inputs[$inputName] = $true
+			}
+		}
+		if (@($controls | Where-Object { !$seen.ContainsKey($_) }).Count) { throw 'Incomplete keyboard layout' }
+		$bindings = $custom
+	}
+	foreach ($binding in $bindings) { $options.Add('--keymap'); $options.Add($binding) }
+}
 if ($Width -gt 0) { Set-Option '--screen-width' "$Width" }
 if ($Height -gt 0) { Set-Option '--screen-height' "$Height" }
 if ($Fullscreen) { $options.Add('--fullscreen') }
@@ -287,12 +326,14 @@ if ($Aspect -and $Aspect -ne '16:9') { $environment['KYTY_RENDER_ASPECT'] = $Asp
 # -Quality low|lowest: Demon's Souls engine settings that cut what a frame draws, for PCs whose CPU limits the frame
 # rate (each draw costs the emulator CPU time). low: levels of detail chosen as for a 720-line picture (1080), sun
 # shadows to 125 m (250); lowest: detail as for 480 lines, sun shadows to 60 m, no ambient shadowing, no shadows from
-# torches and other spot lights. A laptop Ryzen 9 5900HX + RTX 3080 standing at the Gates of Boletaria, at 1440:
-# standard 21.9 fps, lowest 25.6. Not r_forceShadowLOD (until 10-17 in both): it draws objects with their shadow
-# meshes, and objects without one vanish (carts and barricades at the Gates of Boletaria; issue #40), for 6% more.
+# torches and other spot lights, no projected decals (blood, scorch marks: 10-28, RTX 5090 at 1-1 on lowest, standing
+# 86.1 -> 96.1 fps, walking 89.2 -> 95.6, the GPU's frame -22%; on a Steam Deck +7% at 360p). A laptop Ryzen 9 5900HX
+# + RTX 3080 standing at the Gates of Boletaria, at 1440: standard 21.9 fps, lowest 25.6 (before the decals). Not
+# r_forceShadowLOD (until 10-17 in both): it draws objects with their shadow meshes, and objects without one vanish
+# (carts and barricades at the Gates of Boletaria; issue #40), for 6% more.
 $qualityConvars = @{
 	low    = 'r_forceViewportHeightForPixelSizeCalc=720;sunShadowMaxDistance=125'
-	lowest = 'r_forceViewportHeightForPixelSizeCalc=480;sunShadowMaxDistance=60;r_enableAmbientShadowing=false;r_enableSpotShadows=false'
+	lowest = 'r_forceViewportHeightForPixelSizeCalc=480;sunShadowMaxDistance=60;r_enableAmbientShadowing=false;r_enableSpotShadows=false;r_projectedDecalEnable=false'
 }
 if ($Quality -and $Quality -ne 'standard') {
 	if (!$qualityConvars.Contains($Quality)) { throw "-Quality takes low or lowest (or standard), not '$Quality'" }
@@ -491,7 +532,11 @@ if ($Prompt -and ($offer -or !$tested)) {
 	if ($offer) {
 		$minutes = [math]::Ceiling(55 * 22 / $cpus / 10) * 10
 		$time = if ($minutes -lt 90) { "about $minutes minutes" } else { 'about {0:N1} hours' -f ($minutes / 60) }
-		$message = if ($cacheOutdated) {
+		# (next precompile all: the precompiled shaders lack a translation that changes nearly every shader, issue #246.)
+		$message = if ($cacheOutdated -and $status -match 'next precompile all') {
+			"$info`n`nThis version of the emulator translates the game's shaders differently from the one that made the precompiled shaders on this PC (a newer translation), so a precompile now compiles all of them again, once: $time on this PC, with the CPU fully loaded (closing its window stops it, and the next run continues).`n" +
+				"Until then the current precompiled shaders stay in use: starting the game now is fine."
+		} elseif ($cacheOutdated) {
 			"$info`n`nThis version of the emulator precompiles more of the game's shaders than the one that made the precompiled shaders on this PC: the new ones would stutter the first time they appear.`n" +
 				"Precompiling again compiles only what is new (minutes; at most $time on this PC, with the CPU fully loaded; closing its window stops it, and the next run continues)."
 		} else {
@@ -557,8 +602,6 @@ if ($shaders -and !$inputsReady) {
 foreach ($entry in $environment.GetEnumerator()) { Set-Item "env:$($entry.Key)" $entry.Value }
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $out = "$logDir\$stamp.out.log"
-# (Named to the emulator too: F9's debug snapshot, src/local/debug-snapshot.h, notes the run's log.)
-$env:KYTY_RUN_LOG = $out
 $process = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory $PSScriptRoot -PassThru `
 	-RedirectStandardOutput $out -RedirectStandardError "$logDir\$stamp.err.log"
 if ($mask -ne $all) { $process.ProcessorAffinity = [IntPtr]$mask }

@@ -616,7 +616,8 @@ struct PipelineCache::ProgramCache {
 	}
 
 	// Each flip; every PlanSweepFlips, the plans no use needed for PlanIdleFlips leave memory beyond a budget of RAM/128
-	// (~77 KB a plan: 1,700 at 16 GB, 3,400 at 32 GB, 13,600 at 128 GB), the least recently used first, written first
+	// (the emulator's: LocalPlatform::EmulatorMemory; ~77 KB a plan: 1,700 at 16 GB, 3,400 at 32 GB, 13,600 at 128 GB),
+	// the least recently used first, written first
 	// where no file holds them yet (a few a sweep: programs translated during play; the warmup's and the prefetch's are).
 	// They are destroyed on a compile worker (the warmup's thousands at once: their IR nodes freed off the render thread).
 	// Without the budget every idle plan left, also on PCs with RAM to spare: a place came back with a frame of reloads
@@ -636,7 +637,7 @@ struct PipelineCache::ProgramCache {
 		if (!PlanEvictionEnabled() || ++plan_clock % PlanSweepFlips != 0) return;
 		// (RAM the system does not report: a budget of 0, every idle plan leaves.)
 		static const size_t budget = [] {
-			const uint64_t ram = LocalPlatform::PhysicalMemory();
+			const uint64_t ram = LocalPlatform::EmulatorMemory();
 			return static_cast<size_t>(ram / 128u / (77u * 1024u));
 		}();
 		size_t                    in_memory = 0;
@@ -1614,8 +1615,9 @@ struct PipelineCache::ProgramCache {
 		}();
 		return enabled;
 	}
-	// Whether a spilled plan's linear SRT plan stays in memory (KYTY_PREFETCH_LINEAR=1|0; default: not with 20 GiB of
-	// RAM or less). Kept, it is ready the moment the game first uses the program; but the prefetch translates every
+	// Whether a spilled plan's linear SRT plan stays in memory (KYTY_PREFETCH_LINEAR=1|0; default: not with 16 GiB or
+	// less for the emulator, LocalPlatform::EmulatorMemory). Kept, it is ready the moment the game first uses the
+	// program; but the prefetch translates every
 	// program of the game and a session uses few of them: 16 GB simulated, 1-1 for 6 min, 21,785 prefetched, ~1,000
 	// taken, and the kept plans' nodes were the heap's largest part (~300 MB; their code stays in the JIT arena for the
 	// session too). Not kept, the prefetch does not make it: LoadSpilledPlan does when the plan comes back, ~0.4 ms of
@@ -1624,8 +1626,8 @@ struct PipelineCache::ProgramCache {
 		static const bool keeps = [] {
 			const char* value = std::getenv("KYTY_PREFETCH_LINEAR");
 			if (value != nullptr && *value != '\0') return *value != '0';
-			const auto ram = LocalPlatform::PhysicalMemory();
-			return ram == 0 || ram > (uint64_t {20} << 30u);
+			const auto ram = LocalPlatform::EmulatorMemory();
+			return ram == 0 || ram > (uint64_t {16} << 30u);
 		}();
 		return keeps;
 	}
@@ -2919,14 +2921,15 @@ const EvictSettings& PipelineEvictSettings() {
 	return settings;
 }
 
-// Whether the worlds the game left take their pipelines along (EvictIdlePipelines): with 20 GiB of RAM or less, where
-// the NVIDIA driver's ~220 KB of RAM a pipeline counts (16 GB, six worlds: its pools 2.0 GB kept, 1.0 GB swept), or
+// Whether the worlds the game left take their pipelines along (EvictIdlePipelines): with 16 GiB or less for the emulator
+// (LocalPlatform::EmulatorMemory), where the NVIDIA driver's ~220 KB of RAM a pipeline counts (16 GB, six worlds: its
+// pools 2.0 GB kept, 1.0 GB swept), or
 // KYTY_PIPELINE_EVICT set. With more RAM the sweep saved nothing needed and cost its remakes: an RTX 2080 Ti (32 GB)
 // remade 1,096 of them from the static store at 4.8 ms each, up to 137 ms (issue #129), not the 0.4 ms of a 5090.
 bool SweepsWorldsLeft() {
 	static const bool sweeps = [] {
-		const auto ram = LocalPlatform::PhysicalMemory();
-		return PipelineEvictSettings().set || (ram != 0 && ram <= (uint64_t {20} << 30u));
+		const auto ram = LocalPlatform::EmulatorMemory();
+		return PipelineEvictSettings().set || (ram != 0 && ram <= (uint64_t {16} << 30u));
 	}();
 	return sweeps;
 }
@@ -3298,14 +3301,15 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		// committed): a GPU that cannot also hold the game's working set (small_video_memory) makes the graphics ones
 		// (almost no video memory) and the compute ones it met most recently up to 1/16 of its video memory (a laptop's
 		// 8 GB RTX 3080: making them when first used, 2-3.6 ms each, held up walks for 150-900 ms at a new view), the
-		// rest when they are first used (WarmPipelines). A PC with less RAM than the ~20 GB the game takes while it
-		// loads makes none at start-up (~0.75 ms each from the static precompile's binaries when first used). Such a
+		// rest when they are first used (WarmPipelines). An emulator with less RAM than the ~20 GB the game takes while
+		// it loads (LocalPlatform::EmulatorMemory: the PC's less what other programs hold) makes none at start-up (~0.75
+		// ms each from the static precompile's binaries when first used). Such a
 		// PC records the shaders but translates none at start-up either: their
 		// SPIR-V and modules took 3.1 GiB of RAM, and the shader prefetch translates every shader of the game in the
 		// background anyway (16 GB reported at 1-1: +76 MiB instead of +3181, the HUD 10 s sooner, the same 59-60 fps
 		// and one slow shader translation).
-		constexpr uint64_t PipelineWarmupMinRam = uint64_t {24} << 30u;
-		const uint64_t     ram                  = LocalPlatform::PhysicalMemory();
+		constexpr uint64_t PipelineWarmupMinRam = uint64_t {20} << 30u;
+		const uint64_t     ram                  = LocalPlatform::EmulatorMemory();
 		const bool         low_ram              = ram != 0 && ram < PipelineWarmupMinRam;
 		const bool         compile_shaders      = std::string_view(warmup) == "1" && !low_ram;
 		if (low_ram && std::string_view(warmup) == "1")
@@ -3323,14 +3327,17 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 				PipelineCacheLog("Scene warmup: ignoring invalid {}", Common::PathToString(scenes));
 		}
 		// KYTY_PIPELINE_WARMUP: 1 makes them all whatever the memory, 0 none; KYTY_PIPELINE_WARMUP_VIDEO_MIB: the compute
-		// pipelines' video memory cap instead of 1/16 of a small one's.
+		// pipelines' video memory cap instead of a small card's: 1/16 of a budget under 8 GiB, 1/4 of one of 8-12 GiB (an
+		// RTX 2080 Ti's 589 MiB left 1,288 of a map's pipelines to be made when first used, ~5 ms each in the frames
+		// after a load; at 2048 MiB none was left, issue #129).
 		const char*            forced = std::getenv("KYTY_PIPELINE_WARMUP");
 		const std::string_view force  = forced != nullptr ? forced : "";
 		const bool             warm_pipelines = force == "1" || (force != "0" && !low_ram);
 		const char*            cap            = std::getenv("KYTY_PIPELINE_WARMUP_VIDEO_MIB");
+		const uint64_t         budget         = m_graphics.GetTotalMemoryBudget();
 		const uint64_t         compute_video  = cap != nullptr && *cap != 0 ? std::strtoull(cap, nullptr, 10) << 20u
 		                                        : force != "1" && m_graphics.small_video_memory
-		                                            ? m_graphics.GetTotalMemoryBudget() / 16u
+		                                            ? budget / (budget < (uint64_t {8} << 30u) ? 16u : 4u)
 		                                            : UINT64_MAX;
 		if (!warm_pipelines && std::string_view(warmup) == "1")
 			PipelineCacheLog("Pipeline warmup: skipped (video memory budget {} MiB, RAM {} MiB)",
@@ -4074,11 +4081,11 @@ void PipelineCache::InitializeDriverCache() {
 	// or compiles once more (1-1: ~170 native XPR variants on the async workers, their draws on the normal path meanwhile;
 	// the render thread made the same pipelines in the same time). Such small caches are also saved at least every
 	// SmallSaveSeconds while compiles go on: a session that never settles 20 s and does not exit cleanly kept none of them.
-	const uint64_t ram       = LocalPlatform::PhysicalMemory();
+	const uint64_t ram       = LocalPlatform::EmulatorMemory();
 	const bool     store     = m_static_binaries != nullptr || m_static_blobs != nullptr;
 	const auto     ram_limit = [ram, store](uint64_t limit) {
 		constexpr uint64_t StoreLimit = uint64_t {256} << 20u;
-		if (ram != 0) limit = std::min(limit, ram >= (uint64_t {24} << 30u) ? ram / 16u : uint64_t {512} << 20u);
+		if (ram != 0) limit = std::min(limit, ram >= (uint64_t {20} << 30u) ? ram / 16u : uint64_t {512} << 20u);
 		return store ? std::min(limit, StoreLimit) : limit;
 	};
 	m_driver_cache = LoadDriverCache(m_driver_cache_path, ram_limit(uint64_t {2} << 30u), m_driver_cache_saved_size);
@@ -4742,6 +4749,7 @@ PipelineCache::Pipeline* PipelineCache::CreateGraphicsPipelineImpl(
 	                       vertex_program, ps_input_info, pixel_program, static_params,
 	                       m_driver_cache, native_bindings, FirstBuild(m_graphics));
 	const bool from_store = LastPipelineFromStore();
+	NotePlayCompile(from_store, create_begin);
 	m_render_pipelines++;
 	m_render_pipeline_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - create_begin).count();
 	MainPipelineDone();
@@ -4831,6 +4839,7 @@ PipelineCache::CreateComputePipeline(const ShaderComputeInputInfo& input_info,
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache,
 	                       FirstBuild(m_graphics));
 	const bool from_store = LastPipelineFromStore();
+	NotePlayCompile(from_store, create_begin);
 	m_render_pipelines++;
 	m_render_pipeline_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - create_begin).count();
 	MainPipelineDone();

@@ -45,6 +45,10 @@ bool ProtectWriteWatch(uint64_t address, uint64_t size, Mode mode);
 // A view of the guest's shared backing mapped at [address, address + size) with `mode`, or unmapped.
 void WriteWatchMapped(uint64_t address, uint64_t size, Mode mode);
 void WriteWatchUnmapped(uint64_t address, uint64_t size);
+// While on for this thread (the GPU thread's flush of deferred read protections), ProtectWriteWatch's no-access
+// protection of short runs of registered views may drop their PTEs under userfaultfd minor mode instead of an mprotect
+// (Linux, KYTY_UFFD_MINOR=1: sysLinuxVirtual.cpp); elsewhere nothing changes.
+void ZapNoAccess(bool on);
 
 } // namespace VirtualMemory
 

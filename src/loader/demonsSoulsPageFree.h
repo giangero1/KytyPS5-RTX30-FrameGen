@@ -13,10 +13,11 @@ struct Program;
 // texture streamer fills the memory to its 400 MiB floor). On a PS5 that is free memory; here it is RAM the emulator
 // holds. The engine frees and takes 1.5-7.5 GB of blocks every 30 s (textures streamed in and out, 0.5-8 MiB each), so
 // most free blocks are taken again within seconds: a free block's pages are worth giving back only once it stays free.
-// KYTY_ENGINE_FREE=giveback (default with 20 GiB of RAM or less, Windows): a thread of the emulator's takes the
-// allocator's lock every 2 s, walks the free lists, and gives the pages of blocks free on five walks in a row back to
-// Windows (a MiB at a time, each under the lock after a check that the block is still free: no allocation can take it
-// meanwhile; its bytes become zeros, a free block's bytes being no one's). Boletaria and four worlds (16 GB policy): the
+// KYTY_ENGINE_FREE=giveback (default with 16 GiB or less for the emulator, Windows and Linux): a thread of the emulator's
+// takes the allocator's lock every 2 s, walks the free lists, and gives the pages of blocks free for ~30 s back to the
+// system (a chunk at a time, each under the lock after a check that the block is still free: no allocation can take it
+// meanwhile; its bytes become zeros, a free block's bytes being no one's; Linux: a hole punched in the guest memory's
+// file, pages a GPU cache watches left alone). Boletaria and four worlds (16 GB policy): the
 // PC's memory in use 1.7-2.0 GB lower in the other worlds, 1.2 GB back in Boletaria, 0.2-0.6 GB at the end of its
 // route; 2-2's tour at the same frame rate (93.9 fps walking against 92.7). =walk: the walks only, checked
 // against the allocator's own counts (diagnostics); =count: each free counted (sizes, the guest view's protection over

@@ -225,11 +225,11 @@ static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descr
 
 // The precompile's capture (PipelineBinaryWriter): a pipeline the static pipeline cache holds (the first
 // store is made from it), its binaries then from the driver's own cache (a pipeline created with the
-// capture flag is never a cache hit: compiled); else compiled with its binaries kept.
+// capture flag is never a cache hit: compiled); else compiled with its binaries kept, in no pipeline cache
+// (the capture flag takes none: VUID-vkCreateGraphicsPipelines-pNext-09617).
 template <typename Info, typename Create>
 static vk::Result CapturePipelineBinaries(GraphicContext& graphics, PipelineCache::Pipeline& pipeline, Info info,
-                                          vk::PipelineCache driver_cache, const PipelineBinaries::Key& key,
-                                          Create create) {
+                                          const PipelineBinaries::Key& key, Create create) {
 	auto* writer = graphics.pipeline_binary_writer;
 	if (graphics.static_pipeline_cache != nullptr && graphics.pipeline_cache_control_enabled) {
 		auto lookup = info;
@@ -245,7 +245,7 @@ static vk::Result CapturePipelineBinaries(GraphicContext& graphics, PipelineCach
 	              vk::PipelineCreateFlagBits2KHR::eCaptureDataKHR;
 	flags.pNext       = info.pNext;
 	info.pNext        = &flags;
-	const auto result = create(driver_cache, info);
+	const auto result = create(nullptr, info);
 	if (result == vk::Result::eSuccess && !writer->Capture(key, pipeline.pipeline)) {
 		std::printf("Pipeline binaries: the driver gave none for a pipeline\n");
 	}
@@ -716,6 +716,27 @@ static double MicrosecondsSince(std::chrono::steady_clock::time_point start) {
 	return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
 }
 
+// A pipeline the driver refused: the log names its result and the programs. True in a precompile, which leaves it out and
+// goes on (the caller destroys a null one): issue #305, one pipeline an RX Vega 56's driver refused ended its shard, and
+// the precompile never finished. The game cannot draw without it and exits.
+static std::atomic<size_t> g_pipelines_refused {0};
+static bool PipelineRefused(const GraphicContext& graphics, vk::Result result, const char* kind, uint64_t hash,
+                            uint64_t pixel_hash) {
+	static std::atomic<uint32_t> reports {0};
+	if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+		std::printf("Pipeline refused by the driver: %s (%s %016llx %016llx)\n", vk::to_string(result).c_str(), kind,
+		            static_cast<unsigned long long>(hash), static_cast<unsigned long long>(pixel_hash));
+		std::fflush(stdout);
+	}
+	if (!graphics.precompiling) return false;
+	g_pipelines_refused.fetch_add(1, std::memory_order_relaxed);
+	return true;
+}
+
+size_t PipelinesRefused() {
+	return g_pipelines_refused.load(std::memory_order_relaxed);
+}
+
 // The precompile's pipeline another of its shards holds: none is made (the caller destroys a null one).
 static bool ClaimedElsewhere(const GraphicContext& graphics, vk::Result result) {
 	return result == vk::Result::ePipelineCompileRequired && graphics.pipeline_binary_writer != nullptr;
@@ -807,7 +828,7 @@ static vk::Result CreatePipelineHandle(GraphicContext& graphics, PipelineCache::
 				}
 			}
 			if (writer == nullptr && PipelineKeyLog()) LogPipelineKey("miss", key, original);
-			if (writer != nullptr) return CapturePipelineBinaries(graphics, pipeline, info, driver_cache, key, create);
+			if (writer != nullptr) return CapturePipelineBinaries(graphics, pipeline, info, key, create);
 		} else if (writer == nullptr && store != nullptr) {
 			g_binary_outcomes.Count(g_binary_outcomes.unasked);
 		}
@@ -880,6 +901,8 @@ static vk::Result CreatePipelineHandle(GraphicContext& graphics, PipelineCache::
 		return vk::Result::eSuccess;
 	}
 	// A pipeline compiled now (in no cache) is kept for the sessions after (PlayedPipelines); a driver cache's is not.
+	// Created in no pipeline cache: the capture flag takes none (VUID-vkCreateGraphicsPipelines-pNext-09617); the driver
+	// cache given before was neither searched nor added to (NVIDIA 617.42, RADV 26.0).
 	if (build == PipelineBuild::Full && keyed && played != nullptr && played->Capturing() &&
 	    graphics.pipeline_cache_control_enabled) {
 		if (cached(driver_cache)) return vk::Result::eSuccess;
@@ -889,7 +912,7 @@ static vk::Result CreatePipelineHandle(GraphicContext& graphics, PipelineCache::
 		flags.pNext       = info.pNext;
 		auto kept         = info;
 		kept.pNext        = &flags;
-		const auto result = create(driver_cache, kept);
+		const auto result = create(nullptr, kept);
 		if (result == vk::Result::eSuccess) played->Capture(key, pipeline.pipeline);
 		return result;
 	}
@@ -899,6 +922,16 @@ static vk::Result CreatePipelineHandle(GraphicContext& graphics, PipelineCache::
 	info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
 	pipeline.unoptimized = true;
 	return create(nullptr, info);
+}
+
+// Graphics pipelines without the guest's pixel shader get an empty fragment shader (CreatePipelineInternal) on NVIDIA, the
+// GPUs whose drain it avoids and the only ones measured; KYTY_EMPTY_FS=0 none, 1 on any GPU.
+static bool EmptyFragmentShaderEnabled(GraphicContext& graphics) {
+	static const int forced = [] {
+		const char* value = std::getenv("KYTY_EMPTY_FS");
+		return value == nullptr ? -1 : std::string_view(value) != "0" ? 1 : 0;
+	}();
+	return forced >= 0 ? forced != 0 : graphics.GetPhysicalDeviceProperties().vendorID == 0x10deu;
 }
 
 // KYTY_PS_WAVE64=1 (a test for issue #24: AMD's 26.9.2 driver runs pixel shaders on 32-lane subgroups, 26.9.1 on 64, and
@@ -1008,8 +1041,34 @@ void CreatePipelineInternal(
 		shader_stages[shader_stage_count++] = tess_control_shader_stage_info;
 		shader_stages[shader_stage_count++] = tess_eval_shader_stage_info;
 	}
+	vk::PipelineShaderStageCreateInfo empty_frag_stage_info {};
 	if (ps_active) {
 		shader_stages[shader_stage_count++] = frag_shader_stage_info;
+	} else if (EmptyFragmentShaderEnabled(graphics)) {
+		// A pipeline without the guest's pixel shader gets an empty one: NVIDIA drains the pipe between consecutive draws
+		// whose pipelines differ in having a fragment stage, as a depth-only draw beside a shaded one does (a
+		// stencil-volume or alpha-tested depth pass: ~0.6 ms a frame at the 1-1 stone arch). An empty main with no
+		// inputs, no outputs and early fragment tests changes no output and keeps the depth and stencil work ahead of its
+		// invocations, as a pipeline without a fragment stage has it. (The create info's stages key the pipeline: the
+		// pipelines it changes are made again once, nothing else.)
+		static const vk::ShaderModule empty = [&] {
+			static const uint32_t code[] = {
+			    0x07230203, 0x00010000, 0x00070000, 0x00000005, 0x00000000, 0x00020011, 0x00000001, 0x0003000e,
+			    0x00000000, 0x00000001, 0x0005000f, 0x00000004, 0x00000001, 0x6e69616d, 0x00000000, 0x00030010,
+			    0x00000001, 0x00000007, 0x00030010, 0x00000001, 0x00000009, 0x00020013, 0x00000002, 0x00030021,
+			    0x00000003, 0x00000002, 0x00050036, 0x00000002, 0x00000001, 0x00000000, 0x00000003, 0x000200f8,
+			    0x00000004, 0x000100fd, 0x00010038};
+			vk::ShaderModuleCreateInfo info {};
+			info.codeSize = sizeof(code);
+			info.pCode    = code;
+			vk::ShaderModule module;
+			EXIT_IF(graphics.device.createShaderModule(&info, nullptr, &module) != vk::Result::eSuccess);
+			return module;
+		}();
+		empty_frag_stage_info.stage         = vk::ShaderStageFlagBits::eFragment;
+		empty_frag_stage_info.module        = empty;
+		empty_frag_stage_info.pName         = "main";
+		shader_stages[shader_stage_count++] = empty_frag_stage_info;
 	}
 
 	vk::VertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX] {};
@@ -1290,7 +1349,9 @@ void CreatePipelineInternal(
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
 	EXIT_NOT_IMPLEMENTED(!ClaimedElsewhere(graphics, result) &&
-	                     (result != vk::Result::eSuccess || pipeline.pipeline == nullptr));
+	                     (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) &&
+	                     !PipelineRefused(graphics, result, "graphics", vs_input_info.stage.program->shader_hash,
+	                                      ps_active ? ps_input_info->stage.program->shader_hash : 0));
 	if (DeviceFault::BreadcrumbsOn()) {
 		DeviceFault::NotePipeline(pipeline.pipeline,
 		                          fmt::format("{} vs {:016x} ps {:016x}",
@@ -1481,7 +1542,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	EXIT_NOT_IMPLEMENTED(!ClaimedElsewhere(graphics, result) &&
-	                     (result != vk::Result::eSuccess || pipeline.pipeline == nullptr));
+	                     (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) &&
+	                     !PipelineRefused(graphics, result, "compute", input_info.stage.program->shader_hash, 0));
 	if (DeviceFault::BreadcrumbsOn()) {
 		DeviceFault::NotePipeline(pipeline.pipeline, fmt::format("{} cs {:016x}", native_bindings ? "cs-table" : "cs-normal",
 		                                                         input_info.stage.program->shader_hash));

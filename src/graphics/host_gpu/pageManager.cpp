@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/pageManager.h"
+#include "live-switch.h"
 #include "slow-log.h"
 
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -13,6 +14,7 @@
 #include <immintrin.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -287,17 +289,32 @@ struct PageManager::Impl {
 		}
 	}
 
+	// The deferred read protections' no access, by minor mode where the platform can (VirtualMemory::ZapNoAccess:
+	// Linux, KYTY_UFFD_MINOR; live switch uffd_minor, 0: mprotect for the protections made from then on).
+	struct ZapScope {
+		ZapScope() noexcept {
+			static auto& zap = LiveSwitch::Find("uffd_minor", 1);
+			Common::VirtualMemory::ZapNoAccess(zap.load(std::memory_order_relaxed) != 0);
+		}
+		~ZapScope() { Common::VirtualMemory::ZapNoAccess(false); }
+	};
+
 	static void FlushReadProtect() noexcept {
+		if (g_read_protects.empty()) return;
+		ZapScope zap;
 		for (const auto& range: g_read_protects) ProtectHost(range.begin, range.end - range.begin, NO_ACCESS_PROTECTION);
 		g_read_protects.clear();
 	}
 
 	// The pending no-access ranges that overlap [begin, end), applied first (a protection change of those pages
-	// comes after them; pages of the others keep theirs pending).
-	static void FlushReadProtectOverlapping(uint64_t begin, uint64_t end) noexcept {
+	// comes after them; pages of the others keep theirs pending). Not zapped for the texture offload's hold (`zap`
+	// false): it then frees the pages, and a hole's access would not fault.
+	static void FlushReadProtectOverlapping(uint64_t begin, uint64_t end, bool zap = true) noexcept {
 		auto& ranges = g_read_protects;
 		for (size_t i = 0; i < ranges.size();) {
 			if (ranges[i].begin < end && begin < ranges[i].end) {
+				std::optional<ZapScope> zapping;
+				if (zap) zapping.emplace();
 				ProtectHost(ranges[i].begin, ranges[i].end - ranges[i].begin, NO_ACCESS_PROTECTION);
 				ranges[i] = ranges.back();
 				ranges.pop_back();
@@ -693,7 +710,7 @@ void PageManager::FlushDeferredProtection() noexcept {
 
 // (No new observation epoch: the guest learns nothing new from protections applied early.)
 void PageManager::FlushDeferredProtection(uint64_t vaddr, uint64_t size) noexcept {
-	Impl::FlushReadProtectOverlapping(vaddr, vaddr + size);
+	Impl::FlushReadProtectOverlapping(vaddr, vaddr + size, false);
 }
 
 uint64_t PageManager::ObservationEpoch() noexcept {

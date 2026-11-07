@@ -27,7 +27,7 @@ struct GameInfo {
 	static GameInfo Read(const std::string& path, const fs::path& tool, const fs::path& root);
 };
 
-enum class StoreState { Unknown, Checking, None, Current, Outdated };
+enum class StoreState { Unknown, Checking, None, Current, Outdated, OutdatedAll };
 
 // The precompiled shaders of a game version (_PipelineCache/static/<title>_<version>.*), as the
 // precompile program's --status reports them; up to a minute.

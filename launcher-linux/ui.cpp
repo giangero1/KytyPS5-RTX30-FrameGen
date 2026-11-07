@@ -56,13 +56,15 @@ const std::vector<std::string>& Resolutions(const std::string& ratio) {
 }
 
 // The height Demon's Souls renders its 3D at; below 720 with the 1080p output only (DLSS's lower
-// modes there, the game's TAA down to 540).
-constexpr int RenderHeights[] {2160, 1800, 1620, 1512, 1440, 1296, 1152, 1080, 900, 720};
+// modes there, the game's TAA down to 540). The upscalers' usual shares among them (issue #129):
+// Ultra Quality 77% (1664 of 4K, 832 of 1080p), Quality 66.7%, Balanced 58% (1256), Performance 50%,
+// Ultra Performance 33%.
+constexpr int RenderHeights[] {2160, 1800, 1664, 1620, 1512, 1440, 1296, 1256, 1152, 1080, 900, 832, 720};
 constexpr int LowRenderHeights[] {630, 540, 360};
-// The 1440p output's (DLSS or FSR 3, KYTY_OUTPUT_HEIGHT): DLAA, Quality, Balanced 840, Performance
-// 720, Ultra Performance 480 (its third; the emulator raises a height between the third and the
-// half to the half).
-constexpr int Output1440Heights[] {1440, 1152, 1080, 960, 840, 720, 480};
+// The 1440p output's (DLSS or FSR 3, KYTY_OUTPUT_HEIGHT): DLAA, Ultra Quality 1104, Quality 960,
+// Balanced 840, Performance 720, Ultra Performance 480 (its third; the emulator raises a height
+// between the third and the half to the half).
+constexpr int Output1440Heights[] {1440, 1152, 1104, 1080, 960, 840, 720, 480};
 
 int HeightOf(const std::string& resolution) {
 	const auto x = resolution.find('x');
@@ -790,6 +792,7 @@ void LauncherWindow::PlayPage() {
 			case StoreState::Checking: check(Mark::Busy, T("shaders.checking")); break;
 			case StoreState::Current: check(Mark::Good, T("shaders.current")); break;
 			case StoreState::Outdated: check(Mark::Warn, T("shaders.outdated")); break;
+			case StoreState::OutdatedAll: check(Mark::Warn, T("shaders.outdatedAll")); break;
 			case StoreState::None: check(Mark::Warn, T("shaders.none")); break;
 			default:
 				if (game_.Found()) check(Mark::Busy, T("shaders.unknown"));
@@ -900,6 +903,10 @@ void LauncherWindow::DisplayPage() {
 		    }
 	    },
 	    T("ratio.desc"));
+	// (With 21:9 or 32:9 only: the movies and menus at 16:9 between black bars, commands.cpp.)
+	Row(
+	    "widebars", [&] { SettingSwitch("##widebars", "wide_bars", S().Str("ratio") != "16:9"); },
+	    T("widebars.desc"));
 	Row("fullscreen", [&] { SettingSwitch("##fullscreen", "fullscreen"); });
 	Row(
 	    "aspect", [&] { SettingSwitch("##aspect", "aspect", S().Bool("fullscreen")); },
@@ -984,11 +991,13 @@ int LauncherWindow::SelectedRender() const {
 }
 
 // The DLSS mode a render height runs in: the emulator picks it from the height's share of the
-// game's output (95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance).
+// game's output (95% DLAA, 62% Quality, 55% Balanced, 45% Performance, less Ultra Performance);
+// from 72% named Ultra Quality (77% the usual share), DLSS's Quality mode with more lines.
 std::string LauncherWindow::SuperResolutionMode(int height) const {
 	const double share  = static_cast<double>(height) / OutputLines();
 	const char*  native = commands_.FsrUpscaler() ? "fsr.native" : "dlss.dlaa";
 	return T(share >= 0.95   ? native
+	         : share >= 0.72 ? "dlss.ultraquality"
 	         : share >= 0.62 ? "dlss.quality"
 	         : share >= 0.55 ? "dlss.balanced"
 	         : share >= 0.45 ? "dlss.performance"
@@ -1107,24 +1116,50 @@ void LauncherWindow::GraphicsPage() {
 	             ? " " + std::string(T("output.1440NoUpscaler"))
 	             : ""));
 
-	// The DLSS model (KYTY_DLSS_PRESET): the DLSS version's own choice, its transformer or its CNN
-	// model.
-	const std::vector<std::string> presets {"", "K", "E"};
+	// The DLSS model (KYTY_DLSS_PRESET): the DLSS version's own choice, its transformer (K; DLSS 4.5's M and L) or
+	// its CNN model.
+	const std::vector<std::string> presets {"", "K", "M", "L", "E"};
 	Row(
 	    "dlssmodel",
 	    [&] {
 		    int index =
 		        static_cast<int>(std::find(presets.begin(), presets.end(), S().Str("dlss_preset")) -
 		                         presets.begin());
-		    if (index >= 3) index = 0;
+		    if (index >= 5) index = 0;
 		    if (Combo("##dlssmodel", &index,
-		              {T("dlssmodel.auto"), T("dlssmodel.k"), T("dlssmodel.e")}, 300,
+		              {T("dlssmodel.auto"), T("dlssmodel.k"), T("dlssmodel.m"), T("dlssmodel.l"), T("dlssmodel.e")}, 300,
 		              commands_.Dlss())) {
 			    S().Set("dlss_preset", presets[static_cast<size_t>(index)]);
 			    Changed();
 		    }
 	    },
 	    T("dlssmodel.desc"));
+
+	// The upscaler's sharpening (KYTY_DLSS_SHARPNESS, KYTY_FSR_SHARPNESS): one row for the chosen
+	// upscaler, each with a value of its own: DLSS none by default (the game's own TAA sharpens,
+	// DLSS does not: issue #224), FSR 3 its 0.6 (issue #227).
+	const std::vector<std::string> sharpnesses {"0", "0.3", "0.6", "0.9"};
+	Row(
+	    "sharpen",
+	    [&] {
+		    const bool        fsr      = commands_.FsrUpscaler();
+		    const std::string key      = fsr ? "fsr_sharpness" : "dlss_sharpness";
+		    const std::string fallback = fsr ? "0.6" : "0";
+		    const auto        stored   = S().Str(key);
+		    const auto        position = [&](const std::string& value) {
+                return static_cast<int>(std::find(sharpnesses.begin(), sharpnesses.end(), value) - sharpnesses.begin());
+		    };
+		    int index = position(stored.empty() ? fallback : stored);
+		    if (index >= 4) index = position(fallback);
+		    if (Combo("##sharpen", &index,
+		              {T("sharpen.off"), T("sharpen.low"), T("sharpen.medium"), T("sharpen.high")}, 300,
+		              commands_.Dlss() || fsr)) {
+			    const auto& chosen = sharpnesses[static_cast<size_t>(index)];
+			    S().Set(key, chosen == fallback ? std::string() : chosen);
+			    Changed();
+		    }
+	    },
+	    T("sharpen.desc"));
 
 	Section("graphics.detail");
 	const std::vector<std::string> qualities {"standard", "low", "lowest"};
@@ -1259,6 +1294,7 @@ void LauncherWindow::ShadersPage() {
 		case StoreState::Checking: state = "shaders.checking"; break;
 		case StoreState::Current: state = "shaders.current"; break;
 		case StoreState::Outdated: state = "shaders.outdated"; break;
+		case StoreState::OutdatedAll: state = "shaders.outdatedAll"; break;
 		case StoreState::None: state = "shaders.none"; break;
 		default: state = game_.Found() ? "shaders.unknown" : "cheats.noGame"; break;
 	}
@@ -1467,6 +1503,8 @@ void LauncherWindow::ExperimentalPage() {
 	    "presentdirect", [&] { SettingSwitch("##presentdirect", "present_direct"); },
 	    T("presentdirect.desc"));
 	Row(nullptr, [&] { Feedback(37); });
+	Row("vrrflips", [&] { SettingSwitch("##vrrflips", "vrr_flips"); }, T("vrrflips.desc"));
+	Row(nullptr, [&] { Feedback(221); });
 	Section("experimental.amd");
 	Row(
 	    "antilag",
@@ -1516,9 +1554,11 @@ std::string LauncherWindow::Summary(std::vector<std::pair<std::string, std::stri
 		options.emplace_back(T("summary.fps120"));
 	if (S().Bool("lowlatency")) options.emplace_back(T("lowlatency"));
 	if (S().Bool("hdr")) options.emplace_back(T("summary.hdr"));
+	if (S().Bool("wide_bars") && S().Str("ratio") != "16:9") options.emplace_back(T("summary.wideBars"));
 	if (hd) options.emplace_back(T("summary.hd"));
 	if (output1440) options.emplace_back(T("summary.1440"));
 	if (S().Bool("present_direct")) options.emplace_back(T("summary.presentDirect"));
+	if (S().Bool("vrr_flips")) options.emplace_back(T("summary.vrrFlips"));
 	if (S().Bool("antilag")) options.emplace_back(T("summary.antilag"));
 	if (S().Bool("mangohud") && context_.HasMangoHud()) options.emplace_back(T("summary.mangohud"));
 	if (!S().Str("extra_args").empty()) options.emplace_back(T("summary.extra"));

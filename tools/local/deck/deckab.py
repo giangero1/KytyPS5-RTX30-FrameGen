@@ -30,7 +30,7 @@ def gpu_ms(trace, tools):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('steps', nargs='+')
-    parser.add_argument('--dir', default='~/KytyPS5-dev')
+    parser.add_argument('--dir', default='~/KytyPS5')
     parser.add_argument('--settle', type=float, default=6)
     parser.add_argument('--measure', type=int, default=10)
     parser.add_argument('--tracem', type=float, default=2)

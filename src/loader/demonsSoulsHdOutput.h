@@ -19,7 +19,8 @@ struct Program;
 // the 4K display buffers and the video settings' 3840x2160 ceilings (the 1080p picture in a corner of them): both made
 // 1920x1080. Excludes the wide output (KYTY_WIDE_OUTPUT). With the PS5 Pro path (KYTY_UPSCALER) only the interface's
 // part is taken: the 3D upscaled to a 1080p output there (loader/demonsSoulsSuperResolution.h).
-// (SharpEmu's TitleDisplayPatches found the same places in 01.004.000; these are 01.007.000's, found by their code.)
+// (SharpEmu's TitleDisplayPatches found the same places in 01.004.000; these are 01.007.000's, found by their code, and
+// 01.005.000's, where its compiler made them differ: issue #226.)
 namespace DemonsSoulsHdOutput {
 // KYTY_HD_OUTPUT is set (before Install: the other patches keep out of its way), or KYTY_OUTPUT_HEIGHT with an upscaler.
 [[nodiscard]] bool Requested();
@@ -71,11 +72,17 @@ inline constexpr uint32_t         HdWidth = 1920, HdHeight = 1080;
 // An interface image's size from its texture's (0xe6041b, in 0xe603c0): mov rax, [r13 + 0x10]; vmovaps [rbp - 0x40],
 // xmm4; mov rdi, [rax + disp32]; add rdi, 8; call 0xdda210 (the screen's pixels per layout unit, the divisor).
 inline constexpr std::string_view ImageScale = "49 8b 45 10 c5 f8 29 65 c0 48 8b b8 ?? ?? ?? ?? 48 83 c7 08 e8";
+// 01.005.000's (0xe3f7dc): mov rax, [r12 + 0x10], a byte longer, then the same.
+inline constexpr std::string_view ImageScaleR12 = "49 8b 44 24 10 c5 f8 29 65 c0 48 8b b8 ?? ?? ?? ?? 48 83 c7 08 e8";
 // The same division for another kind of image, the souls counter's backdrop among them (0xe641e8): cmp byte
 // [rax + 0x198], 1; jne; lea rdi, [rbx + 8]; call 0xdda210; mov rax, [r14 + 0x110].
 inline constexpr std::string_view BackdropScale =
     "80 b8 98 01 00 00 01 0f 85 ?? ?? ?? ?? 48 8d 7b 08 e8 ?? ?? ?? ?? 49 8b 86 10 01 00 00";
 inline constexpr uint32_t BackdropDivisor = 13; // the lea and the call, 9 bytes
+// 01.005.000's (0xe43551): cmp byte [rax + 0x198], 0; je short past them; the same lea and call.
+inline constexpr std::string_view BackdropScaleShort =
+    "80 b8 98 01 00 00 00 74 ?? 48 8d 7b 08 e8 ?? ?? ?? ?? 49 8b 86 10 01 00 00";
+inline constexpr uint32_t BackdropShortDivisor = 9;
 // And for the pieces of the health and stamina bars (0x155924a, in 0x1559140): each texture's width over the divisor.
 // add rbx, 8; mov rdi, rbx; mov [rbp + disp32], rbx; call 0xdda210; mov rbx, [r14 + 0x18]; vmovss [rbp + disp32], xmm0.
 inline constexpr std::string_view GaugeScale = "48 83 c3 08 48 89 df 48 89 9d ?? ?? ?? ?? e8 ?? ?? ?? ?? 49 8b 5e 18 c5 fa 11 85";

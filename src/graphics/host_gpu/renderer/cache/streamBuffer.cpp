@@ -189,12 +189,23 @@ std::atomic<uint64_t> g_forced_spill_bytes {[] {
 	return mib < (uint64_t {1} << 44u) ? mib << 20u : uint64_t {0};
 }()};
 
-[[nodiscard]] bool TakeForcedSpill(uint64_t size) {
-	auto least = g_forced_spill_bytes.load(std::memory_order_relaxed);
+// KYTY_TEST_BUFFER_FAIL_MB: the least size of the next buffer whose first 5 tries fail (0: none; Buffer::Buffer).
+std::atomic<uint64_t> g_forced_failure_bytes {[] {
+	const char* value = std::getenv("KYTY_TEST_BUFFER_FAIL_MB");
+	const auto  mib   = value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull;
+	return mib < (uint64_t {1} << 44u) ? mib << 20u : uint64_t {0};
+}()};
+
+[[nodiscard]] bool TakeAtLeast(std::atomic<uint64_t>& least_bytes, uint64_t size) {
+	auto least = least_bytes.load(std::memory_order_relaxed);
 	while (least != 0 && size >= least) {
-		if (g_forced_spill_bytes.compare_exchange_weak(least, 0, std::memory_order_relaxed)) return true;
+		if (least_bytes.compare_exchange_weak(least, 0, std::memory_order_relaxed)) return true;
 	}
 	return false;
+}
+
+[[nodiscard]] bool TakeForcedSpill(uint64_t size) {
+	return TakeAtLeast(g_forced_spill_bytes, size);
 }
 
 } // namespace
@@ -254,9 +265,18 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	if (usage == MemoryUsage::DeviceLocal && with_bda && cpu_address != 0 && !forced_spill)
 		allocation_info.pool = graphics.game_buffer_pool;
 
+	// KYTY_TEST_BUFFER_FAIL_MB=<n> (a test): the first game buffer of at least n MiB fails its first 5 tries, as when
+	// memory runs short, so that the retry (GraphicContext::RetryAllocation) can be watched.
+	int forced_failures =
+	    usage == MemoryUsage::DeviceLocal && with_bda && cpu_address != 0 && TakeAtLeast(g_forced_failure_bytes, size) ? 5 : 0;
+
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
 	const auto        create        = [&] {
+		if (forced_failures > 0) {
+			forced_failures--;
+			return false;
+		}
 		return vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info),
 		                       &allocation_info, &native_buffer, &m_allocation, &allocation_result) == VK_SUCCESS;
 	};
@@ -266,11 +286,14 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 		created              = create();
 	}
 	// Over the video memory budget VMA places it in system memory; when even that fails, without
-	// the images kept for reuse and over budget.
+	// the images kept for reuse and over budget; then again for a while (issue #228).
 	if (!created) {
 		graphics.TrimImagePool();
 		allocation_info.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-		if (!create()) graphics.ReportMemoryFallback("a buffer could not be created", size);
+		if (!create()) {
+			graphics.ReportMemoryFallback("a buffer could not be created", size);
+			(void)graphics.RetryAllocation("a buffer", size, create);
+		}
 	}
 	EXIT_NOT_IMPLEMENTED(native_buffer == VK_NULL_HANDLE);
 
