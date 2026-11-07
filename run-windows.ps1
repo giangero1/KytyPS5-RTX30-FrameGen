@@ -19,7 +19,7 @@
 #   .\run-windows.ps1 -Upscaler dlss         DLSS super resolution: Demon's Souls' own PS5 Pro path (its 3D at
 #                                            2688x1512 or -RenderHeight, 1080 and up or 720), DLSS in place of Sony's
 #                                            upscaler at the selected output size; the UI retains its 4K canvas; NVIDIA's Streamline runtime
-#   .un-windows.ps1 -Upscaler fsr          the same with AMD's FSR 3 built in (any graphics card, nothing to download);
+#   .\run-windows.ps1 -Upscaler fsr          the same with AMD's FSR 3 built in (any graphics card, nothing to download);
 #                                            with AMD's FSR SDK 2.4 DLLs next to the emulator, FSR 4 on Radeon RX 7000/9000
 #   .\run-windows.ps1 -StreamlineDir <dir>   where NVIDIA's Streamline runtime is (the Streamline SDK
 #                                            or its bin\x64; default: a "streamline" folder next to
