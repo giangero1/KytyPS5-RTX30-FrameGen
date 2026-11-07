@@ -4,7 +4,9 @@
 
 #include "common/emulatorConfig.h"
 #include "graphics/host_gpu/hostMemory.h"
-#include "graphics/host_gpu/renderer/cache/samplerCache.h"
+namespace Libs::Graphics {
+void SetUpscaleLodBias(float bias);
+}
 #include "graphics/presentation/window.h"
 #include "graphics/host_gpu/renderer/demonsSouls.h"
 #include "loader/elf.h"
@@ -342,8 +344,7 @@ static bool InstallSettings(Program* program, bool trinity) {
 		            "runs from 1080 only\n");
 	if (trinity) {
 		SetLodBias(size.height, out_height);
-		std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation
-",
+		std::printf("Demon's Souls canvases: SR/processing %ux%u, display/interface %ux%u; interface composed once before presentation\n",
 		            output.width, output.height, OutputWidth, OutputHeight);
 	}
 	std::printf("Demon's Souls render size: %s mode renders %ux%u instead of %ux%u (output %ux%u)%s\n",

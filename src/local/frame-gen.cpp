@@ -2495,8 +2495,6 @@ bool PresentEveryFrame() {
 	return false;
 #endif
 }
-#endif
-}
 
 bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs, const vk::detail::DispatchLoaderDynamic& dispatch) {
 	(void)dispatch;

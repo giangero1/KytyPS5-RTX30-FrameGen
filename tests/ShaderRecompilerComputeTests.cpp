@@ -10465,7 +10465,7 @@ public:
       scheduler.Finish();
 
       auto output = CreateStorageBuffer(name, {}, test.expected.size());
-      const auto sampler = context.GetSamplerCache().GetSampler(sampler_descriptor);
+      const auto sampler = context.GetSamplerCache().GetSampler(sampler_descriptor, false);
       Image sampled;
       sampled.view = view;
       sampled.layout = image.backing.state.layout;

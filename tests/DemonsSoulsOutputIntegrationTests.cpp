@@ -22,6 +22,7 @@ uint32_t Word(uint64_t address) { uint32_t v; std::memcpy(&v, reinterpret_cast<v
 namespace Libs::Graphics {
 bool HostMemoryRangeIsReadable(uint64_t a, uint64_t n) { return a >= begin_address && a <= end_address && n <= end_address-a; }
 void WindowOutputSize(uint32_t* width, uint32_t* height) { if (width) *width = screen_width; if (height) *height = screen_height; }
+void SetUpscaleLodBias(float) {}
 namespace DemonsSouls { bool IsSupportedGame() { return true; } }
 }
 namespace Loader {

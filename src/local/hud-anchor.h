@@ -782,8 +782,6 @@ public:
 		Apply(ps, t, output.width, output.height);
 	}
 	KYTY_CLASS_NO_COPY(StretchScope);
-	}
-	KYTY_CLASS_NO_COPY(StretchScope);
 };
 
 // KYTY_OUTPUT_HEIGHT above 1080 with KYTY_OUTPUT_LAYOUT=hd (DemonsSoulsHdOutput::InterfaceScaled; by default the game
