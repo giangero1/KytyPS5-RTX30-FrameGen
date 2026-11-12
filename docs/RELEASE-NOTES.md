@@ -1,3 +1,31 @@
+# v2026.11.10-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and regression-verified `9e4ff1d3` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261110](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261110)** (`3ec8cf56`) and its contributors. Merged in `65b16fbe`:
+
+- **8 GB VRAM Memory Leak & Slowdown Fix (`KYTY_ENGINE_FREE_BUFFERS`)**: The game's page allocator frees blocks without unmapping them; the emulator now immediately purges GPU buffers over freed blocks. Resolves performance drop-offs on 8 GB cards (e.g. RTX 3070) where multi-zone world changes caused memory to grow from 2 GB to >3 GB and degraded Boletaria from 60+ down to 48–52 FPS. VRAM stays rock-solid at 1.5–1.9 GB across 40+ world loads.
+- **Parallel Speculative Translation (`KYTY_SPECULATE=4`, PR #293 by @CarpetHead)**: Worker threads translate GPU packets ahead of the render thread, which then only checks and commits. Yields a +6% to +16% FPS uplift in render-thread-bound scenes on CPUs with ≥9 P-core threads and 28 GB+ RAM.
+- **Physics Crash Fix**: Eliminated the `eboot+0x1ab6047` crash when physics jobs spawned without an active object.
+- **Decal Overlap Square Artifact Fix (`KYTY_DRAW_READ_AFTER_WRITE=1`)**: Resolves small black square pixel artifacts appearing where decals overlap in Nexus candle wax and 1-3 castle wall textures.
+- **Retrained PGO Profile**: A retrained Profile-Guided Optimization profile providing ~3% lower frame times.
+- **AMD Vega / Polaris Compatibility (#305)**: Shaders reading GPU barycentrics now utilize AMD's VK_AMD_shader_explicit_vertex_parameter on older drivers.
+- **Native Game Patches & Cheats**: Direct cheat file support via `_Patches/PPSA01341.json`.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas (`InterfaceScope`, `InterfaceTransformFor`)**, shared SR/FG frame tokens (`g_upscale_token`), 64 MiB VMA heap sizing, and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+**Automated validation:** Focused tests passed: `demons_souls_output_tests`, `demons_souls_output_integration_tests`, `page_manager_tests`, `save_data_backup_tests`, `vulkan_recording_tests`, and all 4 `LauncherCommandTests.ps1` permutations. The binary pair is hash-identical to the verified build output.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.11.06-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and regression-verified `1ad2a2aa` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.

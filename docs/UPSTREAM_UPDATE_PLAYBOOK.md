@@ -3,13 +3,13 @@
 This is the maintenance guide for [giangero1/KytyPS5-RTX30-FrameGen](https://github.com/giangero1/KytyPS5-RTX30-FrameGen).
 Use a candidate branch and candidate binaries first. A successful merge/build alone does not establish working DLSS or frame generation.
 
-## Known-good baseline: 6 November 2026
+## Known-good baseline: 12 November 2026
 
-- Upstream: [chenxiao07/KytyPS5 v20261106](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261106), commit `06cf66ce79b1df7a760b832c32cf4b9554bf38f8`.
-- Verified binary source: `1ad2a2aa`; upstream merge: `1fb03a80`; retained test branch: `test/upstream-v20261106-merge`.
-- Promoted release: `v2026.11.06-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
-- Emulator SHA256: `5858cb62a8f49be2bc4c4a074ac2700113bbfa464811ed2f95f7424a6825640b` (25,598,464 bytes).
-- Precompiler SHA256: `7644777a55f860fffb24516b51a3954e8bcb02b0a4739129d0c45d09c3ee0cf4` (12,135,424 bytes).
+- Upstream: [chenxiao07/KytyPS5 v20261110](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261110), commit `3ec8cf56897a878345a6da12139757dc3c608538`.
+- Verified binary source: `9e4ff1d3`; upstream merge: `65b16fbe`; retained test branch: `test/upstream-v20261110-merge`.
+- Promoted release: `v2026.11.10-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
+- Emulator SHA256: `76142f6b8d95bd056e8d56491eef0e5a274f1c7796b9863b9125fafd09b3d6a6` (26,129,920 bytes).
+- Precompiler SHA256: `2e9600118742da73470d0825a3bb19181bce94f8dea43e77c038930094c605b1` (12,266,496 bytes).
 - Launcher: `KytyLauncher.exe` built with MSBuild .NET 4.7.2 (`_Build/launcher/KytyLauncher.exe`, 168,960 bytes).
 - Windows x64, Clang-CL 19, ThinLTO, `KYTY_MARCH=x86-64-v3`, NVIDIA Streamline headers enabled.
 - User validated gameplay, save backups, DLSS and OpenDLSSG 2x FG on RTX 3070 with driver 617.42 shader precompilation. Boletaria 85–95+ displayed FPS is a user observation, not a controlled benchmark or a guarantee. Existing screenshots show 43 base / 85 displayed FPS.
