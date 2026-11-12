@@ -11,14 +11,11 @@
 #include <vector>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
-// The recording's thread naming and pinning (local-platform.cpp is not linked into this test).
-namespace LocalPlatform {
-void SetThreadName(const char*) {}
-uint32_t ThreadId() { return 0; }
-void PinThreadToCpuList(const char*) {}
-bool ProcessCpusIdleTime(uint64_t*, uint64_t*) { return false; }
+// The recording's thread naming and pinning are linked from local-platform.cpp.
+extern "C" {
+extern volatile std::atomic<uint32_t> kyty_local_vulkan_recording_mode;
+volatile std::atomic_uint32_t kyty_local_speculate_mode {0};
 }
-extern "C" volatile std::atomic<uint32_t> kyty_local_vulkan_recording_mode;
 namespace {
 void Check(bool condition) { if (!condition) std::abort(); }
 std::atomic<uint64_t> draws {0};
