@@ -76,3 +76,40 @@ ab-exe ABBA，120 Hz 上限，源码相同（11-05 的 profile 为 A）：
 
 重扫只剩 redZonePatcher.cpp（加载器）的 17 个。新 profile 提交为 `tools\pgo\kyty.profdata`，旧的另存为
 `_Build\pgo\windows\kyty-before-20261106.profdata`。
+
+2026-11-09（台式机，v20261109 发布前）：f25c70f7（#315）改了 `table-xpr.inc` 的 TableDraw、TableResolveSet、TableTransit，
+它们的 profile 随之失效（扫描共 25 个：redZonePatcher 17、renderDraw 2、frame-gen 2、libAudio2、demonsSoulsPageFree、
+SceneGuard、TextureMips 各 1）。在 9af7b0d9 上用 `pgo-multi.ps1` 默认的五次运行重新训练。ab-exe ABBA，120 Hz 上限，源码
+相同（11-06 的 profile 为 A），各 4 个窗口：
+- 1-1：渲染线程 14.07 → 14.01 ms/帧，fps 70.41 → 70.08；
+- Latria：12.19 → 12.21 ms，fps 77.58 → 78.62；
+- 1-1 加 `KYTY_SCOUT=0`：14.30 → 14.32 ms，fps 68.58 → 69.08。
+都在噪声内：失效的几个函数在这里没有可测的代价，换新 profile 是为了让发布版与代码一致。重扫只剩 redZonePatcher.cpp 的 17
+个。旧的另存为 `_Build\pgo\windows\kyty-before-20261109.profdata`。
+（用 `-fprofile-instr-generate` 把一个 TU 编成 IR，`__profd_` 里的哈希与 `llvm-profdata show --all-functions` 的
+`Hash:` 对比，可以列出具体是哪些函数失效。）
+
+2026-11-10（台式机）：合并 PR #293（推测翻译，43054ac5，不含它用于验证的 profile 提交）和 #305 的 f48636db 之后，在合并后的
+树（edddd1d9）上用 `pgo-multi.ps1` 默认的五次运行（模式 0）重新训练。ab-exe ABBA，120 Hz 上限，3 轮，每轮走 10 秒后测两个
+10 秒窗口，A 为合并前（f48636db，11-09 的 profile），B 为合并后（新 profile），模式 0：
+- 1-1：渲染线程 13.88 → 13.39 ms/帧，fps 70.30 → 72.47；
+- Latria：12.06 → 12.08 ms，fps 78.95 → 78.17；
+- 1-1 竞技场（`rec-m02_00_00_00-c0000_0006`）：8.66 → 8.68 ms，fps 108.50 → 108.58。
+持平（1-1 略好）。17 次启动的日志都是模式 0，没有致命错误。重扫只剩 redZonePatcher.cpp 的 17 个。旧的另存为
+`_Build\pgo\windows\kyty-before-20261110.profdata`。
+
+## 推测模式（`KYTY_SPECULATE=4`）
+
+默认的五次训练都在模式 0 下运行，模式 4 自己的路径（推测线程上的翻译和状态遍历、提交检查，以及模式 0 的函数在
+`kyty_local_speculate_mode` 判断之后调用的 `*Spec` 函数，例如 `ObtainBufferSpec`、`FindBufferSpec`、
+`SyncGpuCleanBackingSpec`）在 profile 里没有计数，按冷代码编译。`pgo-multi.ps1 -Speculate` 在默认五次之后，再用同样的
+五个场景各跑一次 `KYTY_SPECULATE=4`，十个原始 profile 合并成一个：
+
+```
+powershell -ExecutionPolicy Bypass -File tools\local\windows\pgo-multi.ps1 -Speculate
+```
+
+默认列表不变；命令行给了 `-Scenes` 时按它原样运行，`-Speculate` 不再追加。场景里可以连写多个开关
+（`<存档>+KYTY_SCOUT=0+KYTY_SPECULATE=4`）。`llvm-profdata merge` 把同一函数的计数相加：模式 0 走的函数仍然带着
+模式 0 五次的计数（加上模式 4 里同样经过它们的次数），只在模式 4 运行的函数多了计数。前五个原始 profile 单独合并，
+就是不带 `-Speculate` 的 profile。

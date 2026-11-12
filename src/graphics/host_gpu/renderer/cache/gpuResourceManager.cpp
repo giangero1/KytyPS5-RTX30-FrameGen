@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 #include <x86intrin.h>
@@ -16,6 +18,8 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "kernel/memory.h"
+#include "loader/demonsSoulsPageFree.h"
+#include "speculation-state.h"
 #include "fresh-memory.h"
 #include "texture-offload.h"
 
@@ -139,6 +143,17 @@ bool GpuResourceManager::HandleFault(PageFaultAccess access, uint64_t fault_vadd
 	} else {
 		LiveCounters::Add(LiveCounters::ReadFault);
 		if (LiveCensus::g_render) LiveCounters::Add(LiveCounters::RenderReadFaults);
+		// A speculative translation's thread read GPU-written memory: the readback is the normal path's (the
+		// scheduler's own command buffers and ticks), as the translation in order would make it there.
+		struct NormalPath {
+			Spec::State*                state    = std::exchange(Spec::t_state, nullptr);
+			CommandScheduler::Recorder* recorder = CommandScheduler::ThreadRecorder();
+			NormalPath() { CommandScheduler::SetThreadRecorder(nullptr); }
+			~NormalPath() {
+				Spec::t_state = state;
+				CommandScheduler::SetThreadRecorder(recorder);
+			}
+		} normal_path;
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;
@@ -282,6 +297,47 @@ void GpuResourceManager::UnmapMemory(uint64_t vaddr, uint64_t size, bool releasi
 	m_gpu->SendCommandSync(unmap);
 }
 
+void GpuResourceManager::FreedByGame(uint64_t vaddr, uint64_t size) {
+	static const uint32_t mode = [] {
+		const char* value = std::getenv("KYTY_ENGINE_FREE_BUFFERS");
+		return value != nullptr && (value[0] == '0' || value[0] == '2') ? static_cast<uint32_t>(value[0] - '0') : 1u;
+	}();
+	if (mode == 0 || m_gpu == nullptr || !GuestRange {vaddr, size}.Valid()) return;
+	(void)m_gpu->TrySendCommand([this, vaddr, size] {
+		// (Unmapped meanwhile: UnmapMemory dealt with its buffers.)
+		if (!IsMapped(vaddr, size)) return;
+		const auto start = std::chrono::steady_clock::now();
+		// What went, reported every 30 s it happened (the GPU thread's own counts: all of its time here, a freed block's read
+		// back included when nothing went).
+		static BufferCache::FreeBlockSplits splits;
+		static uint64_t                     blocks = 0, bytes = 0, let_go = 0, ns = 0, max_ns = 0;
+		static auto                         next   = start + std::chrono::seconds(30);
+		const auto lists = splits.lists;
+		const auto freed = m_buffer_cache.DropFreedRange(vaddr, size, mode != 2, &Loader::DemonsSoulsPageFree::FreeBlocksIn, &splits);
+		const auto took  = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		ns += took;
+		max_ns = std::max(max_ns, took);
+		if (freed != 0) {
+			blocks++;
+			bytes += size;
+			let_go += freed;
+		}
+		if ((freed == 0 && splits.lists == lists) || start < next) return;
+		std::printf("Engine frees: %llu freed blocks (%.0f MiB) had buffers over them: %.0f MiB of buffers let go (%.0f MiB cut off "
+		            "buffers over other free blocks too, the allocator's lists read %llu times), %.1f ms on the GPU thread (at most "
+		            "%.2f ms a block); BDA reads of unbuffered pages so far %llu (KYTY_ENGINE_FREE_BUFFERS)\n",
+		            static_cast<unsigned long long>(blocks), static_cast<double>(bytes) / 1048576.0,
+		            static_cast<double>(let_go) / 1048576.0, static_cast<double>(splits.cut) / 1048576.0,
+		            static_cast<unsigned long long>(splits.lists), static_cast<double>(ns) / 1e6, static_cast<double>(max_ns) / 1e6,
+		            static_cast<unsigned long long>(LiveCounters::Value(LiveCounters::BdaFaultPages)));
+		std::fflush(stdout);
+		blocks = bytes = let_go = ns = max_ns = 0;
+		splits = {};
+		next   = start + std::chrono::seconds(30);
+	});
+}
+
 bool GpuResourceManager::UnmappedSince(uint64_t epoch, uint64_t vaddr, uint64_t size) const noexcept {
 	// (Nothing unmapped since: mostly so. Else each leaf the range spans looked up once.)
 	if (size == 0 || m_unmap_latest <= epoch) return false;
@@ -365,6 +421,13 @@ void GpuResourceManager::RefreshBdaRanges() {
 bool GpuResourceManager::PrepareBdaReadRanges(std::span<const GuestRange> ranges) {
 	if (ranges.empty() || ranges.size() > 128 ||
 	    std::ranges::any_of(ranges, [](const auto& range) { return !range.Valid(); })) return false;
+	if (auto* spec = Spec::Current()) {
+		// Prepared when it is committed (and its guest memory writes made after its work).
+		if (std::ranges::any_of(ranges, [&](const auto& range) { return spec->open_journal_set.Intersects(range.address, range.size); }))
+			Spec::Refuse("memory the processor writes");
+		spec->bda.insert(spec->bda.end(), ranges.begin(), ranges.end());
+		return true;
+	}
 	// (Before the lock: making buffers asks for it.)
 	m_buffer_cache.EnsureBdaReadable(ranges);
 	std::shared_lock lock(m_mapped_ranges_mutex);
@@ -421,6 +484,12 @@ void GpuResourceManager::SynchronizeDirtyBdaRegions(GuestRange range) {
 }
 
 void GpuResourceManager::PrepareBda() {
+	if (auto* spec = Spec::Current()) {
+		// Prepared when it is committed (and its guest memory writes made after its work).
+		if (spec->writes.size() > spec->Sealed().writes) Spec::Refuse("memory the processor writes");
+		spec->bda_all = true;
+		return;
+	}
 	// Unknown shader addresses cannot prove disjointness from an in-flight readback.
 	LiveCounters::Add(LiveCounters::BdaFullSyncs);
 	m_buffer_cache.DrainGuestReadback();

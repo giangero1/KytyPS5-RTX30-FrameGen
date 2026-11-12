@@ -9,6 +9,7 @@
 #include "kernel/memory.h"
 #include "live-counters.h"
 #include "live-trace.h"
+#include "speculation-state.h"
 
 #include <vulkan/vulkan_format_traits.hpp>
 #include <algorithm>
@@ -21,9 +22,18 @@
 #include <xxhash.h>
 
 extern "C" {
+extern volatile std::atomic_uint32_t kyty_local_speculate_mode; // KYTY_SPECULATE (graphics/guest_gpu/speculation.cpp)
+}
+
+extern "C" {
 // 1: drop a repeated-write barrier that repeats an identical transition of the
 // same image inside one transit group.
 volatile std::atomic<uint32_t> kyty_local_image_barrier_dedupe {1};
+// KYTY_DRAW_READ_AFTER_WRITE=1: a draw that reads an image it writes keeps the barrier after the last draw's write
+// (Image::GetBarriers; TableDraw transits its set every time), so overlapping deferred decals keep all their pixels
+// (issue #315). Off by default: ~750 barriers a frame at Boletaria, 72.9 -> 61.1 fps on an RTX 5090 without the 60 fps
+// cap (a framebuffer-local barrier inside the render pass cost the same: the fragment work drains either way).
+volatile std::atomic<uint32_t> kyty_local_draw_read_after_write {0};
 }
 
 namespace Libs::Graphics {
@@ -123,10 +133,51 @@ vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
 	}
 }
 
+// A speculative translation's image state (speculation-state.h): its own, from the image's when it first used it;
+// the open segment notes how it found it.
+Spec::ImageEntry* Image::SpeculativeEntry() {
+	auto* spec = Spec::Current();
+	if (spec == nullptr) return nullptr;
+	const auto [found, inserted] = spec->overlay_index.try_emplace(this, spec->overlay.size());
+	Spec::ImageEntry* entry      = nullptr;
+	if (inserted) {
+		// (As a speculation before it not committed yet leaves it: the commit then finds it there.)
+		const auto* chain = spec->ChainImage(this, serial);
+		entry             = &spec->overlay.emplace_back();
+		entry->image      = this;
+		entry->serial     = serial;
+		if (chain != nullptr) {
+			entry->state        = chain->state;
+			entry->subresources = chain->subresources;
+			entry->group        = chain->group;
+		} else {
+			const StateLock lock(*this);
+			entry->state        = backing.state;
+			entry->subresources = backing.subresource_states;
+			entry->group        = transit_group;
+		}
+	} else {
+		entry = &spec->overlay[found->second];
+	}
+	if (!entry->used) {
+		entry->used               = true;
+		entry->found              = entry->state;
+		entry->found_subresources = entry->subresources;
+		entry->found_group        = entry->group;
+		// (A GPU buffer write over it before the commit reaches this segment leaves it to be uploaded first: Speculation's
+		// CommitSegments.)
+		entry->found_buffer_modified = IsBufferModified();
+		spec->used.push_back(found->second);
+	}
+	return entry;
+}
+
 const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      destination_layout,
                                    vk::AccessFlags2                     destination_access,
                                    vk::PipelineStageFlags2              destination_stage,
-                                   std::optional<ImageSubresourceRange> range) {
+                                   std::optional<ImageSubresourceRange> range, bool read_after_write) {
+	// (Behind a plain global: KYTY_SPECULATE unset, no call and no thread-local read per barrier.)
+	auto* const entry = ::kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0 ? SpeculativeEntry() : nullptr;
 	if (range && info.IsVolume()) {
 		range->base_layer  = 0;
 		range->layer_count = 1;
@@ -144,27 +195,34 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 	// the console, where nothing else orders the storage writes of consecutive draws: no barrier between them
 	// (each was also a render pass break: ~800 per frame in the deferred decal pass). A repeated write after
 	// any other access (an upload, a copy, the emulator's own compute) keeps its barrier.
+	// `read_after_write` (with KYTY_DRAW_READ_AFTER_WRITE=1): a draw that reads the image it writes (bound both as a
+	// texture and as storage: the deferred decals' G-buffer, each decal reading what it blends into) keeps it too.
+	// The game puts no barrier between its decals; on the console the pixels of consecutive draws run nearly in order
+	// and an overlapping decal read what the one before it wrote, while a PC GPU runs them together: a decal reads the
+	// G-buffer from before the last one's write and writes it back over it, which loses that decal's pixels in 2x2
+	// blocks (the Nexus candles' wax, castle walls in 1-3: issue #315). A draw's own bindings share one barrier.
+	read_after_write = read_after_write && kyty_local_draw_read_after_write.load(std::memory_order_relaxed) != 0;
 	const bool     guest        = g_transit_group != 0;
 	constexpr auto write_access = vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite |
 	                              vk::AccessFlagBits2::eMemoryWrite;
 	const auto     in_place     = [&](const VulkanImageState& state, uint64_t group) {
 		const bool repeated_write = static_cast<bool>(state.access_mask & write_access);
 		return state.layout == destination_layout && state.access_mask == destination_access &&
-		       (!repeated_write || (guest && state.guest) ||
+		       (!repeated_write || (guest && state.guest && !read_after_write) ||
 		        (DedupeTransitGroups() && g_transit_group != 0 && group == g_transit_group));
 	};
 	// An image already in the layout and access as a whole (a table draw's textures, every draw): nothing changes, so
 	// neither the state lock nor the state epoch, which moving made every table draw after it check and transit its
 	// images again. The barrier state's writer is this thread (the presentation's own transitions run under the
-	// renderer's lock).
-	if (!partial && backing.subresource_states.empty() && in_place(backing.state, transit_group))
+	// renderer's lock); a speculation's thread only reads it, under the lock.
+	if (entry == nullptr && !partial && backing.subresource_states.empty() && in_place(backing.state, transit_group))
 		return barriers;
 	// The same for a part of it (a view's levels or layers: textures streamed in from their small levels, sampled from
 	// a base level above 0), read only: the image, as a whole or in each subresource of the part, already in the layout
 	// with that access, as is its whole-image state. Before, such a transition took the lock, moved the state epoch
 	// (every table draw after it checked and transited its images again) and split a uniform image into subresource
 	// states for good, which every later transition of it walked.
-	if (partial && !static_cast<bool>(destination_access & write_access) &&
+	if (entry == nullptr && partial && !static_cast<bool>(destination_access & write_access) &&
 	    backing.state.layout == destination_layout && backing.state.access_mask == destination_access) {
 		bool all = true;
 		for (uint32_t level = range->base_level;
@@ -179,11 +237,14 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 			}
 		if (all) return barriers;
 	}
-	const StateLock lock(*this);
-	MoveImageStateEpoch(this);
-	auto&      state                  = backing.state;
-	auto&      subresource_states     = backing.subresource_states;
-	auto&      group                  = transit_group;
+	std::optional<StateLock> lock;
+	if (entry == nullptr) {
+		lock.emplace(*this);
+		MoveImageStateEpoch(this);
+	}
+	auto&      state                  = entry != nullptr ? entry->state : backing.state;
+	auto&      subresource_states     = entry != nullptr ? entry->subresources : backing.subresource_states;
+	auto&      group                  = entry != nullptr ? entry->group : transit_group;
 	const bool has_subresource_states = !subresource_states.empty();
 	if (partial || has_subresource_states) {
 		if (!has_subresource_states) {
@@ -202,7 +263,7 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 
 				const bool repeated_write =
 				    static_cast<bool>(subresource_state.access_mask & write_access) &&
-				    !(guest && subresource_state.guest);
+				    !(guest && subresource_state.guest && !read_after_write);
 				if (subresource_state.layout != destination_layout ||
 				    subresource_state.access_mask != destination_access || repeated_write) {
 					vk::ImageMemoryBarrier2 barrier {};
@@ -256,6 +317,11 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 }
 
 const VulkanImageState& Image::CurrentState() const {
+	if (const auto* spec = ::kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0 ? Spec::Current() : nullptr) {
+		if (const auto found = spec->overlay_index.find(this); found != spec->overlay_index.end())
+			return spec->overlay[found->second].state;
+		if (const auto* chain = spec->ChainImage(this, serial)) return chain->state;
+	}
 	return backing.state;
 }
 
@@ -396,7 +462,8 @@ static void ZeroNewImage(vk::Image image, vk::ImageAspectFlags aspect, vk::Comma
 }
 
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
-                    std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
+                    std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer,
+                    bool read_after_write) {
 	if (backing.state.layout == vk::ImageLayout::eUndefined && backing.subresource_states.empty() &&
 	    destination_layout != vk::ImageLayout::eUndefined && backing.image && ZeroNewImages() &&
 	    vk::blockExtent(info.pixel_format)[0] == 1) {
@@ -427,7 +494,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 		    vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
 	}
 	const auto& barriers =
-	    GetBarriers(destination_layout, destination_access, destination_stage, range);
+	    GetBarriers(destination_layout, destination_access, destination_stage, range, read_after_write);
 	if (barriers.empty()) {
 		return;
 	}

@@ -44,6 +44,7 @@
 #include "native-preparation-state.h"
 #include "slow-log.h"
 #include "xpr-capture.h"
+#include "speculation-state.h"
 #include "draw-state-observer.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-draw-packet.h"
@@ -76,6 +77,8 @@ volatile std::atomic_uint32_t kyty_local_draw_run_ranges_mode {1};
 // KYTY_DRAW_PACKETS: the ordinary DrawIndex/DrawAuto draws are recorded as packets too (their
 // debug phases are CPU-side notes only), instead of ~20 separately recorded Vulkan calls each.
 volatile std::atomic_uint32_t kyty_local_draw_packets_mode {1};
+// KYTY_DRAW_READ_AFTER_WRITE (image.cpp): table draws transit a set with an image they read and write every time.
+extern volatile std::atomic_uint32_t kyty_local_draw_read_after_write;
 }
 
 // Draw state in reusable preparation storage when that switch is on.
@@ -604,7 +607,8 @@ namespace LocalDrawRecording {
 static void Replay(std::span<const LocalVulkanRecording::Segment> segments,
                    const vk::detail::DispatchLoaderDynamic& dispatch) {
     const auto& draw = *static_cast<const Draw*>(segments[0].data);
-    const auto command = draw.command;
+    // (A speculation worker's draw names the placeholder: its spliced replay resolves it to the target.)
+    const vk::CommandBuffer command {LocalVulkanRecording::Resolve(static_cast<VkCommandBuffer>(draw.command))};
     const auto vertex_count = static_cast<uint32_t>(segments[1].size / sizeof(vk::Buffer));
     if (vertex_count)
         command.bindVertexBuffers(0, vertex_count,
@@ -1572,8 +1576,10 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	// KYTY_FG_HUDLESS: a draw into the flip image (the game's final composite) is recorded directly, drawn once more
-	// without its HUD first (frame-gen-hudless.h).
-	const bool hudless   = FrameGen::HudlessCapturing() && !mesh_active && bindings.pixel.has_value();
+	// without its HUD first (frame-gen-hudless.h). Not in a speculative translation, whose work is recorded apart: the
+	// draw is then drawn as it is.
+	const bool hudless   = FrameGen::HudlessCapturing() && Spec::Current() == nullptr && !mesh_active &&
+	                       bindings.pixel.has_value();
 	const int  flip_slot = hudless ? FrameGen::FlipSlot(std::span {state.color_info, state.color_count}) : -1;
 	bool record_draw = false;
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
