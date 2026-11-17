@@ -3,16 +3,16 @@
 This is the maintenance guide for [giangero1/KytyPS5-RTX30-FrameGen](https://github.com/giangero1/KytyPS5-RTX30-FrameGen).
 Use a candidate branch and candidate binaries first. A successful merge/build alone does not establish working DLSS or frame generation.
 
-## Known-good baseline: 12 November 2026
+## Known-good baseline: 18 November 2026
 
-- Upstream: [chenxiao07/KytyPS5 v20261110](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261110), commit `3ec8cf56897a878345a6da12139757dc3c608538`.
-- Verified binary source: `9e4ff1d3`; upstream merge: `65b16fbe`; retained test branch: `test/upstream-v20261110-merge`.
-- Promoted release: `v2026.11.10-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
-- Emulator SHA256: `76142f6b8d95bd056e8d56491eef0e5a274f1c7796b9863b9125fafd09b3d6a6` (26,129,920 bytes).
-- Precompiler SHA256: `2e9600118742da73470d0825a3bb19181bce94f8dea43e77c038930094c605b1` (12,266,496 bytes).
-- Launcher: `KytyLauncher.exe` built with MSBuild .NET 4.7.2 (`_Build/launcher/KytyLauncher.exe`, 168,960 bytes).
-- Windows x64, Clang-CL 19, ThinLTO, `KYTY_MARCH=x86-64-v3`, NVIDIA Streamline headers enabled.
-- User validated gameplay, save backups, DLSS and OpenDLSSG 2x FG on RTX 3070 with driver 617.42 shader precompilation. Boletaria 85–95+ displayed FPS is a user observation, not a controlled benchmark or a guarantee. Existing screenshots show 43 base / 85 displayed FPS.
+- Upstream: [chenxiao07/KytyPS5 v20261117](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261117), commit `ce6a27dff0e5290e155146a755adddc536e7f057`.
+- Verified binary source & upstream merge: `a21b6aac`; retained test branch: `test/upstream-v20261117-merge`.
+- Promoted release: `v2026.11.17-upstream-merge`. Resolve this immutable annotated tag for the final documentation/packaging commit. `BUILD-INFO.txt` records both commits.
+- Emulator SHA256: `ef47f6874ec5af91d69af5336827fb23d5c0cfadfa1e57dda1414ce7db029398` (26,362,368 bytes).
+- Precompiler SHA256: `f99410aee6f51f928ffc95d6431e8de0c75c15f225eccf8816ee2f3a5f03c8fd` (12,274,176 bytes).
+- Launcher: `KytyLauncher.exe` built with MSBuild .NET 4.7.2 (`_Build/launcher/KytyLauncher.exe`, 3,337,728 bytes — uncompressed prompt textures per PR #348 Malwarebytes fix; SHA256 `87d5975d78023707674455f2f9ca143dba42adcdfda78989e24645e044522b1c`).
+- Windows x64, Clang-CL 19, ThinLTO, `KYTY_MARCH=x86-64-v3`, NVIDIA Streamline headers enabled (`KYTY_FRAMEGEN_STREAMLINE=1`).
+- User validated gameplay with no crashes or errors on RTX 3070 (`logs/20261118-011154-336.out.log`: OpenDLSSG detected, Streamline DLSS + DLSS-G active with `status=0x0 presented=2 max_generated=1`, and new `KYTY_TEXTURE_REDUCE_GAME` active dropping 1 largest mip level on 8 GB VRAM). Existing screenshots show 43 base / 85 displayed FPS (user observation, not a controlled benchmark or guarantee).
 
 Local installation: `D:\Games\demon souls port pc`; repository: its `KytyPS5_Source` subfolder.
 `origin` is **chenxiao07 upstream**, not your fork. `myfork` is **giangero1/KytyPS5-RTX30-FrameGen**.
@@ -74,7 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/LauncherCommandTests.p
 `tools/package-windows-release.ps1` requires an unused tag, binary source commit and both independently recorded hashes. Commit docs/packaging first; it rejects compiled-source changes since the binary commit and dirty source trees.
 
 ```powershell
-.\tools\package-windows-release.ps1 -Tag 'v2026.11.06-upstream-merge' -BinarySourceCommit 1ad2a2aa -EmulatorSha256 5858cb62a8f49be2bc4c4a074ac2700113bbfa464811ed2f95f7424a6825640b -PrecompileSha256 7644777a55f860fffb24516b51a3954e8bcb02b0a4739129d0c45d09c3ee0cf4
+.\tools\package-windows-release.ps1 -Tag 'v2026.11.17-upstream-merge' -BinarySourceCommit a21b6aac -EmulatorSha256 ef47f6874ec5af91d69af5336827fb23d5c0cfadfa1e57dda1414ce7db029398 -PrecompileSha256 f99410aee6f51f928ffc95d6431e8de0c75c15f225eccf8816ee2f3a5f03c8fd
 ```
 
 For a future release, replace the tag, source commit and hashes with the newly verified values. Output is `_Build/package/<tag>/`; it refuses to overwrite that directory. Extract into a fresh folder and verify every manifest entry, ZIP checksum, screenshot/guide links, normal runtime DLLs and launcher commands before uploading.
@@ -87,4 +87,4 @@ The ZIP includes standard app/VC runtimes and six reference screenshots, but exc
 
 Close the emulator/launcher. Restore **both** executables from the same `_Backup_UpstreamPromotion_<timestamp>` folder, plus `launcher.ps1` if launcher routing changed. The folder contains `ROLLBACK.md`, original scripts/settings and a hash inventory. Do not delete/restore saves or caches merely to roll back binaries, and do not overwrite a published release/tag.
 
-The initial promotion also keeps `kyty_emulator_v20261018_backup.exe` and local Git refs `backup/pre-v20261027-default`, `backup/pre-v20261027-fix`, `backup/pre-v20261024-default`, `backup/pre-v20261024-fix`, `backup/pre-v20261019-promotion-fix` and `backup/pre-v20261019-promotion-default`. To undo a published integration, prepare reviewed revert commits on a new branch rather than resetting shared branches. Retain the old release for recovery.
+The initial promotion also keeps `kyty_emulator_v20261018_backup.exe` and local Git refs `backup/pre-v20261117-default`, `backup/pre-v20261117-fix`, `backup/pre-v20261106-default`, `backup/pre-v20261106-fix`, `backup/pre-v20261027-default`, `backup/pre-v20261027-fix`, `backup/pre-v20261024-default`, `backup/pre-v20261024-fix`, `backup/pre-v20261019-promotion-fix` and `backup/pre-v20261019-promotion-default`. To undo a published integration, prepare reviewed revert commits on a new branch rather than resetting shared branches. Retain the old release for recovery.

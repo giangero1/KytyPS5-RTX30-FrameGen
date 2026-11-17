@@ -1,3 +1,37 @@
+# v2026.11.17-upstream-merge — verified RTX 3070 build
+
+This release packages the **exact locally built and gameplay-verified `a21b6aac` binaries**, built with Clang-CL 19, ThinLTO, retrained PGO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers (`KYTY_FRAMEGEN_STREAMLINE=1`), and the rebuilt graphical launcher `KytyLauncher.exe` (including PR #348's Malwarebytes false-positive fix). `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.
+
+**Shader cache compatibility:** Existing NVIDIA precompiled shaders from `v2026.11.10-upstream-merge` remain 100% valid — no shader recompilation is needed on NVIDIA GPUs.
+
+## Upstream fixes and credits
+
+Thanks to **[chenxiao07/KytyPS5 v20261117](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261117)** (`ce6a27df`, spanning `v20261113`–`v20261117`, 151 commits) and its contributors. Merged cleanly in `a21b6aac`:
+
+- **≤12 GB VRAM Texture Streaming Hitch & RAM Reduction (`v20261113`, #85, credit @brokeneggg)**: The game now streams large block-compressed textures without the top mip levels that ≤12 GB GPUs drop anyway, regardless of host RAM (`KYTY_TEXTURE_REDUCE_GAME=0` restores whole streaming). Upstream 1-hour world-change test (simulated 6 GB VRAM): slow frames `163 → 31`, worst frame `149 → 60 ms`, RAM growth `+384 → +21 MiB/hr`.
+- **Long-Session 0.2–15 s Freeze Fix (`v20261116`)**: Retries guest memory copies interrupted by Windows page faults where Windows cleared upper AVX register halves, eliminating sudden ~100-pipeline recompilation freezes after 1–2.5 hours of play.
+- **Smoother World Transitions & Faster Loads (`v20261116`)**:
+  - **Flip-wait GPU request servicing (`KYTY_SERVE_IN_FLIP_WAITS`)**: GPU thread now services guest memory maps/unmaps/readbacks while waiting for frame flip (`16.2 → 0.9 ms` game-thread waits, world-unload 1% lows `25.6 → 37.2 fps`, world appearance `6.2 → 5.0 s`).
+  - **Windows upload worker priority (`KYTY_UPLOAD_PRIORITY`)**: Eliminates 3–44 ms whole-emulator stalls during area loads (`22 pauses → 0` across 6 loads).
+- **Malwarebytes Launcher False-Positive Fix (`v20261117`, #346 / PR #348, credit @DevList1454)**: `KytyLauncher.exe` now stores embedded keyboard prompt textures uncompressed (~3.3 MB exe) so Malwarebytes ML detection no longer flags it.
+- **Precompiler Live Progress (`v20261116`, #334, credit @shark20619)**: Prints each stage (shader list, plans, shards, merge) with elapsed time and live shard progress.
+- **Xbox Controller View Button → Toolbelt (`v20261113`–`v20261114`, #328 / #332, credit @kms810530-arch)**: View now sends a touch-pad press on the left half so Demon's Souls opens the Toolbelt reliably.
+- **Version `01.005.000` King Allant Fog-Gate Freeze Fix (`v20261113`–`v20261114`, #327, credit @Lukeyrich)**: Loader guard now repairs all 10 pending resource request lists.
+- **PS5 Floating-Point Environment (`v20261113`)**: Guest threads and fibers run with PS5 MXCSR (`FTZ + DAZ`, `-Set KYTY_GUEST_FP_ENV=0` to revert).
+- **Retrained PGO & Parallel Translation (`KYTY_SPECULATE=4`) Overhaul (`v20261113`–`v20261117`, PRs #321, #329, #336–#339, #342, #345, credit @CarpetHead & @Bios2000)**: Retrained PGO profile plus major stability and area-crossing stutter reductions when testing opt-in `KYTY_SPECULATE=4`.
+
+## Preserved RTX 30 integrations
+
+**1920×1080 DLSS → 2560×1440 output + 2× frame generation**, original **3840×2160 UI/HUD canvas (`InterfaceScope`, `InterfaceTransformFor`)**, shared SR/FG frame tokens (`g_upscale_token`), 64 MiB VMA heap sizing, and DXGI VRAM-pressure sampling/cache trimming are strictly retained.
+
+**Automated & gameplay validation:** Passed 8/8 focused CTests (`page_manager`, `demons_souls_output`, `launcher_commands`, `save_data_backup`, `command_scheduler_timeline`, `host_image_allocation`, `texture_cache_depth_readback`, `vulkan_recording`), 10/10 `demons_souls_output_integration_tests` scenarios, and 4/4 `LauncherCommandTests.ps1` permutations. Gameplay verified on RTX 3070 with OpenDLSSG 2× Frame Generation (`status=0x0 presented=2 max_generated=1`) and `KYTY_TEXTURE_REDUCE_GAME` active with zero crashes or errors.
+
+**Installation:** extract the portable ZIP and use `KytyLauncher.exe` or `launcher.cmd`. Standard app/VC runtime DLLs and guides are included. **NVIDIA-signed Streamline and OpenDLSSG Enabler are separate prerequisites**; keep `version.dll` beside the actual emulator executable. Enable Windows HAGS and restart. Game files, saves, and personal settings are excluded.
+
+See the [RTX 30 setup guide](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/RTX30_FRAME_GEN_GUIDE.md) and [safe future-update playbook with a reusable request](https://github.com/giangero1/KytyPS5-RTX30-FrameGen/blob/feature/rtx3070-dlssg/docs/UPSTREAM_UPDATE_PLAYBOOK.md).
+
+---
+
 # v2026.11.10-upstream-merge — verified RTX 3070 build
 
 This release packages the **exact locally built and regression-verified `9e4ff1d3` binaries**, with Clang-CL 19, ThinLTO, AVX2 (`x86-64-v3`), NVIDIA Streamline headers, and the official graphical launcher `KytyLauncher.exe`. `BUILD-INFO.txt` identifies the binary source and the final documentation/packaging commit separately. ZIP and per-file SHA256 checksums are included.

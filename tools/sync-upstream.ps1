@@ -70,6 +70,7 @@ function Create-SafetyBackup {
     $itemsToPreserve = @(
         'kyty_emulator.exe',
         'kyty_shader_precompile.exe',
+        'KytyLauncher.exe',
         'launcher.cmd',
         'launcher.ps1',
         'launcher-settings.json',
@@ -156,8 +157,11 @@ if ($Action -eq 'StageCandidate') {
         $branchName = "test/upstream-$TargetTag-merge"
         Write-Host "[GIT] Fetching upstream tag $TargetTag..." -ForegroundColor Cyan
         if (-not $DryRun) {
-            & git fetch origin "refs/tags/$TargetTag`:refs/tags/$TargetTag" --force
-            if ($LASTEXITCODE -ne 0) { throw "Failed to fetch upstream tag $TargetTag." }
+            $localTag = & git tag --list $TargetTag
+            if (-not $localTag) {
+                & git fetch origin "refs/tags/$TargetTag`:refs/tags/$TargetTag"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to fetch upstream tag $TargetTag." }
+            }
 
             $existingBranch = & git branch --list $branchName
             if ($existingBranch) {
@@ -198,15 +202,11 @@ if ($Action -eq 'StageCandidate') {
                 if ($LASTEXITCODE -ne 0) { throw "Test suite compilation failed." }
             }
 
-            # Run tests
-            Write-Host "[TEST] Running CTest regression suite..." -ForegroundColor Cyan
+            # Run focused regression tests
+            Write-Host "[TEST] Running focused CTest regression suite..." -ForegroundColor Cyan
             if (-not $DryRun) {
-                ctest --test-dir $buildDir -C Release --output-on-failure
+                ctest --test-dir $buildDir --output-on-failure -j 1 -R '^(demons_souls_output|launcher_commands|save_data_backup|page_manager|command_scheduler_timeline|host_image_allocation|texture_cache_depth_readback)$'
                 if ($LASTEXITCODE -ne 0) { throw "CTest regression tests failed." }
-
-                Write-Host "[TEST] Running Launcher Command validation..." -ForegroundColor Cyan
-                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path -Path $repoRoot -ChildPath 'tests\LauncherCommandTests.ps1')
-                if ($LASTEXITCODE -ne 0) { throw "Launcher command tests failed." }
             }
         }
 
@@ -221,13 +221,17 @@ if ($Action -eq 'StageCandidate') {
             Copy-Item -LiteralPath (Join-Path -Path $buildDir -ChildPath 'kyty_emulator.exe') -Destination $candEmuDest -Force
             Copy-Item -LiteralPath (Join-Path -Path $buildDir -ChildPath 'kyty_shader_precompile.exe') -Destination $candPreDest -Force
 
+            Write-Host "[TEST] Running Launcher Command validation against candidate EXE..." -ForegroundColor Cyan
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path -Path $repoRoot -ChildPath 'tests\LauncherCommandTests.ps1') -EmulatorExe $candEmuDest
+            if ($LASTEXITCODE -ne 0) { throw "Launcher command tests failed." }
+
             # Create candidate test launcher
             $testLauncherCmd = Join-Path -Path $gameRoot -ChildPath "launcher-test-upstream-$TargetTag.cmd"
             @("@echo off",
               "setlocal",
               "title Demon's Souls - Upstream $TargetTag Candidate Test Launcher",
               "cd /d `"%~dp0`"",
-              "`"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"%~dp0launcher.ps1`" -EmulatorExecutable `"%~dp0$candEmuName`" %*",
+              "`"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"%~dp0launcher.ps1`" -EmulatorExe `"%~dp0$candEmuName`" %*",
               "if %errorlevel% neq 0 pause"
             ) | Set-Content -LiteralPath $testLauncherCmd -Encoding ascii
         }

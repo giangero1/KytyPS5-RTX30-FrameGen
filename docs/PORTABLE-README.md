@@ -1,10 +1,10 @@
 # KytyPS5 portable test build (Windows)
 
 A Windows test build of the Kyty PS5 emulator. So far it has been tuned only for
-**Demon's Souls (the PS5 remake)**. This `v2026.11.06-upstream-merge` package contains the exact locally built and verified binaries from `06cf66ce` (Clang-CL 19, ThinLTO, AVX2, Streamline headers), from
+**Demon's Souls (the PS5 remake)**. This `v2026.11.17-upstream-merge` package contains the exact locally built and verified binaries from `a21b6aac` (Clang-CL 19, ThinLTO, retrained PGO, AVX2, Streamline headers, and rebuilt `KytyLauncher.exe`), from
 https://github.com/giangero1/KytyPS5-RTX30-FrameGen. `BUILD-INFO.txt` identifies both the binary source and final release commit; verify the external ZIP checksum and internal `SHA256-MANIFEST.txt`.
 
-Thanks to [chenxiao07/KytyPS5 v20261106](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261106) and its contributors for native stereo sound mixing, the Scout thread (+5-11% FPS), NVIDIA empty fragment shader stencil optimization, dynamic 8 GB VRAM budget handling, and F11 swapchain fixes. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
+Thanks to [chenxiao07/KytyPS5 v20261117](https://github.com/chenxiao07/KytyPS5/releases/tag/v20261117) (`ce6a27df`) and its contributors for ≤12 GB VRAM texture-streaming hitch reduction (#85), the long-session Windows AVX freeze fix, smoother world transitions (`KYTY_SERVE_IN_FLIP_WAITS` / `KYTY_UPLOAD_PRIORITY`), the Malwarebytes launcher fix (PR #348), Xbox View → Toolbelt, 1.005 King Allant loader-guard repairs, retrained PGO, and earlier audio/Scout/VRAM improvements. Backups are under `_SaveData/.kyty-backup/PPSA01341/<slot>/`; they complement independent save backups.
 
 The RTX 3070 DLSS/output/UI, shared SR/FG token and VRAM-pressure integrations are preserved. See [release notes](docs/RELEASE-NOTES.md) and the [safe future-update playbook](docs/UPSTREAM_UPDATE_PLAYBOOK.md).
 
