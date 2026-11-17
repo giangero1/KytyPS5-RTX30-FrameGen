@@ -427,8 +427,10 @@ void CommandScheduler::Finish() {
 
 void CommandScheduler::Wait(uint64_t tick) {
 	if (Rec() != nullptr) {
-		// (A recorder's own work is not submitted: waiting for it would never end.)
-		if (tick >= PendingTick) throw RecorderRefusal {"Wait"};
+		// (A recorder's own work is not submitted: waiting for it would never end. Nor is the GPU thread's open command
+		// buffer, or a batch it holds (speculate_batch_submits, a splice): a tick at or past the master semaphore's current
+		// one is submitted only by the GPU thread, which may be waiting for a lock this thread holds (the catalog).)
+		if (tick >= PendingTick || tick >= m_master.CurrentTick()) throw RecorderRefusal {"Wait"};
 		m_master.Wait(tick);
 		return;
 	}
@@ -1141,6 +1143,12 @@ void CommandScheduler::DiscardOne(Recorder& recorder, const Recorder::Recorded& 
 #endif
 	EXIT_NOT_IMPLEMENTED(vk::CommandBuffer {command}.reset() != vk::Result::eSuccess);
 	recorder.buffers[recorded.index].second = 0;
+}
+
+void CommandScheduler::DiscardFirst(Recorder& recorder, size_t count) {
+	EXIT_IF(count > recorder.recorded.size());
+	for (size_t i = 0; i < count; ++i) DiscardOne(recorder, recorder.recorded[i]);
+	recorder.recorded.erase(recorder.recorded.begin(), recorder.recorded.begin() + static_cast<ptrdiff_t>(count));
 }
 
 void CommandScheduler::DiscardRecorded(Recorder& recorder) {

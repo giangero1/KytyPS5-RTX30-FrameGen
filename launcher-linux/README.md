@@ -32,6 +32,7 @@ can ask y/N and for the sudo password.
 | | VSync | `PRESENT_MODE=Fifo` (run_ds.sh's mailbox otherwise) |
 | | Low latency | `KYTY_LOW_LATENCY=1` |
 | Graphics | Upscaler DLSS / FSR 3 | `KYTY_UPSCALER=dlss` / `fsr` |
+| | Upscaler FSR 4 (AMD Radeon, RX 6000 and newer; needs `get-fsr4-linux.sh` and AMD's DLLs, see the main README) | `KYTY_UPSCALER=fsr` and `KYTY_FSR4=1` (FSR 3 when FSR 4 cannot start) |
 | | 3D render height | `KYTY_RENDER_HEIGHT` |
 | | Game output 1080p (or Automatic for a 16:9 window up to 1080 lines) | `KYTY_HD_OUTPUT=1` |
 | | Game output 1440p (with DLSS or FSR 3) | `KYTY_OUTPUT_HEIGHT=1440` |
@@ -51,6 +52,7 @@ can ask y/N and for the sudo password.
 | | Export shader hints | `precompile-linux.sh --export-hints` |
 | Advanced | Performance overlay | `KYTY_FPS_HUD=1` / `2` |
 | | MangoHud | `MANGO=1` / `0` |
+| | GameMode | `GAMEMODE=1` / `0` (run_ds.sh starts the emulator through `gamemoderun`) |
 | | Safe GPU mode | `KYTY_COMPUTE_CHAIN=0` |
 | | Graphics card (more than one) | `KYTY_GPU=<its name>` (the precompile's too) |
 | | Extra options | `KEY=VALUE` (replaces the launcher's; `KEY=` removes it, or sets an emulator default to `0`), `--option value` (replaces the launcher's option of that name; a repeated one such as `--keymap L1=Q --keymap R1=E` keeps each), also the Windows form `-Set A=1,B=2` |

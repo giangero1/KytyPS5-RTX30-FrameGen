@@ -16,6 +16,8 @@
 //   timecensus <seconds>          time-related HLE calls per guest caller (time-census.h)
 //   glide <x> <y> <z> <speed>     Demon's Souls 01.007.000: the player walks there (warp requests, no input)
 //   pad <lx> <ly> <rx> <ry> <buttons> <seconds>   scripted pad input (sticks 0..255, -1 the host's; buttons hex)
+//   where / place <x> <y> <z> <yaw>   the player's position and yaw / the player put there (tools/local/SPIKE-WALK.md)
+//   flipsx <count> <path>         as flips, with the buffer registrations of each frame
 //   screenshot <path>             the next frame shown, read back from the GPU, as a PPM file (screenshot.h)
 //   screenshots <path> <count>    the next <count> frames shown, 320 pixels wide, in one file (the flicker check)
 //   set <name> <value>            a live switch (live-switch.h), e.g. fsr_jitter_mode 1
@@ -78,6 +80,9 @@ inline std::atomic_uint64_t g_flips {0};
 // The steady-clock time (ns) of flip n at [n % FlipTimes], for frame-time percentiles (Measure).
 constexpr size_t             FlipTimes = 8192;
 inline std::atomic<int64_t>  g_flip_times[FlipTimes] {};
+// The buffer registrations counter at flip n at [n % FlipTimes] (live `flipsx`: the spike walk's crossing frame,
+// tools/local/SPIKE-WALK.md). Two relaxed loads and a store a flip.
+inline std::atomic<uint64_t> g_flip_registrations[FlipTimes] {};
 inline std::atomic_bool     g_render_known {false};
 // pthread_t on Linux, a thread HANDLE on Windows (LocalPlatform::CurrentThreadHandle).
 inline uint64_t              g_render_thread {};
@@ -110,6 +115,8 @@ inline void Flip() {
 	                         std::chrono::steady_clock::now().time_since_epoch())
 	                         .count();
 	g_flip_times[flip % FlipTimes].store(flip_ns, std::memory_order_relaxed);
+	g_flip_registrations[flip % FlipTimes].store(LiveCounters::Value(LiveCounters::BufferRegistrations),
+	                                             std::memory_order_relaxed);
 	g_flips.store(flip + 1, std::memory_order_release);
 	// (KYTY_FPS_HUD's frame-time graph: the frame and the render thread's busy part of it.)
 	PerfOverlay::NoteFlip(flip_ns, g_render_idle_ns);
@@ -122,7 +129,8 @@ inline void Flip() {
 		                                     C::ReadbackParts, C::ReadbackRegions, C::GuestCommands, C::TextureUnmaps, C::AsyncPipelines,
 		                                     C::TableDraws, C::TableStores, C::TableStoreVariant, C::TableStoreTargets,
 		                                     C::TableRefusedSets, C::TableNoSet, C::TableDrawNative, C::TableEvaluations,
-		                                     C::TableStoreDeferred};
+		                                     C::TableStoreDeferred, C::AddressSpaceBusyWaitKt, C::AddressSpaceUnmapCallKt,
+		                                     C::AddressSpaceTrimKt};
 		static constexpr const char* waits[] = {"gpu_wait", "readback_wait", "download_wait", "compile", "record_wait"};
 		static std::chrono::steady_clock::time_point     last {};
 		static int64_t                                   last_idle = 0;
@@ -393,7 +401,24 @@ inline void Run(uint64_t id, const std::string& line) {
 				                                                    g_flip_times[(flip - 1) % FlipTimes].load()) / 1000));
 			std::fclose(out);
 		}
-		std::printf("LIVE_FLIPS id=%" PRIu64 " count=%llu path=%s\n", id, static_cast<unsigned long long>(count), arg2);
+		std::printf("LIVE_FLIPS id=%" PRIu64 " count=%llu last=%llu path=%s\n", id, static_cast<unsigned long long>(count),
+		            static_cast<unsigned long long>(last), arg2);
+	} else if (cmd == "flipsx" && n == 3) {
+		// flipsx <count> <path>: as flips, each line the interval (us) and the buffer registrations in it; a header first.
+		const auto last  = g_flips.load();
+		const auto count = std::min<uint64_t>({std::strtoull(arg1, nullptr, 10), FlipTimes - 1, last ? last - 1 : 0});
+		if (auto* out = std::fopen(arg2, "w")) {
+			std::fprintf(out, "frame_us buffer_registrations\n");
+			for (auto flip = last - count; flip < last; ++flip)
+				std::fprintf(out, "%lld %llu\n",
+				             static_cast<long long>((g_flip_times[flip % FlipTimes].load() -
+				                                     g_flip_times[(flip - 1) % FlipTimes].load()) / 1000),
+				             static_cast<unsigned long long>(g_flip_registrations[flip % FlipTimes].load() -
+				                                             g_flip_registrations[(flip - 1) % FlipTimes].load()));
+			std::fclose(out);
+		}
+		std::printf("LIVE_FLIPSX id=%" PRIu64 " count=%llu last=%llu path=%s\n", id, static_cast<unsigned long long>(count),
+		            static_cast<unsigned long long>(last), arg2);
 	} else if ((cmd == "prof" || cmd == "profp" || cmd == "profw") && n == 3) {
 		Profile(id, std::strtod(arg1, nullptr), arg2, cmd == "profp", cmd == "profw");
 	} else if (cmd == "profbg" && n == 3) {
@@ -664,7 +689,71 @@ inline void Run(uint64_t id, const std::string& line) {
 		const bool   parsed  = std::sscanf(line.c_str(), "%*s %d %d %d %d %x %lf", &axes[0], &axes[1], &axes[2], &axes[3],
 		                                   &buttons, &seconds) == 6;
 		if (parsed) Libs::Controller::SetScriptedInput(axes[0], axes[1], axes[2], axes[3], buttons, seconds);
-		std::printf("LIVE_PAD id=%" PRIu64 " ok=%d\n", id, parsed ? 1 : 0);
+		// (flip: the flip count when the input was set, so a reader places it on a flips dump's last=.)
+		std::printf("LIVE_PAD id=%" PRIu64 " ok=%d flip=%llu\n", id, parsed ? 1 : 0,
+		            static_cast<unsigned long long>(g_flips.load(std::memory_order_relaxed)));
+	} else if (cmd == "touch" && n >= 3) {
+		// touch X Y [SECONDS]: the touch pad clicked with a finger at X, Y (0..1 of its width and height) for SECONDS
+		// (0.2 by default), as the keyboard's Backspace and Tab click it (hostInput.cpp).
+		float      x = 0, y = 0;
+		double     seconds = 0.2;
+		const bool parsed  = std::sscanf(line.c_str(), "%*s %f %f %lf", &x, &y, &seconds) >= 2;
+		if (parsed) {
+			Libs::Controller::SetTouchPad(Libs::Controller::HOST_INPUT_CONTROLLER_ID, 0, true, x, y);
+			std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+			Libs::Controller::SetTouchPad(Libs::Controller::HOST_INPUT_CONTROLLER_ID, 0, false, x, y);
+		}
+		std::printf("LIVE_TOUCH id=%" PRIu64 " x=%.3f y=%.3f ok=%d\n", id, x, y, parsed ? 1 : 0);
+	} else if (cmd == "vpad" && n >= 2) {
+		// vpad attach | vpad button <SDL_GameControllerButton> [seconds] | vpad detach: a virtual game controller with
+		// an Xbox Series pad's ids (SDL calls it an Xbox One pad, type 2), to test a pad's path without one (#332:
+		// `vpad button 4` is View).
+		static int           s_index = -1;
+		static SDL_Joystick* s_joy   = nullptr;
+		const std::string_view what  = arg1;
+		bool                   ok    = false;
+		if (what == "attach" && s_joy == nullptr) {
+			SDL_VirtualJoystickDesc desc {};
+			desc.version     = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+			desc.type        = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+			desc.naxes       = SDL_CONTROLLER_AXIS_MAX;
+			desc.nbuttons    = SDL_CONTROLLER_BUTTON_MAX;
+			desc.vendor_id   = 0x045e;
+			desc.product_id  = 0x0b12;
+			desc.button_mask = (1u << SDL_CONTROLLER_BUTTON_MAX) - 1;
+			desc.axis_mask   = (1u << SDL_CONTROLLER_AXIS_MAX) - 1;
+			desc.name        = "Kyty test pad";
+			s_index          = SDL_JoystickAttachVirtualEx(&desc);
+			if (s_index >= 0) s_joy = SDL_JoystickOpen(s_index);
+			ok = s_joy != nullptr;
+		} else if (what == "button" && s_joy != nullptr) {
+			int        button  = 0;
+			double     seconds = 0.2;
+			const bool parsed  = std::sscanf(line.c_str(), "%*s %*s %d %lf", &button, &seconds) >= 1;
+			if (parsed) {
+				SDL_JoystickSetVirtualButton(s_joy, button, 1);
+				std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+				SDL_JoystickSetVirtualButton(s_joy, button, 0);
+			}
+			ok = parsed;
+		} else if (what == "detach" && s_joy != nullptr) {
+			SDL_JoystickClose(s_joy);
+			s_joy = nullptr;
+			ok    = SDL_JoystickDetachVirtual(s_index) == 0;
+		}
+		std::printf("LIVE_VPAD id=%" PRIu64 " %s ok=%d\n", id, arg1, ok ? 1 : 0);
+	} else if (cmd == "where") {
+		// where: the player's position and body yaw (radians: atan2(-dx, -dz); loader/demonsSoulsWarp.h).
+		float      xyz[3] {}, yaw = 0;
+		const bool ok = Loader::DemonsSoulsWarp::PlayerPlace(xyz, &yaw);
+		std::printf("LIVE_WHERE id=%" PRIu64 " ok=%d x=%.4f y=%.4f z=%.4f yaw=%.5f\n", id, ok ? 1 : 0, xyz[0], xyz[1], xyz[2],
+		            yaw);
+	} else if (cmd == "place") {
+		// place X Y Z YAW: the player put there facing YAW (radians), the next frame (loader/demonsSoulsWarp.h).
+		float      x = 0, y = 0, z = 0, yaw = 0;
+		const bool parsed = std::sscanf(line.c_str(), "%*s %f %f %f %f", &x, &y, &z, &yaw) == 4;
+		const bool ok     = parsed && Loader::DemonsSoulsWarp::Place(x, y, z, yaw);
+		std::printf("LIVE_PLACE id=%" PRIu64 " ok=%d x=%.4f y=%.4f z=%.4f yaw=%.5f\n", id, ok ? 1 : 0, x, y, z, yaw);
 	} else if (cmd == "fatal") {
 		// fatal: a fatal error on this thread, the path a crash takes (log, then the process ends).
 		EXIT("live fatal: a test of the fatal-error exit\n");

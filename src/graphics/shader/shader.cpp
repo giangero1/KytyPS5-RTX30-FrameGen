@@ -130,9 +130,46 @@ static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
 // Shader memory read as HashShaderCode reads the code: GPU ownership is byte-exact, CPU protection
 // covers whole pages, so bytes that only share a page with GPU-written data come from the backing (a
 // load would fault on the page and wait for its download). GPU-written bytes are loaded.
+// (A speculation's thread, t_shader_hash_no_fault: a guarded copy instead of a load that can fault into a readback that
+// waits for the GPU thread while the catalog is held; a fault sets t_shader_hash_failed.)
+thread_local bool t_shader_hash_no_fault = false;
+static thread_local bool t_shader_hash_failed = false;
 static void ReadShaderMemory(uint64_t address, void* out, size_t bytes) {
-	if (!LibKernel::Memory::TryReadGpuCleanBackingOnWatchedPage(address, out, bytes))
-		std::memcpy(out, reinterpret_cast<const void*>(address), bytes);
+	if (LibKernel::Memory::TryReadGpuCleanBackingOnWatchedPage(address, out, bytes)) return;
+	if (t_shader_hash_no_fault) {
+		if (!LibKernel::Memory::TryReadGuestNoFault(address, out, bytes)) { // (a read-watched page only through its clean backing)
+			t_shader_hash_failed = true;
+			std::memset(out, 0, bytes);
+		}
+		return;
+	}
+	std::memcpy(out, reinterpret_cast<const void*>(address), bytes);
+}
+
+// The invariant (from two mode 4 freezes): a speculation (non-GPU) thread never takes a fault that needs the GPU thread.
+// A program lookup's guest reads on such a thread (t_shader_hash_no_fault: the code's hash, the AGC metadata, the
+// vertex tables) are guarded copies; one that would fault reads zeros and sets t_shader_read_failed, and the lookup is
+// refused (PipelineCache: "worker set: code unread"). Elsewhere (the GPU thread) a plain load, as before.
+thread_local bool t_shader_read_failed = false;
+bool ShaderReadGuest(void* out, const void* guest, size_t bytes) {
+	if (!t_shader_hash_no_fault) {
+		std::memcpy(out, guest, bytes);
+		return true;
+	}
+	if (LibKernel::Memory::TryReadGuestNoFault(reinterpret_cast<uint64_t>(guest), out, bytes)) return true;
+	t_shader_read_failed = true;
+	std::memset(out, 0, bytes);
+	return false;
+}
+// This file's per-attribute and per-input readers. t_shader_hash_no_fault is set only on a speculation's thread
+// (PrepareNoFault, the table workers' scopes), which runs only while the mode is not 0: mode 0 tests the global and
+// reads in place, as the base (no call, no thread-local).
+static inline bool ReadGuestHere(void* out, const void* guest, size_t bytes) {
+	if (kyty_local_speculate_mode.load(std::memory_order_relaxed) == 0) {
+		std::memcpy(out, guest, bytes);
+		return true;
+	}
+	return ShaderReadGuest(out, guest, bytes);
 }
 
 static uint64_t GetDeclaredShaderHash(uint64_t shader_addr) {
@@ -159,7 +196,13 @@ static uint64_t HashShaderCode(std::span<const uint32_t> code) {
 		        reinterpret_cast<uint64_t>(code.data()), scratch.data(), code.size_bytes())) {
 			return XXH3_64bits(scratch.data(), code.size_bytes());
 		}
+		if (t_shader_hash_no_fault) { // (no load that can fault: the guarded copy, then the hash)
+			if (!LibKernel::Memory::TryReadGuestNoFault(reinterpret_cast<uint64_t>(code.data()), scratch.data(), code.size_bytes()))
+				return t_shader_hash_failed = true, 0;
+			return XXH3_64bits(scratch.data(), code.size_bytes());
+		}
 	}
+	if (t_shader_hash_no_fault) return t_shader_hash_failed = true, 0; // (over 1 MiB: not read on such a thread)
 	return XXH3_64bits(code.data(), code.size_bytes());
 }
 
@@ -178,8 +221,10 @@ static uint64_t ShaderCodeHash(uint64_t shader_addr, std::span<const uint32_t> c
 	auto&      entry      = (*entries)[((shader_addr >> 8u) * 0x9e3779b97f4a7c15ull) >> 51u];
 	const bool known      = entry.addr == shader_addr && entry.generation == generation;
 	if (known && (++entry.uses & 63u) != 0) return entry.hash;
-	const auto declared = GetDeclaredShaderHash(shader_addr);
-	const auto hash     = declared != 0 ? declared : HashShaderCode(code);
+	t_shader_hash_failed = false;
+	const auto declared  = GetDeclaredShaderHash(shader_addr);
+	const auto hash      = declared != 0 ? declared : HashShaderCode(code);
+	if (t_shader_hash_failed) return t_shader_read_failed = true, 0; // (a no-fault read faulted: 0, never cached)
 	if (known && hash != entry.hash) {
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
@@ -205,6 +250,8 @@ static void FillShaderParams(uint64_t shader_addr, const char* label, std::span<
 	params.user_data.assign(user_data.begin(), user_data.end());
 	params.hash      = ShaderCodeHash(shader_addr, code);
 	params.back_code = {};
+	params.code_address = 0;
+	params.code_unread  = false;
 }
 
 uint64_t ShaderHashAt(uint64_t addr) {
@@ -272,7 +319,8 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 	}
 }
 
-static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
+// False: a table word a speculation's thread could not read without a fault (ShaderReadGuest).
+static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
                                        const ShaderSemantic*  input_semantics,
                                        uint32_t num_input_semantics, const uint32_t* attrib,
                                        const uint32_t* buffer) {
@@ -288,16 +336,17 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		uint32_t reg  = in.hardware_mapping;
 		uint32_t size = in.size_in_elements;
 
+		uint32_t word = 0; // (attrib[in.semantic], guest memory)
+		if (!ReadGuestHere(&word, &attrib[in.semantic], sizeof(word))) return false;
 		if (Config::GraphicsDebugDumpEnabled()) {
-			LOGF("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i,
-			     attrib[in.semantic]);
+			LOGF("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, word);
 		}
 
-		size_t index = attrib[in.semantic] & 0x1fu;
+		size_t index = word & 0x1fu;
 		auto   format =
-		    static_cast<Prospero::VertexAttribFormat>((attrib[in.semantic] >> 5u) & 0x1ffu);
-		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
-		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
+		    static_cast<Prospero::VertexAttribFormat>((word >> 5u) & 0x1ffu);
+		uint32_t offset      = (word >> 14u) & 0xfffu;
+		uint32_t fetch_index = (word >> 26u) & 0x1u;
 
 		if (fetch_index != 0) {
 			static std::atomic<uint64_t> log_count = 0;
@@ -311,7 +360,8 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
-		const auto* sharp = &buffer[index * 4];
+		std::array<uint32_t, 4> sharp {}; // (buffer[index * 4], guest memory)
+		if (!ReadGuestHere(sharp.data(), &buffer[index * 4], sizeof(sharp))) return false;
 
 		EXIT_NOT_IMPLEMENTED(info.resources_num >= ShaderVertexInputInfo::RES_MAX);
 
@@ -350,6 +400,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 		info.resources_num++;
 	}
+	return true;
 }
 
 static uint32_t ShaderCalcPsSystemInputBase(const HW::ShaderRegisters& regs) {
@@ -433,9 +484,11 @@ static bool ShaderGetStaticInputInfoVS(const HW::VertexShaderInfo& regs,
 	}
 	ShaderVertexMetadata metadata;
 	std::string          metadata_error;
-	if (!ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, metadata, &metadata_error)) {
-		LOGF("ShaderGetInputInfoVS(): invalid AGC metadata shader=0x%016" PRIx64 ": %s\n",
-		     shader_addr, metadata_error.c_str());
+	if (!ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, metadata, &metadata_error,
+	                              kyty_local_speculate_mode.load(std::memory_order_relaxed) != 0 ? ShaderReadGuest : nullptr)) {
+		if (!t_shader_read_failed)
+			LOGF("ShaderGetInputInfoVS(): invalid AGC metadata shader=0x%016" PRIx64 ": %s\n",
+			     shader_addr, metadata_error.c_str());
 		return false;
 	}
 
@@ -457,8 +510,9 @@ static bool ShaderGetStaticInputInfoVS(const HW::VertexShaderInfo& regs,
 			     shader_addr);
 			return false;
 		}
-		ShaderApplyAttribSemantics(info, metadata.input_semantics.data(),
-		                           metadata.input_semantics_count, attrib, buffer);
+		if (!ShaderApplyAttribSemantics(info, metadata.input_semantics.data(),
+		                                metadata.input_semantics_count, attrib, buffer))
+			return false;
 		ShaderDetectBuffers(info);
 	}
 	return true;
@@ -483,7 +537,8 @@ static void ShaderGetStaticInputInfoPS(
 		ps_info.ps_perspective_center_vgpr = (active_inputs & 0x00000001u) != 0 ? 2u : 0u;
 	}
 	for (uint32_t i = 0; i < data.num_input_semantics && i < ps_info.input_num && i < 32u; i++) {
-		const auto& semantic = data.input_semantics[i];
+		ShaderSemantic semantic {}; // (data.input_semantics[i], guest memory)
+		if (!ReadGuestHere(&semantic, &data.input_semantics[i], sizeof(semantic))) break; // (t_shader_read_failed)
 		if (semantic.is_custom != 0 && semantic.is_f16 == 0) {
 			ps_info.custom_interpolation_mask |= 1u << i;
 		}
@@ -661,6 +716,7 @@ void PrepareProgramInto(const HW::VertexShaderInfo& regs, const HW::Context& con
 	        ? 8 + start_instance : -1;
 	if ((context.GetShaderStages() & 0x20u) == 0) {
 		if (!ShaderGetStaticInputInfoVS(regs, sh, data, info)) {
+			if (t_shader_read_failed) return; // (a speculation's lookup: refused, PipelineCache)
 			EXIT("failed to prepare vertex shader program\n");
 		}
 		info.start_instance_sgpr = start_instance_sgpr;

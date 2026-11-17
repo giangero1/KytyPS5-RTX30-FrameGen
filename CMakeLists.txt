@@ -201,6 +201,18 @@ endif()
 
 config_compiler_and_linker()
 
+# KYTY_PGO_GENERATE's counters: fe, clang's front-end kind, or ir, LLVM's IR-level kind. KYTY_PGO_USE reads either
+# (llvm-profdata files of the two kinds don't merge, so a profile is trained all in one kind).
+set(KYTY_PGO_KIND "fe" CACHE STRING "Instrumented build's profile kind: fe or ir")
+set_property(CACHE KYTY_PGO_KIND PROPERTY STRINGS fe ir)
+if(KYTY_PGO_KIND STREQUAL "ir")
+	set(kyty_pgo_generate_flag -fprofile-generate)
+elseif(KYTY_PGO_KIND STREQUAL "fe")
+	set(kyty_pgo_generate_flag -fprofile-instr-generate)
+else()
+	message(FATAL_ERROR "KYTY_PGO_KIND: fe or ir, not ${KYTY_PGO_KIND}")
+endif()
+
 if(KYTY_CLANG_CL)
 	# The Linux release is built with -O3 -march=native, ThinLTO and a PGO profile; the same for
 	# Windows Release builds (clang-cl + lld-link + llvm-lib).
@@ -225,7 +237,7 @@ if(KYTY_CLANG_CL)
 			message(FATAL_ERROR "KYTY_PGO_GENERATE: clang_rt.profile-x86_64.lib not found next to ${CMAKE_CXX_COMPILER}")
 		endif()
 		list(GET kyty_profile_runtime 0 kyty_profile_runtime)
-		add_compile_options(-fprofile-instr-generate)
+		add_compile_options(${kyty_pgo_generate_flag})
 		add_compile_definitions(KYTY_PGO_GENERATE=1)
 		link_libraries("${kyty_profile_runtime}")
 	elseif(KYTY_PGO_USE)
@@ -237,8 +249,8 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 	option(KYTY_PGO_GENERATE "Instrumented build; the live command `pgo <file>` writes the profile" OFF)
 	set(KYTY_PGO_USE "" CACHE FILEPATH "llvm-profdata output to optimize with (empty: none)")
 	if(KYTY_PGO_GENERATE)
-		add_compile_options(-fprofile-instr-generate)
-		add_link_options(-fprofile-instr-generate)
+		add_compile_options(${kyty_pgo_generate_flag})
+		add_link_options(${kyty_pgo_generate_flag})
 		add_compile_definitions(KYTY_PGO_GENERATE=1)
 	elseif(KYTY_PGO_USE)
 		add_compile_options("-fprofile-instr-use=${KYTY_PGO_USE}" -Wno-profile-instr-unprofiled
@@ -462,6 +474,8 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/anti-lag.cpp"
 	"${KYTY_SOURCE_DIR}/local/fsr-native.h"
 	"${KYTY_SOURCE_DIR}/local/fsr-native.cpp"
+	"${KYTY_SOURCE_DIR}/local/fsr4-linux.h"
+	"${KYTY_SOURCE_DIR}/local/fsr4-linux.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.cpp"
 	"${KYTY_SOURCE_DIR}/local/resource-plan-serial.h"
@@ -1000,6 +1014,24 @@ elseif (LINUX)
 	# code.
 	set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 	             COMPILE_DEFINITIONS KYTY_FRAMEGEN_NGX=1)
+	# FSR 4 (KYTY_FSR4=1, src/local/fsr4-linux.h): AMD's Windows FSR SDK 2.4 DLLs run natively by ffx-vk-linux
+	# (github.com/DuIslingr/ffx-vk-linux, MIT), the library loaded at run time (dlopen): only its headers, and AMD's API
+	# headers it carries (MIT), are used here. get-fsr4-linux.sh checks it out under _Build/deps and builds the library.
+	# The DLLs are the user's, never part of the repository.
+	set(KYTY_FFX_VK_LINUX "${CMAKE_CURRENT_SOURCE_DIR}/_Build/deps/ffx-vk-linux" CACHE PATH
+	    "ffx-vk-linux checkout (its include and third_party/ffx headers) for FSR 4 on Linux")
+	if (EXISTS "${KYTY_FFX_VK_LINUX}/include/ffx_vk_linux.h" AND
+	    EXISTS "${KYTY_FFX_VK_LINUX}/third_party/ffx/api/include/ffx_api.h")
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/fsr4-linux.cpp" APPEND PROPERTY
+		             INCLUDE_DIRECTORIES "${KYTY_FFX_VK_LINUX}/include"
+		             "${KYTY_FFX_VK_LINUX}/third_party/ffx/api/include"
+		             "${KYTY_FFX_VK_LINUX}/third_party/ffx/upscalers/include")
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/fsr4-linux.cpp" APPEND PROPERTY
+		             COMPILE_DEFINITIONS KYTY_FSR4_LINUX=1)
+		message(STATUS "FSR 4 on Linux: ffx-vk-linux headers found in ${KYTY_FFX_VK_LINUX}")
+	else()
+		message(STATUS "FSR 4 on Linux: off (run get-fsr4-linux.sh, then configure again)")
+	endif()
 endif()
 
 clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")

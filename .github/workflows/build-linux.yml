@@ -117,8 +117,9 @@ jobs:
           ```
 
           The launcher prefers the `kyty_emulator` next to it (override with `KYTY_BIN`), opens a
-          1920x1080 window and shows MangoHud when it is installed (`MANGO=1`; `MANGO=0` hides it). The first
+          1920x1080 window and shows MangoHud when it is installed and `MANGO=1` is set (off by default). The first
           launch translates shaders in the background for a minute or two; later launches are faster.
+          `GAMEMODE=1` runs the game through `gamemoderun` when GameMode is installed (off by default).
 
           If the unpacker dropped the files' execute permission ("Permission denied"): `chmod +x kyty_emulator
           kyty_shader_precompile kyty_launcher run_ds.sh precompile-linux.sh get-dlss-linux.sh run-deck.sh`.
@@ -130,6 +131,12 @@ jobs:
           Keep the kernel's own CPU scheduler: the emulator places its threads itself (`KYTY_RENDER_CPUS`), and a
           sched_ext scheduler works against that (`scx_lavd`, which CachyOS suggests for games: about 10% slower on an
           i5-14400, issue #80). A power profile (balanced or performance) made no measurable difference there.
+
+          If the game stalls for up to seconds at a time while it loads textures, with the SSD busy but reading little,
+          the NVMe drive's power saving (APST) may be waking it too slowly: on one PC (issue #343) single 128-512 KiB
+          reads took 0.5-2.4 s with APST on, and the stalls went with it off. The kernel parameter
+          `nvme_core.default_ps_max_latency_us=0` turns APST off (a value such as `5500` keeps only the drive's light
+          sleep states); `cat /sys/module/nvme_core/parameters/default_ps_max_latency_us` shows the current one.
 
           ## Shader precompile (optional)
 

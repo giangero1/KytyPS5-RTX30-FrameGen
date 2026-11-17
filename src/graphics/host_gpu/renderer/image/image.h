@@ -118,7 +118,8 @@ public:
 
 	[[nodiscard]] bool CreateFailed() const noexcept { return m_create_failed; }
 
-	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
+	// `find_only` (spec_worker_sets): an existing view or null, none made (the caller holds the texture cache's lock).
+	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info, bool find_only = false);
 	// A parked image taken back for `image_info` (TextureCache::TakeParkedImage, the same Vulkan image): the state the
 	// constructor gives a new one, but for its Vulkan image, views and barrier state (and serial: the same object).
 	void PrepareReuse(const ImageInfo& image_info);
@@ -431,16 +432,26 @@ public:
 	uint64_t         staged_offset      = 0;
 	uint64_t         staged_serial      = 0;
 	// The barrier state (backing.state, backing.subresource_states, transit_group): changed under this lock, which a
-	// speculative translation's thread reads it under (SpeculativeEntry).
+	// speculative translation's thread reads it under (SpeculativeEntry). state_busy: 0 free, 1 held, 2 held with a
+	// thread asleep on it. A taker that finds it held spins a little, then sleeps (LockStateContended). Under
+	// KYTY_SPECULATE=4 the render thread (above the normal priority) and the speculation's threads share CPUs. Before,
+	// every waiter spun without end. A holder preempted inside this lock (its subresource vector copies allocate) then
+	// waited behind the render thread spinning on its CPU, and the speculation's threads spinning on the others, until
+	// Windows raised it for having been ready ~4 s: mode-4 frames of 1.3-5.7 s, 20 in 43 min of the soak.
 	struct StateLock {
 		explicit StateLock(const Image& owner) noexcept: image(owner) {
-			while (image.state_busy.exchange(true, std::memory_order_acquire)) _mm_pause();
+			uint32_t expected = 0;
+			if (!image.state_busy.compare_exchange_strong(expected, 1, std::memory_order_acquire, std::memory_order_relaxed))
+				image.LockStateContended();
 		}
-		~StateLock() { image.state_busy.store(false, std::memory_order_release); }
+		~StateLock() {
+			if (image.state_busy.exchange(0, std::memory_order_release) == 2) image.state_busy.notify_one();
+		}
 		KYTY_CLASS_NO_COPY(StateLock);
 		const Image& image;
 	};
-	mutable std::atomic<bool> state_busy {false};
+	void LockStateContended() const noexcept;
+	mutable std::atomic<uint32_t> state_busy {0};
 	// RegisterImage calls on this object: a proof names one registration.
 	uint32_t         registrations      = 0;
 	// TextureCache::ViewLevelBytes's last answer: the view's levels (base | count << 8; UINT32_MAX: none yet) and their

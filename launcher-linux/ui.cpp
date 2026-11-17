@@ -233,6 +233,7 @@ LauncherWindow::LauncherWindow(LauncherContext& context, SDL_Renderer* renderer)
 	wanted_taa_     = S().Int("render") > 0 ? S().Int("render") : 1440;
 	wanted_sr_      = S().Int("render_dlss") > 0 ? S().Int("render_dlss") : 1080;
 	dlss_available_ = context_.DlssAvailable();
+	fsr4_available_ = context_.Fsr4Available();
 	LoadGame(game_text_);
 }
 
@@ -1055,6 +1056,12 @@ void LauncherWindow::GraphicsPage() {
 	}
 	upscalers.emplace_back("fsr");
 	upscaler_labels.emplace_back(T("upscaler.fsr"));
+	// (FSR 4 on a Radeon: AMD's DLLs run by ffx-vk-linux, the user's own; listed before they are in place so that the
+	// note says what is missing. A setting made elsewhere stays in the list.)
+	if (context_.amd || S().Str("upscaler") == "fsr4") {
+		upscalers.emplace_back("fsr4");
+		upscaler_labels.emplace_back(T("upscaler.fsr4"));
+	}
 	// (No upscaler and no anti-aliasing: Commands' KYTY_GAME_CONVARS, issue #220.)
 	upscalers.emplace_back("off");
 	upscaler_labels.emplace_back(T("upscaler.off"));
@@ -1062,6 +1069,8 @@ void LauncherWindow::GraphicsPage() {
 	std::string note;
 	if (chosen == "fsr")
 		note = T("upscaler.fsrNote");
+	else if (chosen == "fsr4")
+		note = T(!context_.amd ? "upscaler.fsr4NoAmd" : fsr4_available_ ? "upscaler.fsr4Note" : "upscaler.fsr4Missing");
 	else if (chosen == "off")
 		note = T("upscaler.offNote");
 	else
@@ -1396,6 +1405,16 @@ void LauncherWindow::AdvancedPage() {
 		    }
 	    },
 	    T(context_.HasMangoHud() ? "mangohud.desc" : "mangohud.missing"));
+	Row(
+	    "gamemode",
+	    [&] {
+		    bool value = S().Bool("gamemode") && context_.HasGameMode();
+		    if (Switch("##gamemode", &value, context_.HasGameMode())) {
+			    S().Set("gamemode", value);
+			    Changed();
+		    }
+	    },
+	    T(context_.HasGameMode() ? "gamemode.desc" : "gamemode.missing"));
 	Row("safegpu", [&] { SettingSwitch("##safegpu", "safegpu"); }, T("safegpu.desc"));
 	if (context_.gpus.size() > 1) {
 		Section("advanced.gpu");
@@ -1547,6 +1566,7 @@ std::string LauncherWindow::Summary(std::vector<std::pair<std::string, std::stri
 	const bool dlss        = commands_.Dlss();
 	const auto upscaled_by =
 	    std::string(T(dlss                         ? "summary.dlss"
+	                : commands_.Fsr4()             ? "summary.fsr4"
 	                : commands_.FsrUpscaler()      ? "summary.fsr3"
 	                : S().Str("upscaler") == "off" ? "summary.noAa"
 	                                               : "summary.taa"));
@@ -1582,6 +1602,7 @@ std::string LauncherWindow::Summary(std::vector<std::pair<std::string, std::stri
 	if (S().Bool("vrr_flips")) options.emplace_back(T("summary.vrrFlips"));
 	if (S().Bool("antilag")) options.emplace_back(T("summary.antilag"));
 	if (S().Bool("mangohud") && context_.HasMangoHud()) options.emplace_back(T("summary.mangohud"));
+	if (S().Bool("gamemode") && context_.HasGameMode()) options.emplace_back(T("summary.gamemode"));
 	if (!S().Str("extra_args").empty()) options.emplace_back(T("summary.extra"));
 	auto join = [](const std::vector<std::string>& parts, const char* separator) {
 		std::string out;
@@ -1721,6 +1742,7 @@ void LauncherWindow::CheckStore(bool force) {
 void LauncherWindow::Activated() {
 	CheckStore(false);
 	dlss_available_ = context_.DlssAvailable();
+	fsr4_available_ = context_.Fsr4Available();
 }
 
 void LauncherWindow::Poll() {
@@ -1753,6 +1775,7 @@ void LauncherWindow::Poll() {
 	if (std::chrono::steady_clock::now() - last > std::chrono::seconds(2)) {
 		last            = std::chrono::steady_clock::now();
 		dlss_available_ = context_.DlssAvailable();
+		fsr4_available_ = context_.Fsr4Available(); // (the DLLs copied in while the window is open)
 	}
 }
 

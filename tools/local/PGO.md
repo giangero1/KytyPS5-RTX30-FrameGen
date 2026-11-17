@@ -13,6 +13,8 @@ profile 里改过的函数会因哈希不符而失去 PGO，需要重新训练�
    它在 `_Build\windows-pgogen` 构建插桩版本（`-DKYTY_PGO_GENERATE=ON`），用它跑训练场景
    （基准路线走过去站立、转镜头、走进遗迹、横移），用 live 命令 `pgo <file>` 写出 profile，
    再用 `llvm-profdata merge` 得到 `_Build\pgo\windows\kyty-<日期>.profdata`。
+   插桩版本带 `KYTY_PREFETCH_WAIT=1` 启动：游戏的第一条指令等着色器预取把所有程序翻译完（最多 `KYTY_PREFETCH_WAIT_S` 秒，默认 600，限 1-7200；pgo-train 给 1200），
+   等待结束时计数不清零（日志 `Shader prefetch wait: done`）：模拟器的启动和着色器预取照常计数，和不等待的训练一样；只是游戏在预取完成后才开始，所以没有一帧是在翻译的同时录下的。到 HUD 时日志里缺 `Shader prefetch: all` 或这一行、或等待超时的场景不出 profile。
 2. 把旧的 `kyty.profdata` 另存一份，新文件复制成 `kyty.profdata`；路径不变时 Ninja 不会重编，
    所以先 `cmake --build _Build\windows --target clean` 再 `build-windows.cmd`。
 3. 用 `ab-exe.ps1` 对比旧 profile 的可执行文件（先复制到自己的目录）和新构建。
@@ -98,6 +100,27 @@ SceneGuard、TextureMips 各 1）。在 9af7b0d9 上用 `pgo-multi.ps1` 默认�
 持平（1-1 略好）。17 次启动的日志都是模式 0，没有致命错误。重扫只剩 redZonePatcher.cpp 的 17 个。旧的另存为
 `_Build\pgo\windows\kyty-before-20261110.profdata`。
 
+2026-11-12（台式机）：合并 PR #329 等之后扫描，bufferCache 3、renderDraw 2（表路径）、speculation 1、shader 1 个函数失配
+（另有 redZonePatcher 17）。在 c0652736 上用 `pgo-multi.ps1` 默认的五次运行重新训练，同一份源码对比（A 为 11-10 的 profile，
+B 为新的），abx 两轮 ABBA，120 Hz 上限，每次启动两个 10 秒窗口：
+- 1-1：渲染线程 13.82 → 13.32 ms/帧，fps 69.23 → 73.60（B 的两次都高于 A 的两次）；
+- Latria：12.40 → 12.39 ms，fps 77.88 → 78.55；
+- 1-1 竞技场：8.12 → 8.14 ms，fps 114.12 → 114.07；
+- 1-1 加 `KYTY_SCOUT=0`（6 + 6 次启动）：14.01 → 14.21 ms，fps 69.69 → 68.39，略慢，部分来自场景波动（这个位置慢的那几次
+  启动，每帧写异常多约 30%、上传多约 2 MB，两边都有）。scout 停下的只有核心很少的电脑；Steam Deck 用的是 Linux 的 profile。
+采用新 profile，旧的另存为 `_Build\pgo\windows\kyty-before-20261112.profdata`。
+
+2026-11-17（台式机）：合并 PR #342（1bcf96af，不含它用于验证的 profile 提交）之后，在 7a44a897 上用 `pgo-multi.ps1`
+默认的五次运行（模式 0）重新训练；训练前先清空 `_Build\windows-pgogen` 并删掉 `_Build\ab\pgogen` 里的旧插桩程序，链接失败时
+就不会拿旧程序去训练。这台电脑 11-16 换了 BIOS（微码 0x137），两个不稳的 P 核又开着，所以训练、构建和对比都在进程掩码
+0xFFFFCF 下进行（避开 CPU 4/5）。重扫只剩 redZonePatcher 17 和 graphicsRun 1（训练开关的分支，设计如此）。abx ABBA，
+120 Hz 上限，每次启动两个 10 秒窗口，同一份源码对比（A 为 11-12 的 profile，B 为新的），模式 0：
+- 1-1：渲染线程 13.74 → 14.19 ms/帧，fps 67.20 → 65.28（B1 那次每帧写异常 444，A 两次约 310：这个位置慢的那种启动）；
+- Latria：12.84 → 12.81 ms，fps 74.85 → 74.38；
+- 1-1 竞技场：8.36 → 8.07 ms，fps 112.85 → 114.55。
+另外 1-1 上合并前（3e5ecbfc，11-12 的 profile）对合并后（新 profile）：14.33 → 13.73 ms，fps 66.10 → 68.03（A1 写异常 460）。
+合并加重训后模式 0 没有变慢。采用新 profile，旧的另存为 `_Build\pgo\windows\kyty-before-20261117.profdata`。
+
 ## 推测模式（`KYTY_SPECULATE=4`）
 
 默认的五次训练都在模式 0 下运行，模式 4 自己的路径（推测线程上的翻译和状态遍历、提交检查，以及模式 0 的函数在
@@ -113,3 +136,20 @@ powershell -ExecutionPolicy Bypass -File tools\local\windows\pgo-multi.ps1 -Spec
 （`<存档>+KYTY_SCOUT=0+KYTY_SPECULATE=4`）。`llvm-profdata merge` 把同一函数的计数相加：模式 0 走的函数仍然带着
 模式 0 五次的计数（加上模式 4 里同样经过它们的次数），只在模式 4 运行的函数多了计数。前五个原始 profile 单独合并，
 就是不带 `-Speculate` 的 profile。
+
+## IR 级 profile（`KYTY_PGO_KIND=ir`）
+
+插桩构建默认用 clang 前端的计数（`-fprofile-instr-generate`）。`-DKYTY_PGO_KIND=ir` 改用 LLVM 的 IR 级计数
+（`-fprofile-generate`），计数取在优化器实际看到的代码上。优化构建不用改：`-fprofile-instr-use` 两种都能读，按文件头区分；
+live 命令 `pgo <file>` 也一样。
+
+```
+powershell -ExecutionPolicy Bypass -File tools\local\windows\pgo-multi.ps1 -Kind ir
+```
+
+- 插桩版本建在 `_Build\windows-pgogen-ir`：`KYTY_CMAKE_ARGS` 只在目录第一次配置时生效，已有的 `_Build\windows-pgogen`
+  会一直是前端计数。`pgo-train.ps1` 发现目录里的计数种类不对就不训练。
+- 原始 profile 和合并结果名为 `kyty-ir-<日期>*`。两种 profile 不能合并，换用 IR 要把所有场景重新训练。
+- 过时检查：IR profile 的失配不报 `-Wprofile-instr-out-of-date`，而是 `-Wbackend-plugin` 的
+  "function control flow change detected (hash mismatch)"（构建同样用 `-Wno-backend-plugin` 关掉了），扫描时把它也打开。
+- IR profile 的函数数比前端的少，因为它在早期内联之后才计数，这是正常的。

@@ -133,6 +133,20 @@ vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
 	}
 }
 
+// StateLock found the lock held. A hold copies a few states, so a short spin usually takes it. After that the taker
+// marks the lock (2) and sleeps on it until it is let go. The holder that finds the mark wakes one sleeper, which takes
+// the lock as marked, so a sleeper behind it is woken in turn.
+void Image::LockStateContended() const noexcept {
+	for (uint32_t spin = 0; spin < 256; ++spin) {
+		_mm_pause();
+		uint32_t expected = 0;
+		if (state_busy.load(std::memory_order_relaxed) == 0 &&
+		    state_busy.compare_exchange_weak(expected, 1, std::memory_order_acquire, std::memory_order_relaxed))
+			return;
+	}
+	while (state_busy.exchange(2, std::memory_order_acquire) != 0) state_busy.wait(2, std::memory_order_relaxed);
+}
+
 // A speculative translation's image state (speculation-state.h): its own, from the image's when it first used it;
 // the open segment notes how it found it.
 Spec::ImageEntry* Image::SpeculativeEntry() {
@@ -167,6 +181,9 @@ Spec::ImageEntry* Image::SpeculativeEntry() {
 		// (A GPU buffer write over it before the commit reaches this segment leaves it to be uploaded first: Speculation's
 		// CommitSegments.)
 		entry->found_buffer_modified = IsBufferModified();
+		entry->sample_lo             = UINT32_MAX; // (redo_level_precise: the segment's accesses, from its first)
+		entry->sample_hi             = 0;
+		entry->sample_other          = false;
 		spec->used.push_back(found->second);
 	}
 	return entry;
@@ -181,6 +198,18 @@ const Image::Barriers& Image::GetBarriers(vk::ImageLayout                      d
 	if (range && info.IsVolume()) {
 		range->base_layer  = 0;
 		range->layer_count = 1;
+	}
+	// redo_level_precise (speculation-state.h ImageEntry): every access of a speculation's segment to the image, recorded
+	// whatever the switch (a switch moved mid-translation must not leave a segment's record short).
+	if (entry != nullptr) {
+		if (destination_layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
+		    destination_access == vk::AccessFlags2 {vk::AccessFlagBits2::eShaderRead} && range && range->base_level != 0 &&
+		    range->level_count != 0) {
+			entry->sample_lo = std::min(entry->sample_lo, range->base_level);
+			entry->sample_hi = std::max(entry->sample_hi, range->base_level + range->level_count);
+		} else {
+			entry->sample_other = true;
+		}
 	}
 	const bool partial =
 	    range && (range->base_level != 0 || range->level_count != info.resources.levels ||

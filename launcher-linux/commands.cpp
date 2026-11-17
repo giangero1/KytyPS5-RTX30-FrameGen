@@ -28,6 +28,7 @@ const std::vector<std::string>& GameVariables() {
 	                                             "KYTY_VBLANK",
 	                                             "PRESENT_MODE",
 	                                             "MANGO",
+	                                             "GAMEMODE",
 	                                             "KYTY_PRESENT_ASPECT",
 	                                             "KYTY_LOW_LATENCY",
 	                                             "KYTY_RENDER_HEIGHT",
@@ -37,6 +38,7 @@ const std::vector<std::string>& GameVariables() {
 	                                             "KYTY_FRAMEGEN",
 	                                             "KYTY_FRAMEGEN_BACKEND",
 	                                             "KYTY_UPSCALER",
+	                                             "KYTY_FSR4",
 	                                             "KYTY_HD_OUTPUT",
 	                                             "KYTY_OUTPUT_HEIGHT",
 	                                             "KYTY_GPU",
@@ -121,7 +123,12 @@ bool Commands::Dlss() const {
 }
 
 bool Commands::FsrUpscaler() const {
-	return S().Str("upscaler") == "fsr";
+	const auto upscaler = S().Str("upscaler");
+	return upscaler == "fsr" || upscaler == "fsr4";
+}
+
+bool Commands::Fsr4() const {
+	return S().Str("upscaler") == "fsr4" && context_.Fsr4Available();
 }
 
 int Commands::WindowHeight(const std::string& resolution, bool fullscreen, int display) {
@@ -279,8 +286,12 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	}
 	if (dlss)
 		Put(set, "KYTY_UPSCALER", "dlss");
-	else if (FsrUpscaler())
+	else if (FsrUpscaler()) {
+		// (FSR 4 is FSR upscaling with the emulator told to try AMD's DLLs first: without them, or on a GPU they do not
+		// take, the emulator says so in its log and uses FSR 3.)
 		Put(set, "KYTY_UPSCALER", "fsr");
+		if (Fsr4()) Put(set, "KYTY_FSR4", "1");
+	}
 	// (With DLSS too: its PS5 Pro path then makes the 1080p output, the 3D at most 1080 high.)
 	if (HdOutput())
 		Put(set, "KYTY_HD_OUTPUT", "1");
@@ -316,6 +327,7 @@ Launch Commands::Play(const GameInfo& game, bool direct) const {
 	if (const auto output = S().Str("audio_output"); output == "headphones" || output == "amplifier" || output == "soundbar")
 		Put(set, "KYTY_AUDIO_OUTPUT", output);
 	Put(set, "MANGO", S().Bool("mangohud") && context_.HasMangoHud() ? "1" : "0");
+	Put(set, "GAMEMODE", S().Bool("gamemode") && context_.HasGameMode() ? "1" : "0");
 	Put(set, "KYTY_GAME", S().Str("game"));
 	if (!context_.emulator.empty()) Put(set, "KYTY_BIN", context_.emulator.string());
 

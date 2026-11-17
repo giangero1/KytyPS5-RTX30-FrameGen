@@ -31,6 +31,19 @@ LIVE_FILE = STATE / 'live-commands.txt'
 ENTRIES = ('PPSA01341', '.kyty-capacity', '.kyty-param', '.kyty-backup')
 
 
+def move(source, target):
+    """A rename on the same volume (nothing is deleted). A folder another program holds a moment (WinError 5 on
+    _SaveData/.kyty-backup at a prepare, 11-08 and 11-10) is tried again for up to 10 s before it fails."""
+    for attempt in range(20):
+        try:
+            source.rename(target)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.5)
+
+
 def digest(root):
     files = {}
     for path in sorted(root.rglob('*')):
@@ -44,6 +57,14 @@ def emulator_running():
     out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq kyty_emulator.exe', '/FI', 'STATUS eq RUNNING', '/NH'],
                          capture_output=True, text=True).stdout
     return 'kyty_emulator.exe' in out
+
+
+def baseline_present():
+    # (A missing baseline installed nothing and still said so: the game then booted with no save and waited at a dark
+    # screen until the bench gave up, 11-14.) Checked by reset, which installs the run's baseline: prepare only puts the
+    # user's save aside (session-start.ps1 and autotour.ps1 call it before they name the baseline).
+    if not (BASELINE / 'PPSA01341').is_dir():
+        sys.exit(f'no baseline save at {BASELINE} (its PPSA01341 folder is missing); nothing changed')
 
 
 def prepare():
@@ -62,12 +83,12 @@ def prepare():
             source = SAVES / name
             if source.exists():
                 manifest['entries'][name] = digest(source) if source.is_dir() else None
-                source.rename(backup / name)  # a move on the same volume: nothing is deleted
+                move(source, backup / name)
                 moved.append(name)
     except OSError:
         # (A folder another program holds, e.g. 10-20 .kyty-capacity: the ones moved go back, the user's save in place.)
         for name in reversed(moved):
-            (backup / name).rename(SAVES / name)
+            move(backup / name, SAVES / name)
         backup.rmdir()
         raise
     for name in ENTRIES:
@@ -80,6 +101,7 @@ def prepare():
 
 def reset():
     """Fresh baseline save for the next run (the game autosaves over it while playing)."""
+    baseline_present()
     if emulator_running():
         sys.exit('an emulator process is running; close it first')
     if not (STATE / 'active.json').exists():
@@ -88,7 +110,7 @@ def reset():
     used.mkdir(parents=True)
     for name in ENTRIES:
         if (SAVES / name).exists():
-            (SAVES / name).rename(used / name)
+            move(SAVES / name, used / name)
         if (BASELINE / name).exists():
             shutil.copytree(BASELINE / name, SAVES / name)
     print('baseline save reinstalled')
@@ -109,33 +131,39 @@ def restore():
     used.mkdir(parents=True, exist_ok=True)
     for name in ENTRIES:
         if (SAVES / name).exists():
-            (SAVES / name).rename(used / name)  # the benchmark's copy is kept, not deleted
+            move(SAVES / name, used / name)  # the benchmark's copy is kept, not deleted
     for name, files in manifest['entries'].items():
-        (backup / name).rename(SAVES / name)
+        move(backup / name, SAVES / name)
         if files is not None and digest(SAVES / name) != files:
             sys.exit(f'restored {name} does not match its manifest')
-    active.rename(STATE / f'restored-{manifest["stamp"]}.json')
+    move(active, STATE / f'restored-{manifest["stamp"]}.json')
     print(f'user save restored and verified ({sum(len(f or {}) for f in manifest["entries"].values())} files)')
 
 
 IMAGE_BASE = 0x140000000  # kyty_emulator.exe links with /DYNAMICBASE:NO
 
 
-def symbol_address(name):
-    """Runtime address of a global from the lld map (RVA + fixed image base)."""
+def symbol_address(name, required=True):
+    """Runtime address of a global from the lld map (RVA + fixed image base); None when it has none and not required."""
     map_file = next((ROOT / '_Build/windows').glob('kyty_emulator_*.map'))
     for line in map_file.open(errors='replace'):
         fields = line.split()
         if len(fields) >= 4 and fields[-1] == name:
             return IMAGE_BASE + int(fields[0], 16)
+    if not required:
+        return None
     sys.exit(f'{name} not found in {map_file}')
 
 
 def expand(line):
-    # "set NAME VALUE" -> "poke32 <address> <hex value>" (a 32-bit switch such as kyty_local_*).
+    # "set NAME VALUE" -> "poke32 <address> <hex value>" for a 32-bit global such as kyty_local_*; a name the map does
+    # not have goes to the emulator as it is: its own `set`, a live switch (src/local/live-switch.h). (Before 11-14 such
+    # a line ended this script before anything was sent: an A/B toggling a live switch through it never toggled it.)
     parts = line.split()
     if len(parts) == 3 and parts[0] == 'set':
-        return f'poke32 {symbol_address(parts[1]):x} {int(parts[2], 0):x}'
+        address = symbol_address(parts[1], required=False)
+        if address is not None:
+            return f'poke32 {address:x} {int(parts[2], 0):x}'
     return line
 
 

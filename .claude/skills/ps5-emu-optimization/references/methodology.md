@@ -21,6 +21,10 @@
 
 - **Same process, live switch, alternating** (A B A B, 4-6 rounds of 5-8 s at a fixed spot); accept when every B
   window beats every A window. Within-run noise +-0.1-0.3 fps; render ms of one 10 s window +-1 ms.
+- **Prove the switch moved** before reading the numbers: the log's `LIVE_SET <name>=<v> ok=1` for a live switch, a
+  counter only one side touches, or a screenshot. Until 11-14 the bench tool's `set` silently dropped every live-switch
+  name (it only poked map globals), and two "flat" A/Bs (barrier scopes, an unsafe drain ceiling) had measured the same
+  setting twice. A ceiling that moves nothing, an unsafe skip included, is a reason to check the toggle first.
 - **Cross-boot is noisy**: one view 55.7 vs 60 fps across boots; whole sweeps differ ~7% per world. Needed for things
   that cannot be poked (layouts, build changes): >=2 boots per side, alternate exes (`-Exe` from a copied dir).
 - **Effects under 3%**: compare census per call (us per draw/dispatch/phase), not fps. Under ~0.5%: profile share.
@@ -59,7 +63,10 @@
 - Memory-level parallelism: misses overlap; removing sampled lookups often leaves per-call cost unchanged. Expect it
   whenever per-item cost is latency (cold tables, guest pages, TLB).
 - In-process samplers distort what they measure (thread suspension made 0.5-1.8 s walk frames, let game threads take
-  the render CPUs); judge hitches unprofiled, sample with a bounded external unwinder.
+  the render CPUs); judge hitches unprofiled, sample with a bounded external unwinder. Worst case: a thread that holds
+  locks across system calls (the upload worker: the address space's lock shared, a region's spin lock) suspended at
+  4 kHz stalls every writer and then every reader - 0-3 slow frames per world change unprofiled became 12-39, with
+  frames of 1.5-35 s. Compare the hitch counts of profiled and unprofiled rounds before reading a hitch profile.
 - Diagnostics leak cost: TEMP counters slowed a day of A/Bs; stdout writes blocked ~6 ms (async stdout pipe);
   census scopes inflate small phases ~10x. Off = one relaxed load; keep them in an uncommitted diag set.
 - Worker "busy" is mostly spin; a worker is a wall only if the critical thread waits on it.
